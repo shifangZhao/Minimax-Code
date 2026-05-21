@@ -4,7 +4,7 @@ AI 驱动的桌面端代码编辑器，基于 [Tauri 2](https://tauri.app/) + Vu
 
 ## 功能特性
 
-- **多智能体协作** — Front（前端）、Plan（规划）、Work（编码）、Review（审查）、Explore（探索）五种 Agent 模式，各司其职
+- **多智能体协作** — Front、Plan、Work、Review、Explore 五种 Agent 视图，各司其职
 - **流式对话** — 实时流式 AI 对话，支持 Markdown 渲染和代码高亮
 - **MCP 协议** — 内置 Model Context Protocol 客户端，可接入本地/远程 MCP Server 扩展能力
 - **LSP 集成** — Language Server Protocol 支持，提供代码智能补全和诊断
@@ -59,7 +59,7 @@ npm run tauri build
 
 1. 启动后在设置面板填入 MiniMax API Key
 2. 设置工作目录（Workspace），Agent 将在此目录下进行文件操作
-3. 通过顶部 Tab 切换不同 Agent 模式：
+3. 通过顶部 Tab 切换不同 Agent 视图：
    - **Front** — 前端开发
    - **Plan** — 技术方案规划
    - **Work** — 通用编码执行
