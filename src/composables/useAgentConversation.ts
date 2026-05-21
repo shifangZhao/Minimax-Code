@@ -31,13 +31,16 @@ export interface AssistantMessage {
 }
 
 interface RustStreamEvent {
-  type: 'content_block_delta' | 'tool_start' | 'tool_end' | 'done' | 'error'
+  type: 'content_block_delta' | 'tool_start' | 'tool_end' | 'done' | 'error' | 'cache_usage'
   content?: string
   thinking?: string
   tool?: string
   tool_id?: string
   input?: Record<string, any>
   result?: string
+  cache_hit_tokens?: number
+  cache_miss_tokens?: number
+  cache_hit_ratio?: number
 }
 
 export function useAgentConversation(agentType: string) {
@@ -48,32 +51,10 @@ export function useAgentConversation(agentType: string) {
   const pendingAsk = ref<any>(null)
   const toolEvents = ref<ToolEvent[]>([])
 
-  let refreshInterval: ReturnType<typeof setInterval> | null = null
   // Per-session stream listeners for multi-group-chat support
   const streamListeners = new Map<number, UnlistenFn>()
   // Per-session loading state
   const loadingSessions = new Set<number>()
-
-  function startPolling() {
-    if (refreshInterval) return
-    refreshInterval = setInterval(async () => {
-      if (sessionId.value && !loading.value) {
-        const msgs = await db.getMessages(sessionId.value)
-        const latestId = msgs.length > 0 ? msgs[msgs.length - 1].id : 0
-        const currentLatestId = messages.value.length > 0 ? messages.value[messages.value.length - 1].id : 0
-        if (latestId > currentLatestId) {
-          messages.value = msgs
-        }
-      }
-    }, 3000)
-  }
-
-  function stopPolling() {
-    if (refreshInterval) {
-      clearInterval(refreshInterval)
-      refreshInterval = null
-    }
-  }
 
   let agentInvokedUnlisten: UnlistenFn | null = null
   let askUnlisten: UnlistenFn | null = null
@@ -94,27 +75,23 @@ export function useAgentConversation(agentType: string) {
       const { target_agent, session_id, group_chat_id } = event.payload
       if (target_agent !== agentType) return
 
+      // Skip if already on this session (prevents duplicate DB load)
+      if (sessionId.value === session_id) return
+
       console.log('[agent_invoked]', agentType, 'invoked, switching to session:', session_id, 'group:', group_chat_id)
 
-      // Switch to the invoked session
       currentGroupChatId.value = group_chat_id
       sessionId.value = session_id
 
-      // Load existing messages for this session (user message already saved by backend)
       await loadMessages()
-
-      // Note: streaming and DB saving are handled by App.vue's global listener
-      // This composable just switches context and polls for new messages
     })
   }
 
   onMounted(() => {
-    startPolling()
     setupAgentInvokedListener()
     setupAskListener()
   })
   onUnmounted(() => {
-    stopPolling()
     for (const [_, ul] of streamListeners) {
       ul()
     }
@@ -163,18 +140,24 @@ export function useAgentConversation(agentType: string) {
       if (msg.role === 'user') {
         history.push({
           role: 'user',
-          content: msg.content
+          content: msg.content,
+          raw_json: (msg as any).raw_json || undefined
         })
       } else if (msg.role === 'assistant') {
-        const assistantData = msg as any
-        // Assistant message: content 是文本
         history.push({
           role: 'assistant',
-          content: assistantData.content || ''
+          content: msg.content || '',
+          tool_calls: msg.tool_calls || undefined,
+          thinking: msg.thinking || undefined,
+          raw_json: (msg as any).raw_json || undefined
         })
-
-        // 如果有 tool_result，需要发回给模型
-        // 注意：这部分应该在调用前添加，而不是从数据库加载
+      } else if ((msg as any).role === 'tool' || (msg as any).raw_json) {
+        // Tool result messages (stored as user role with tool_result content blocks)
+        history.push({
+          role: 'user',
+          content: msg.content,
+          raw_json: (msg as any).raw_json || undefined
+        })
       }
     }
 
@@ -342,6 +325,11 @@ export function useAgentConversation(agentType: string) {
         case 'done':
           isDone = true
           break
+        case 'cache_usage':
+          console.log(
+            `[cache] session=${finalSessionId} hit=${ev.cache_hit_tokens} miss=${ev.cache_miss_tokens} ratio=${((ev.cache_hit_ratio || 0) * 100).toFixed(1)}%`
+          )
+          break
         case 'error':
           hasError = true
           fullText += `\n\nError: ${ev.content}`
@@ -407,14 +395,8 @@ export function useAgentConversation(agentType: string) {
         assistantMsg.tool_calls = collectedToolCalls
       }
 
-      // Save assistant message to DB (with tool_calls if any)
-      // Store fullText without 💭 prefix, displayMessages will handle formatting
-      const toolCallsJson = collectedToolCalls.length > 0
-        ? JSON.stringify(collectedToolCalls)
-        : undefined
-      await db.addMessage(finalSessionId, 'assistant', fullText, toolCallsJson, fullThinking)
-
-      // Reload messages from DB first, then clear stream state
+      // Backend now persists assistant messages (with raw_json for cache).
+      // Reload from DB to pick up backend-saved messages, then clear stream state.
       await loadMessages()
       updateStreamState(finalSessionId, {
         text: '',

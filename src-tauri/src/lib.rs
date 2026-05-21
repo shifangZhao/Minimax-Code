@@ -65,6 +65,8 @@ pub struct ChatMessage {
     pub thinking: Option<String>,  // thinking content
     #[serde(default)]
     pub attachments: Option<String>,  // JSON array of {name, path, kind}
+    #[serde(default)]
+    pub raw_json: Option<String>,  // full JSON of content block array for cache preservation
     pub created_at: String,
 }
 
@@ -177,11 +179,11 @@ fn get_agent_sessions(state: State<AppState>, group_chat_id: i64, agent_type: St
 // ========== Chat Message Commands ==========
 
 #[tauri::command]
-fn add_message(state: State<AppState>, session_id: i64, role: String, content: String, tool_calls: Option<String>, thinking: Option<String>, attachments: Option<String>) -> Result<i64, String> {
+fn add_message(state: State<AppState>, session_id: i64, role: String, content: String, tool_calls: Option<String>, thinking: Option<String>, attachments: Option<String>, raw_json: Option<String>) -> Result<i64, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     conn.execute(
-        "INSERT INTO chat_message (session_id, role, content, tool_calls, thinking, attachments) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params![session_id, role, content, tool_calls, thinking, attachments],
+        "INSERT INTO chat_message (session_id, role, content, tool_calls, thinking, attachments, raw_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![session_id, role, content, tool_calls, thinking, attachments, raw_json],
     ).map_err(|e| e.to_string())?;
     Ok(conn.last_insert_rowid())
 }
@@ -190,10 +192,10 @@ fn add_message(state: State<AppState>, session_id: i64, role: String, content: S
 fn get_messages(state: State<AppState>, session_id: i64) -> Result<Vec<ChatMessage>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn.prepare(
-        "SELECT id, session_id, role, content, tool_calls, thinking, attachments, created_at FROM chat_message WHERE session_id = ?1 ORDER BY created_at ASC"
+        "SELECT id, session_id, role, content, tool_calls, thinking, attachments, raw_json, created_at FROM chat_message WHERE session_id = ?1 ORDER BY created_at ASC"
     ).map_err(|e| e.to_string())?;
     let messages = stmt.query_map([session_id], |row| {
-        let created_at: String = row.get(7)?;
+        let created_at: String = row.get(8)?;
         Ok(ChatMessage {
             id: row.get(0)?,
             session_id: row.get(1)?,
@@ -202,6 +204,7 @@ fn get_messages(state: State<AppState>, session_id: i64) -> Result<Vec<ChatMessa
             tool_calls: row.get(4)?,
             thinking: row.get(5)?,
             attachments: row.get(6)?,
+            raw_json: row.get(7)?,
             created_at: created_at.replace(' ', "T") + "Z",
         })
     }).map_err(|e| e.to_string())?
@@ -1534,6 +1537,17 @@ pub fn run() {
     if !has_attachments {
         conn.execute("ALTER TABLE chat_message ADD COLUMN attachments TEXT DEFAULT NULL", [])
             .expect("Failed to add attachments column");
+    }
+
+    // Migration: add raw_json column for cache-aware interleaved message reconstruction
+    let has_raw_json: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('chat_message') WHERE name='raw_json'",
+        [],
+        |row| row.get::<_, i32>(0)
+    ).unwrap_or(0) > 0;
+    if !has_raw_json {
+        conn.execute("ALTER TABLE chat_message ADD COLUMN raw_json TEXT DEFAULT NULL", [])
+            .expect("Failed to add raw_json column");
     }
 
     conn.execute(

@@ -21,6 +21,7 @@ export interface ChatMessage {
   thinking?: string
   tool_calls?: string
   attachments?: string  // JSON array of {name, path, kind}
+  raw_json?: string  // full JSON of content block array for cache-aware reconstruction
   created_at: string
 }
 
@@ -53,8 +54,8 @@ export const db = {
     return invoke('get_agent_sessions', params)
   },
 
-  async addMessage(sessionId: number, role: string, content: string, toolCalls?: string, thinking?: string, attachments?: string): Promise<number> {
-    return invoke('add_message', { sessionId, role, content, toolCalls: toolCalls || null, thinking: thinking || null, attachments: attachments || null })
+  async addMessage(sessionId: number, role: string, content: string, toolCalls?: string, thinking?: string, attachments?: string, rawJson?: string): Promise<number> {
+    return invoke('add_message', { sessionId, role, content, toolCalls: toolCalls || null, thinking: thinking || null, attachments: attachments || null, rawJson: rawJson || null })
   },
 
   async getMessages(sessionId: number): Promise<ChatMessage[]> {

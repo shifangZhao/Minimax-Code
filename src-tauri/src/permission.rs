@@ -192,19 +192,8 @@ impl PermissionService {
 
         match self.mode {
             PermissionMode::Full => {
-                // Everything allowed silently
-                // Except: sensitive path writes are always blocked
-                if let Some(fp) = file_path {
-                    if is_sensitive_path(fp) && is_write_tool(tool) {
-                        return Some(Err(format!("Blocked: {} matches sensitive path pattern", fp)));
-                    }
-                }
-                // Also block obviously dangerous command patterns
-                if let Some(cmd) = command {
-                    if self.has_dangerous_args(cmd) && is_write_tool(tool) {
-                        return None; // Ask even in Full mode for dangerous commands
-                    }
-                }
+                // Everything allowed silently — always_denied handles the truly dangerous
+                // (rm -rf, force-push main, system paths)
                 Some(Ok(()))
             }
             PermissionMode::Normal => {

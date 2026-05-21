@@ -46,8 +46,9 @@ fn estimate_tokens(messages: &[Value]) -> usize {
 }
 
 /// Compress api_messages in-place when token budget exceeds 80%.
-/// Always keeps system message (index 0) and the last N messages.
+/// Always keeps the first message (oldest history) and the last N messages.
 /// Middle messages are replaced with a single summary user message.
+/// Note: system prompt is sent as top-level `system` field, not in messages.
 pub fn compress_context(agent_type: &str, messages: &mut Vec<Value>) {
     let tokens = estimate_tokens(messages);
     let threshold = (MAX_CONTEXT_TOKENS as f64 * COMPRESS_THRESHOLD) as usize;
@@ -70,14 +71,14 @@ pub fn compress_context(agent_type: &str, messages: &mut Vec<Value>) {
     }
 
     let split_idx = messages.len() - keep_recent;
-    let system_msg = messages[0].clone();
+    let first_msg = messages[0].clone();
     let recent: Vec<Value> = messages[split_idx..].to_vec();
 
     // Build summary from middle messages
     let summary = build_summary(agent_type, &messages[1..split_idx]);
 
     messages.clear();
-    messages.push(system_msg);
+    messages.push(first_msg);
     messages.push(serde_json::json!({
         "role": "user",
         "content": summary

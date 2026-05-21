@@ -62,6 +62,21 @@
       @submit="handleAskSubmit"
       @cancel="handleAskCancel"
     />
+    <div v-if="permRequests.length > 0" class="perm-panels">
+      <div class="perm-card" v-for="req in permRequests" :key="req.id">
+        <div class="perm-header">权限确认 — {{ req.tool }}</div>
+        <div class="perm-body">
+          <p class="perm-reason" v-if="req.reason">{{ req.reason }}</p>
+          <p class="perm-file" v-if="req.file">文件: {{ req.file }}</p>
+          <p class="perm-cmd" v-if="req.command">$ {{ req.command }}</p>
+        </div>
+        <div class="perm-actions">
+          <button class="perm-allow" @click="respondPerm(req, 'allow', true)">总是允许</button>
+          <button class="perm-once" @click="respondPerm(req, 'allow', false)">允许一次</button>
+          <button class="perm-deny" @click="respondPerm(req, 'deny', false)">拒绝</button>
+        </div>
+      </div>
+    </div>
     <div v-if="attachedFiles.length > 0" class="attach-preview">
       <div v-for="(f, idx) in attachedFiles" :key="idx" class="attach-item">
         <span class="preview-file-icon">{{ f.kind === 'image' ? '🖼' : '📄' }}</span>
@@ -69,7 +84,7 @@
         <button class="preview-remove" @click="removeAttachment(idx)" title="移除">✕</button>
       </div>
     </div>
-    <div class="input-area" v-if="agentType === 'front' && !pendingAsk">
+    <div class="input-area" v-if="agentType === 'front'">
       <button class="attach-btn" @click="onAttachment" title="添加附件">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
       </button>
@@ -93,6 +108,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { useAgentConversation } from '../composables/useAgentConversation'
 import { useGlobalStreaming } from '../composables/useGlobalStreaming'
+import { usePermissions } from '../composables/usePermissions'
 import { usePacedText } from '../composables/usePacedText'
 import { renderMarkdown } from '../composables/useMarkdown'
 import AskDialog from '../components/AskDialog.vue'
@@ -119,6 +135,7 @@ const {
 } = useAgentConversation(props.agentType)
 
 const { globalStreamingStates } = useGlobalStreaming()
+const { permRequests, respond: respondPerm } = usePermissions()
 
 const messagesEl = ref<HTMLElement>()
 const inputText = ref('')
@@ -1050,5 +1067,80 @@ onDeactivated(() => {
 .confirm-btn {
   background: var(--btn-run);
   color: white;
+}
+
+/* Permission panels — inline layers above input */
+.perm-panels {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 12px;
+}
+
+.perm-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.perm-header {
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.perm-body {
+  padding: 6px 10px;
+}
+
+.perm-reason {
+  font-size: 12px;
+  color: var(--text-primary);
+  margin: 0 0 4px;
+}
+
+.perm-file, .perm-cmd {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin: 0;
+  font-family: monospace;
+}
+
+.perm-actions {
+  display: flex;
+  gap: 4px;
+  padding: 5px 10px;
+  border-top: 1px solid var(--border-color);
+  justify-content: flex-end;
+}
+
+.perm-allow, .perm-once, .perm-deny {
+  padding: 3px 10px;
+  border: none;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.perm-allow {
+  background: var(--accent);
+  color: white;
+}
+
+.perm-once {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.perm-deny {
+  background: #dc3545;
+  color: white;
+}
+
+.perm-allow:hover, .perm-once:hover, .perm-deny:hover {
+  opacity: 0.85;
 }
 </style>

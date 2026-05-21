@@ -1,69 +1,54 @@
 <template>
-  <div class="ask-overlay" @click.self="onCancel">
-    <div class="ask-dialog">
-      <div class="dialog-header">
-        <div class="question-tabs">
-          <button
-            v-for="(q, index) in questions"
-            :key="q.id"
-            class="tab"
-            :class="{ active: currentIndex === index }"
-            @click="currentIndex = index"
+  <div class="ask-panel">
+    <div class="dialog-header">
+      <div class="question-tabs">
+        <button
+          v-for="(q, index) in questions"
+          :key="q.id"
+          class="tab"
+          :class="{ active: currentIndex === index }"
+          @click="currentIndex = index"
+        >
+          {{ index + 1 }}
+        </button>
+      </div>
+      <button class="close-btn" @click="onCancel" title="取消">✕</button>
+    </div>
+
+    <div class="dialog-body">
+      <div class="question-content" v-if="currentQuestion">
+        <div class="question-text">{{ currentQuestion.question }}</div>
+
+        <div class="options">
+          <label
+            v-for="opt in currentQuestion.options"
+            :key="opt.id"
+            class="option"
+            :class="{ selected: isSelected(opt.id) }"
+            @click="toggleOption(opt.id)"
           >
-            问题 {{ index + 1 }}
-          </button>
+            <span class="radio">{{ isSelected(opt.id) ? (currentQuestion?.multi_select ? '☑' : '●') : (currentQuestion?.multi_select ? '☐' : '○') }}</span>
+            <span class="option-text">{{ opt.text }}</span>
+          </label>
         </div>
-        <button class="close-btn" @click="onCancel">✕</button>
-      </div>
 
-      <div class="dialog-body">
-        <div class="question-content" v-if="currentQuestion">
-          <div class="question-text">{{ currentQuestion.question }}</div>
-
-          <div class="options">
-            <label
-              v-for="opt in currentQuestion.options"
-              :key="opt.id"
-              class="option"
-              :class="{ selected: isSelected(opt.id) }"
-            >
-              <input
-                type="checkbox"
-                :checked="isSelected(opt.id)"
-                @change="toggleOption(opt.id)"
-              />
-              <span class="checkbox">{{ isSelected(opt.id) ? '☑' : '☐' }}</span>
-              <span class="option-text">{{ opt.text }}</span>
-            </label>
-          </div>
-
-          <div class="free-input">
-            <label>其他意见：</label>
-            <input
-              type="text"
-              v-model="freeTexts[currentQuestion.id]"
-              placeholder="输入您的想法..."
-            />
-          </div>
+        <div class="free-input">
+          <input
+            type="text"
+            v-model="freeTexts[currentQuestion.id]"
+            placeholder="其他意见..."
+          />
         </div>
       </div>
+    </div>
 
-      <div class="dialog-footer">
-        <button
-          class="nav-btn"
-          :disabled="currentIndex === 0"
-          @click="currentIndex--"
-        >
-          &lt; 上一个
-        </button>
-        <button
-          class="nav-btn"
-          :disabled="currentIndex === questions.length - 1"
-          @click="currentIndex++"
-        >
-          下一个 &gt;
-        </button>
-        <button class="submit-btn" @click="onSubmit">提交回答</button>
+    <div class="dialog-footer">
+      <div class="footer-left">
+        <span class="step-hint">{{ currentIndex + 1 }} / {{ questions.length }}</span>
+      </div>
+      <div class="footer-right">
+        <button class="cancel-btn" @click="onCancel">取消</button>
+        <button class="submit-btn" @click="onSubmit">提交</button>
       </div>
     </div>
   </div>
@@ -88,7 +73,6 @@ const freeTexts = ref<Record<string, string>>({})
 
 const currentQuestion = computed(() => props.questions[currentIndex.value])
 
-// Initialize state
 watch(() => props.questions, () => {
   const sel: Record<string, string[]> = {}
   const texts: Record<string, string> = {}
@@ -114,7 +98,12 @@ function toggleOption(optId: string) {
   if (idx >= 0) {
     arr.splice(idx, 1)
   } else {
-    arr.push(optId)
+    if (q.multi_select) {
+      arr.push(optId)
+    } else {
+      // Single-select: replace
+      arr.splice(0, arr.length, optId)
+    }
   }
 }
 
@@ -133,34 +122,19 @@ function onCancel() {
 </script>
 
 <style scoped>
-.ask-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(0, 0, 0, 0.5);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
-}
-
-.ask-dialog {
+.ask-panel {
   background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
   border-radius: 12px;
-  width: 500px;
-  max-height: 80vh;
-  display: flex;
-  flex-direction: column;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  margin: 0 12px;
+  overflow: hidden;
 }
 
 .dialog-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 16px;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--border-color);
 }
 
@@ -170,13 +144,17 @@ function onCancel() {
 }
 
 .tab {
-  padding: 6px 12px;
+  width: 24px;
+  height: 24px;
   border: none;
   background: var(--bg-tertiary);
   color: var(--text-secondary);
   border-radius: 4px;
-  font-size: 13px;
+  font-size: 12px;
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .tab.active {
@@ -185,89 +163,89 @@ function onCancel() {
 }
 
 .close-btn {
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   border: none;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 16px;
+  font-size: 14px;
   cursor: pointer;
   border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .close-btn:hover {
   background: var(--bg-tertiary);
+  color: var(--text-primary);
 }
 
 .dialog-body {
-  flex: 1;
-  padding: 20px 24px;
-  overflow-y: auto;
+  padding: 12px 14px;
 }
 
 .question-text {
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 500;
   color: var(--text-primary);
-  margin-bottom: 16px;
+  margin-bottom: 10px;
 }
 
 .options {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  margin-bottom: 20px;
+  gap: 6px;
+  margin-bottom: 10px;
 }
 
 .option {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
+  gap: 8px;
+  padding: 6px 10px;
   background: var(--bg-tertiary);
-  border-radius: 8px;
+  border-radius: 6px;
   cursor: pointer;
   transition: background 0.15s;
 }
 
 .option:hover {
-  background: var(--bg-primary);
+  background: var(--bg-input);
 }
 
 .option.selected {
-  background: var(--accent);
-  background-opacity: 0.2;
+  outline: 1px solid var(--accent);
 }
 
-.checkbox {
-  font-size: 18px;
+.radio {
+  font-size: 14px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.option.selected .radio {
+  color: var(--accent);
 }
 
 .option-text {
-  font-size: 14px;
+  font-size: 13px;
   color: var(--text-primary);
 }
 
 .free-input {
-  margin-top: 16px;
-}
-
-.free-input label {
-  display: block;
-  font-size: 13px;
-  color: var(--text-secondary);
-  margin-bottom: 6px;
+  margin-top: 4px;
 }
 
 .free-input input {
   width: 100%;
-  height: 36px;
-  padding: 0 12px;
+  height: 32px;
+  padding: 0 10px;
   background: var(--bg-input);
   border: 1px solid var(--border-color);
-  border-radius: 6px;
+  border-radius: 4px;
   color: var(--text-primary);
-  font-size: 14px;
+  font-size: 13px;
   outline: none;
 }
 
@@ -279,36 +257,42 @@ function onCancel() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 16px;
+  padding: 8px 12px;
   border-top: 1px solid var(--border-color);
 }
 
-.nav-btn {
-  padding: 8px 16px;
+.step-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.footer-right {
+  display: flex;
+  gap: 6px;
+}
+
+.cancel-btn {
+  padding: 5px 14px;
   border: none;
   background: var(--bg-tertiary);
-  color: var(--text-primary);
-  border-radius: 6px;
-  font-size: 13px;
+  color: var(--text-secondary);
+  border-radius: 4px;
+  font-size: 12px;
   cursor: pointer;
 }
 
-.nav-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.nav-btn:hover:not(:disabled) {
-  background: var(--bg-primary);
+.cancel-btn:hover {
+  background: var(--bg-input);
+  color: var(--text-primary);
 }
 
 .submit-btn {
-  padding: 8px 20px;
+  padding: 5px 16px;
   border: none;
   background: var(--btn-run);
   color: white;
-  border-radius: 6px;
-  font-size: 14px;
+  border-radius: 4px;
+  font-size: 12px;
   cursor: pointer;
 }
 

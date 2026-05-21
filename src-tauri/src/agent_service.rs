@@ -33,6 +33,12 @@ use crate::{API_BASE_URL, SEARCH_TIMEOUT_SECS, VLM_TIMEOUT_SECS};
 pub struct Message {
     pub role: String,
     pub content: String,
+    #[serde(default)]
+    pub tool_calls: Option<String>,  // JSON string of tool_calls array
+    #[serde(default)]
+    pub thinking: Option<String>,  // thinking content
+    #[serde(default)]
+    pub raw_json: Option<String>,  // full JSON of content block array for cache preservation
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,11 +54,97 @@ pub enum StreamEvent {
     Done,
     #[serde(rename = "error")]
     Error { content: String },
+    #[serde(rename = "cache_usage")]
+    CacheUsage { cache_hit_tokens: u64, cache_miss_tokens: u64, cache_hit_ratio: f64 },
 }
 
 // ========== Agent Service ==========
 
 type PendingAsks = Arc<StdMutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>>;
+
+/// Save an api_message (with structured content blocks) to the chat_message table.
+/// Stores display text in `content` and the full JSON block array in `raw_json`.
+fn save_api_message(db: &Arc<StdMutex<Connection>>, session_id: i64, message: &serde_json::Value) {
+    let role = message["role"].as_str().unwrap_or("user");
+    let content_val = &message["content"];
+
+    // Extract display text from content (string or array of blocks)
+    let display_text = match content_val {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(blocks) => {
+            blocks.iter()
+                .filter(|b| b["type"] == "text")
+                .map(|b| b["text"].as_str().unwrap_or(""))
+                .collect::<Vec<_>>()
+                .join("")
+        }
+        _ => String::new(),
+    };
+
+    // Full JSON of the content for cache-identical reconstruction
+    let raw_json = serde_json::to_string(content_val).unwrap_or_default();
+
+    // Extract thinking from blocks for the thinking column
+    let thinking = match content_val {
+        serde_json::Value::Array(blocks) => {
+            let t: String = blocks.iter()
+                .filter(|b| b["type"] == "thinking")
+                .map(|b| b["thinking"].as_str().unwrap_or(""))
+                .collect::<Vec<_>>()
+                .join("");
+            if t.is_empty() { None } else { Some(t) }
+        }
+        _ => None,
+    };
+
+    // Extract tool_calls from blocks for the tool_calls column
+    let tool_calls = match content_val {
+        serde_json::Value::Array(blocks) => {
+            let tc: Vec<serde_json::Value> = blocks.iter()
+                .filter(|b| b["type"] == "tool_use")
+                .map(|b| json!({
+                    "id": b["id"],
+                    "type": "function",
+                    "function": {
+                        "name": b["name"],
+                        "arguments": serde_json::to_string(&b["input"]).unwrap_or_default()
+                    }
+                }))
+                .collect();
+            if tc.is_empty() { None } else { Some(serde_json::to_string(&tc).unwrap_or_default()) }
+        }
+        _ => None,
+    };
+
+    if let Ok(conn) = db.lock() {
+        let _ = conn.execute(
+            "INSERT INTO chat_message (session_id, role, content, tool_calls, thinking, raw_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![session_id, role, display_text, tool_calls, thinking, raw_json],
+        );
+    }
+}
+
+/// Mark the last message's last content block with cache_control for incremental
+/// multi-turn caching. Converts string content to block array format if needed.
+fn mark_last_message_for_cache(msgs: &mut Vec<serde_json::Value>) {
+    if let Some(last_msg) = msgs.last_mut() {
+        let content = &mut last_msg["content"];
+        if content.is_string() {
+            let text = content.as_str().unwrap_or("").to_string();
+            *content = json!([{
+                "type": "text",
+                "text": text,
+                "cache_control": {"type": "ephemeral"}
+            }]);
+        } else if content.is_array() {
+            if let Some(arr) = content.as_array_mut() {
+                if let Some(last_block) = arr.last_mut() {
+                    last_block["cache_control"] = json!({"type": "ephemeral"});
+                }
+            }
+        }
+    }
+}
 
 pub struct AgentService {
     api_url: String,
@@ -133,10 +225,20 @@ impl AgentService {
             _ => FRONT_SYSTEM,
         };
 
-        let final_system = match workspace {
+        // Build immutable system prompt — NEVER mutate after construction.
+        // Prefix-based KV caching depends on byte-identical prefix across turns.
+        let system_text = match workspace {
             Some(ws) => format!("{}\n\n# 工作目录\n{}", base_system, ws),
             None => base_system.to_string(),
         };
+
+        // System prompt as top-level `system` field (Anthropic format) with cache_control.
+        // MiniMax cache hierarchy: tools → system → messages
+        let system_prompt = json!([{
+            "type": "text",
+            "text": system_text,
+            "cache_control": {"type": "ephemeral"}
+        }]);
 
         let mut tools = get_agent_tools(agent_type);
 
@@ -154,36 +256,90 @@ impl AgentService {
             }
         }
 
-        // Build messages for API - accumulate across iterations
-        let mut api_messages: Vec<serde_json::Value> = vec![json!({
-            "role": "system",
-            "content": final_system
-        })];
+        // Mark last tool with cache_control to cache all tool definitions.
+        // Per MiniMax docs: cache_control on the last tool caches ALL preceding tools.
+        if !tools.is_empty() {
+            let last_idx = tools.len() - 1;
+            if let Some(obj) = tools[last_idx].as_object_mut() {
+                obj.insert("cache_control".to_string(), json!({"type": "ephemeral"}));
+            }
+        }
+
+        // Build messages array (NO system message — system is top-level `system` field).
+        let mut api_messages: Vec<serde_json::Value> = Vec::new();
         // Save last user message for skill matching before messages is consumed
         let last_user_msg = messages.last()
             .map(|m| m.content.clone())
             .unwrap_or_default();
+        // Reconstruct messages from history, using raw_json for cache-identical byte sequences
         for msg in messages {
+            let content_val = match msg.raw_json {
+                Some(ref raw) => {
+                    serde_json::from_str::<serde_json::Value>(raw)
+                        .unwrap_or_else(|_| json!(msg.content))
+                }
+                None => {
+                    // Fallback: try to reconstruct structured content from tool_calls/thinking
+                    if msg.role == "assistant" && (msg.tool_calls.is_some() || msg.thinking.is_some()) {
+                        let mut blocks = Vec::new();
+                        if let Some(ref thinking) = msg.thinking {
+                            if !thinking.is_empty() {
+                                blocks.push(json!({"type": "thinking", "thinking": thinking}));
+                            }
+                        }
+                        if !msg.content.is_empty() {
+                            blocks.push(json!({"type": "text", "text": msg.content}));
+                        }
+                        if let Some(ref tc) = msg.tool_calls {
+                            if let Ok(tool_calls) = serde_json::from_str::<Vec<serde_json::Value>>(tc) {
+                                for tc in &tool_calls {
+                                    blocks.push(json!({
+                                        "type": "tool_use",
+                                        "id": tc["id"],
+                                        "name": tc["function"]["name"],
+                                        "input": tc["function"]["arguments"]
+                                    }));
+                                }
+                            }
+                        }
+                        if blocks.is_empty() {
+                            json!(msg.content)
+                        } else {
+                            json!(blocks)
+                        }
+                    } else {
+                        json!(msg.content)
+                    }
+                }
+            };
             api_messages.push(json!({
                 "role": msg.role,
-                "content": msg.content
+                "content": content_val
             }));
         }
 
-        // Proactive skill matching: list relevant skills, let agent decide whether to load
+        // Proactive skill matching: append as a separate user message AFTER history.
+        // This preserves the immutable system prefix — critical for cache hits.
         let matched_skills = skill_service.match_skills(&last_user_msg, 5).await;
         let relevant: Vec<_> = matched_skills.iter().filter(|m| m.score > 0.15).collect();
         if !relevant.is_empty() {
-            let mut skill_context = String::from("\n\n## 🎯 匹配到的技能\n");
+            let mut skill_context = String::from("## 匹配到的技能\n\n");
             skill_context.push_str("以下技能可能与你的任务相关。如需加载某个技能的完整操作指令，调用 `skill` 工具传入技能名称：\n\n");
             for m in &relevant {
                 skill_context.push_str(&format!("- **{}** (匹配度: {:.0}%): {}\n",
                     m.name, m.score * 100.0, m.description));
             }
-            let current_system = api_messages[0]["content"].as_str().unwrap_or("").to_string();
-            api_messages[0]["content"] = json!(format!("{}{}", current_system, skill_context));
-            eprintln!("[stream_chat] Listed {} matched skills in system prompt", relevant.len());
+            api_messages.push(json!({
+                "role": "user",
+                "content": skill_context
+            }));
+            eprintln!("[stream_chat] Appended {} matched skills as separate message (prefix preserved)", relevant.len());
         }
+
+        // Mark last message's last content block with cache_control for incremental
+        // multi-turn caching. Per MiniMax docs, this caches the entire conversation prefix.
+        // Only done once before the loop — subsequent loop iterations benefit from prefix cache.
+        mark_last_message_for_cache(&mut api_messages);
 
         // Main loop: continue until stop_reason is not "tool_use"
         loop {
@@ -192,6 +348,7 @@ impl AgentService {
 
             let request_body = json!({
                 "model": "MiniMax-M2.7",
+                "system": system_prompt,
                 "messages": api_messages,
                 "max_tokens": 16384,
                 "temperature": 1,
@@ -251,6 +408,22 @@ impl AgentService {
 
             // If stop_reason is not "tool_use", we're done
             if stop_reason.as_deref() != Some("tool_use") {
+                // Save final assistant message to DB (backend handles persistence for cache)
+                if !assistant_thinking.is_empty() || !assistant_text.is_empty() {
+                    let mut final_content = Vec::new();
+                    if !assistant_thinking.is_empty() {
+                        final_content.push(json!({"type": "thinking", "thinking": assistant_thinking}));
+                    }
+                    if !assistant_text.is_empty() {
+                        final_content.push(json!({"type": "text", "text": assistant_text}));
+                    }
+                    let final_msg = json!({
+                        "role": "assistant",
+                        "content": final_content
+                    });
+                    save_api_message(&self.db, session_id, &final_msg);
+                    api_messages.push(final_msg);
+                }
                 let ev = StreamEvent::Done;
                 let _ = app.emit(&session_key, ev);
                 break;
@@ -276,22 +449,28 @@ impl AgentService {
                         "input": input_json
                     }));
                 }
-                api_messages.push(json!({
+                let assistant_msg = json!({
                     "role": "assistant",
                     "content": assistant_content
-                }));
+                });
+                // Persist to DB for cache-identical reconstruction on next turn
+                save_api_message(&self.db, session_id, &assistant_msg);
+                api_messages.push(assistant_msg);
             }
 
             // 2) Add tool results to messages and loop
             for (_tool_name, tool_id, result) in tool_results {
-                api_messages.push(json!({
+                let tool_msg = json!({
                     "role": "user",
                     "content": [{
                         "type": "tool_result",
                         "tool_use_id": tool_id,
                         "content": result
                     }]
-                }));
+                });
+                // Persist to DB for cache-identical reconstruction on next turn
+                save_api_message(&self.db, session_id, &tool_msg);
+                api_messages.push(tool_msg);
             }
         }
     }
@@ -326,6 +505,10 @@ async fn process_sse_stream(
     let mut assistant_text = String::new();
     let mut assistant_thinking = String::new();
 
+    // Cache usage tracking (prefix-based KV cache)
+    let mut cache_hit_tokens: u64 = 0;
+    let mut cache_miss_tokens: u64 = 0;
+
     // Text emission buffer — merge rapid deltas to reduce IPC overhead.
     // 8ms balances IPC overhead against smoothness: emits ~120x/sec max, imperceptible.
     let mut last_emit = std::time::Instant::now();
@@ -355,6 +538,27 @@ async fn process_sse_stream(
                                     &mut assistant_thinking,
                                 ) {
                                     stop_reason = Some(reason);
+                                }
+
+                                // Capture cache usage from message_delta events.
+                                // MiniMax fields: cache_read (hit), cache_creation (write), input_tokens (post-breakpoint)
+                                if event["type"] == "message_delta" {
+                                    if let Some(usage) = event["usage"].as_object() {
+                                        let hit = usage.get("cache_read_input_tokens")
+                                            .and_then(|v| v.as_u64()).unwrap_or(0);
+                                        let create = usage.get("cache_creation_input_tokens")
+                                            .and_then(|v| v.as_u64()).unwrap_or(0);
+                                        let input = usage.get("input_tokens")
+                                            .and_then(|v| v.as_u64()).unwrap_or(0);
+                                        // cache_read = existing cache reused
+                                        // cache_creation + input_tokens = tokens not cached (just written + post-breakpoint)
+                                        cache_hit_tokens += hit;
+                                        cache_miss_tokens += create + input;
+                                        eprintln!(
+                                            "[cache] read={}, create={}, input={}, cumulative hit={} miss={}",
+                                            hit, create, input, cache_hit_tokens, cache_miss_tokens
+                                        );
+                                    }
                                 }
 
                                 // Accumulate new text/thinking since last emit
@@ -408,6 +612,21 @@ async fn process_sse_stream(
             thinking: std::mem::take(&mut pending_thinking),
         };
         let _ = app.emit(&session_key, ev);
+    }
+
+    // Emit cache usage stats for this turn
+    if cache_hit_tokens > 0 || cache_miss_tokens > 0 {
+        let total = cache_hit_tokens + cache_miss_tokens;
+        let ratio = if total > 0 { cache_hit_tokens as f64 / total as f64 } else { 0.0 };
+        let _ = app.emit(&session_key, StreamEvent::CacheUsage {
+            cache_hit_tokens,
+            cache_miss_tokens,
+            cache_hit_ratio: ratio,
+        });
+        eprintln!(
+            "[cache] turn stats: hit={}, miss={}, ratio={:.2}%",
+            cache_hit_tokens, cache_miss_tokens, ratio * 100.0
+        );
     }
 
     // Build tool_uses list from collected tool_inputs
@@ -819,13 +1038,16 @@ async fn tool_send_to_agent(
 
         // Load full conversation history for the target agent
         let mut stmt = conn.prepare(
-            "SELECT role, content FROM chat_message WHERE session_id = ?1 ORDER BY created_at ASC"
+            "SELECT role, content, tool_calls, thinking, raw_json FROM chat_message WHERE session_id = ?1 ORDER BY created_at ASC"
         ).map_err(|e| format!("Failed to prepare history query: {}", e))?;
         let history: Vec<Message> = stmt.query_map(
             rusqlite::params![target_session_id],
             |row| Ok(Message {
                 role: row.get(0)?,
                 content: row.get(1)?,
+                tool_calls: row.get(2)?,
+                thinking: row.get(3)?,
+                raw_json: row.get(4)?,
             }),
         ).map_err(|e| format!("Failed to query history: {}", e))?
         .collect::<Result<Vec<_>, _>>()
@@ -1916,6 +2138,20 @@ async fn tool_run_background(params: &serde_json::Value) -> String {
         return "Error: command is required".to_string();
     }
     eprintln!("[run_background] Spawning: {} (cwd: {})", command, path);
+
+    // Temp dir for output capture
+    let tmp_dir = std::path::PathBuf::from(
+        std::env::var("USERPROFILE").unwrap_or_else(|_| ".".to_string())
+    ).join(".minimaxcode").join("tmp");
+    let _ = std::fs::create_dir_all(&tmp_dir);
+    let out_file = tmp_dir.join(format!("bg_out_{}.txt", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()));
+    let err_file = tmp_dir.join(format!("bg_err_{}.txt", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() + 1));
+
+    let out_file_clone = out_file.clone();
+    let err_file_clone = err_file.clone();
+
     let mut cmd = if cfg!(windows) {
         let mut c = std::process::Command::new("cmd");
         c.args(["/C", command]);
@@ -1931,23 +2167,61 @@ async fn tool_run_background(params: &serde_json::Value) -> String {
     match cmd.spawn() {
         Ok(mut child) => {
             let pid = child.id();
-            // Wait briefly for startup output
-            let startup_output = if wait_sec > 0 {
-                std::thread::sleep(std::time::Duration::from_secs(wait_sec));
-                let mut buf = String::new();
-                if let Some(ref mut stdout) = child.stdout {
-                    use std::io::Read;
-                    let _ = stdout.read_to_string(&mut buf);
+            let child_stdout = child.stdout.take();
+            let child_stderr = child.stderr.take();
+
+            // Spawn threads to capture output to files in real-time
+            if let Some(stdout) = child_stdout {
+                let out_path = out_file_clone.clone();
+                std::thread::spawn(move || {
+                    use std::io::{BufRead, BufReader, Write};
+                    let reader = BufReader::new(stdout);
+                    let mut file = std::fs::File::create(&out_path).unwrap();
+                    for line in reader.lines() {
+                        if let Ok(line) = line {
+                            let _ = writeln!(file, "{}", line);
+                            let _ = file.flush();
+                        }
+                    }
+                });
+            }
+            if let Some(stderr) = child_stderr {
+                let err_path = err_file_clone;
+                std::thread::spawn(move || {
+                    use std::io::{BufRead, BufReader, Write};
+                    let reader = BufReader::new(stderr);
+                    let mut file = std::fs::File::create(&err_path).unwrap();
+                    for line in reader.lines() {
+                        if let Ok(line) = line {
+                            let _ = writeln!(file, "{}", line);
+                            let _ = file.flush();
+                        }
+                    }
+                });
+            }
+
+            // Small wait for initial output
+            std::thread::sleep(std::time::Duration::from_secs(wait_sec));
+            let startup = std::fs::read_to_string(&out_file_clone).unwrap_or_default();
+
+            // Spawn reaper to write exit status when process ends
+            let out_reap = out_file_clone.clone();
+            std::thread::spawn(move || {
+                let status = child.wait(); // blocks until process exits
+                if let Ok(ref f) = std::fs::OpenOptions::new().append(true).open(&out_reap) {
+                    use std::io::Write;
+                    let mut f_ref = f;
+                    let _ = writeln!(f_ref, "\n--- 进程退出码: {:?} ---", status.as_ref().ok().and_then(|s| s.code()));
                 }
-                buf
-            } else {
-                String::new()
-            };
+            });
+
             json!({
                 "success": true,
                 "pid": pid,
-                "startup_output": startup_output,
-                "message": format!("Background process started with PID {}", pid)
+                "out_file": out_file.to_string_lossy().to_string(),
+                "err_file": err_file.to_string_lossy().to_string(),
+                "startup_output": startup,
+                "message": format!("后台进程已启动，PID: {}, 输出文件: {}", pid, out_file.to_string_lossy())
             }).to_string()
         }
         Err(e) => json!({"error": format!("Failed to spawn: {}", e)}).to_string(),
@@ -1956,10 +2230,49 @@ async fn tool_run_background(params: &serde_json::Value) -> String {
 
 async fn tool_job_output(params: &serde_json::Value) -> String {
     let pid = params["job_id"].as_i64().unwrap_or(0) as u32;
-    if pid == 0 {
-        return "Error: job_id is required".to_string();
+    let tail = params["tail_lines"].as_i64().unwrap_or(200) as usize;
+    // Allow reading output from file directly (preferred over PID for live output)
+    let out_file = params["out_file"].as_str().unwrap_or("");
+
+    if !out_file.is_empty() && std::path::Path::new(out_file).exists() {
+        let content = match std::fs::read_to_string(out_file) {
+            Ok(c) => c,
+            Err(e) => return format!("读取输出文件失败: {}", e),
+        };
+        let lines: Vec<&str> = content.lines().collect();
+        let total = lines.len();
+        let tail_start = if total > tail { total - tail } else { 0 };
+        let tail_text: String = lines[tail_start..].iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Check if process is still running
+        let status = if cfg!(windows) {
+            std::process::Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {}", pid)])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
+                .unwrap_or(false)
+        } else {
+            std::process::Command::new("ps")
+                .args(["-p", &pid.to_string()])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
+                .unwrap_or(false)
+        };
+
+        return format!("{} ({} / {} lines)\n{}",
+            if status { "运行中" } else { "已结束" },
+            tail_text.lines().count(),
+            total,
+            tail_text.trim());
     }
-    // Try to get process info on Windows via tasklist
+
+    if pid == 0 {
+        return "Error: 需要 job_id 或 out_file 参数".to_string();
+    }
+    // Legacy: try to get process info via tasklist/ps
     if cfg!(windows) {
         let output = std::process::Command::new("tasklist")
             .args(["/FI", &format!("PID eq {}", pid)])
@@ -1970,13 +2283,12 @@ async fn tool_job_output(params: &serde_json::Value) -> String {
                 if text.contains(&pid.to_string()) {
                     format!("Process {} is running.\n{}", pid, text)
                 } else {
-                    format!("Process {} is not running.", pid)
+                    format!("Process {} is not running. 如果之前返回了 out_file，请用 out_file 参数读取输出。", pid)
                 }
             }
             Err(_) => format!("Process {} status unknown.", pid),
         }
     } else {
-        // Unix: check /proc
         let output = std::process::Command::new("ps")
             .args(["-p", &pid.to_string(), "-o", "pid,stat,command"])
             .output();
@@ -1986,7 +2298,7 @@ async fn tool_job_output(params: &serde_json::Value) -> String {
                 if text.contains(&pid.to_string()) {
                     format!("Process {} is running:\n{}", pid, text)
                 } else {
-                    format!("Process {} is not running.", pid)
+                    format!("Process {} is not running. 如果之前返回了 out_file，请用 out_file 参数读取输出。", pid)
                 }
             }
             Err(_) => format!("Process {} status unknown.", pid),
@@ -3007,9 +3319,9 @@ fn get_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
     let command_tools: &[(&str, &str, serde_json::Value)] = &[
         ("run_command", "执行命令行指令", schema_obj(json!({"command": {"type": "string"}, "path": {"type": "string"}}), &["command"])),
         ("run_tests", "运行测试框架", schema_obj(json!({"path": {"type": "string"}, "test_framework": {"type": "string"}}), &["path", "test_framework"])),
-        ("run_background", "后台运行长时间进程（dev server/build等），返回PID", schema_obj(json!({"command": {"type": "string"}, "path": {"type": "string"}, "wait_sec": {"type": "integer"}}), &["command"])),
+        ("run_background", "后台运行长时间进程（dev server/build），返回PID和输出文件路径(out_file)。用job_output(out_file)读取实时输出", schema_obj(json!({"command": {"type": "string"}, "path": {"type": "string"}, "wait_sec": {"type": "integer"}}), &["command"])),
         ("kill_process", "按PID终止进程", schema_obj(json!({"pid": {"type": "number"}}), &["pid"])),
-        ("job_output", "查询后台进程状态", schema_obj(json!({"job_id": {"type": "integer"}, "tail_lines": {"type": "integer"}}), &["job_id"])),
+        ("job_output", "查询后台进程输出。out_file: run_background 返回的输出文件路径（推荐）；job_id: PID（旧方式）。tail_lines: 返回最后N行，默认200", schema_obj(json!({"job_id": {"type": "integer"}, "out_file": {"type": "string"}, "tail_lines": {"type": "integer"}}), &[])),
         ("list_jobs", "列出当前会话后台任务", schema_obj(json!({}), &[])),
     ];
 
@@ -3064,6 +3376,9 @@ fn get_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
             add_tools(&mut tools, read_only_files);
             add_tools(&mut tools, search_tools);
             add_tools(&mut tools, git_read);
+            tools.push(make_tool("run_command", "执行命令行指令", schema_obj(json!({"command": {"type": "string"}, "path": {"type": "string"}}), &["command"])));
+            tools.push(make_tool("run_background", "后台运行长时间进程，返回PID和输出文件路径。用job_output读取实时输出", schema_obj(json!({"command": {"type": "string"}, "path": {"type": "string"}, "wait_sec": {"type": "integer"}}), &["command"])));
+            tools.push(make_tool("job_output", "查询后台进程输出。用run_background返回的out_file参数读取", schema_obj(json!({"out_file": {"type": "string"}, "tail_lines": {"type": "integer"}}), &[])));
             add_tools(&mut tools, web_tools);
             add_tools(&mut tools, env_tools);
             add_tools(&mut tools, knowledge_read);
