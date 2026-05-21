@@ -762,10 +762,6 @@ onDeactivated(() => {
   font-size: 12px;
   color: var(--text-secondary);
   margin-top: 4px;
-  padding: 8px 12px 8px 14px;
-  border-left: 3px solid var(--border-color);
-  background: var(--bg-tertiary);
-  border-radius: 0 6px 6px 0;
   line-height: 1.5;
   word-break: break-word;
   user-select: text;
