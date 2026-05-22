@@ -257,6 +257,7 @@ const manualCommands = ref(false)  // true when user clicked / button
 
 const commands = [
   { name: '/compact', desc: '手动压缩上下文，减少 token 占用' },
+  { name: '/mcp reload', desc: '重载 MCP 服务器配置' },
 ]
 
 const cmdQuery = computed(() => {
@@ -550,6 +551,21 @@ async function onSend() {
   const text = inputText.value.trim()
 
   // Slash commands
+  if (text === '/mcp reload') {
+    inputText.value = ''
+    try {
+      const msg = await invoke<string>('mcp_reload')
+      messages.value.push({
+        id: Date.now(), session_id: sessionId.value!, role: 'user' as const,
+        content: `/mcp reload — ${msg}`,
+        created_at: new Date().toISOString(),
+      } as any)
+    } catch (e) {
+      console.error('MCP reload failed:', e)
+    }
+    return
+  }
+
   if (text === '/compact' && sessionId.value) {
     inputText.value = ''
     try {

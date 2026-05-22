@@ -1480,6 +1480,36 @@ async fn agent_chat_stream(
 }
 
 #[tauri::command]
+async fn mcp_reload(state: State<'_, AppState>) -> Result<String, String> {
+    let workspace: Option<String> = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        conn.query_row("SELECT workspace FROM app_config", [], |row| row.get(0)).ok()
+    };
+    // Reload skills and MCP config
+    state.skill_service.load_all_skills().await;
+    // For MCP, we need to drop the existing servers and reconnect from config
+    // McpService::reload accepts &self and workspace
+    let mcp = state.mcp_service.clone();
+    let svc = mcp.read().await;
+    drop(svc);
+    // McpService internally uses RwLock for servers, reload is &self
+    let _ = state.mcp_service.read().await;
+    // Actually, reload needs to be called. The issue is it's behind Arc<RwLock>.
+    // Let me restructure: just call reload on the inner service.
+    // We need a write lock to replace the content, but reload takes &self (read lock).
+    // The solution: drop all servers and re-init.
+    // Simplest: clone the Arc, then in a spawned task, acquire read and call reload.
+    let mcp_clone = state.mcp_service.clone();
+    let ws_clone = workspace.clone();
+    let result = tokio::task::spawn(async move {
+        let svc = mcp_clone.read().await;
+        svc.reload(ws_clone.as_deref()).await;
+        format!("MCP config reloaded{}", if ws_clone.is_some() { format!(" for workspace: {}", ws_clone.unwrap()) } else { String::new() })
+    }).await.map_err(|e| format!("Task failed: {}", e))?;
+    Ok(result)
+}
+
+#[tauri::command]
 fn compact_session(state: State<'_, AppState>, session_id: i64) -> Result<String, String> {
     use crate::context_compressor::compress_context;
     use crate::context_compressor::estimate_tokens;
@@ -2244,6 +2274,7 @@ pub fn run() {
             delete_message,
             clear_session_history,
             compact_session,
+            mcp_reload,
             set_minimax_api_key,
             get_minimax_api_key,
             set_workspace,

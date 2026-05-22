@@ -1175,6 +1175,7 @@ async fn execute_tool(
         "skill" => tool_skill(tool_name, &params, skill_service.clone()).await,
         "list_skills" => tool_list_skills(tool_name, &params, skill_service.clone()).await,
         "match_skills" => tool_match_skills(tool_name, &params, skill_service.clone()).await,
+        "mcp_reload" => tool_mcp_reload(&params, mcp_service.clone(), skill_service.clone()).await,
         "execute_skill" => tool_execute_skill(tool_name, &params, skill_service.clone()).await,
         "read_knowledge" => tool_read_knowledge(&params).await,
         "write_knowledge" => tool_write_knowledge(&params).await,
@@ -2872,6 +2873,26 @@ async fn tool_understand_image(params: serde_json::Value, api_key: String, api_u
     .unwrap_or_else(|_| r#"{"success": false, "error": "Task cancelled"}"#.to_string())
 }
 
+async fn tool_mcp_reload(
+    _params: &serde_json::Value,
+    mcp_service: Arc<RwLock<McpService>>,
+    skill_service: Arc<SkillService>,
+) -> String {
+    // Reload skills from all sources
+    skill_service.load_all_skills().await;
+    // Reload MCP servers from config files
+    let mcp = mcp_service.read().await;
+    // Read workspace from DB to pass to reload
+    let workspace: Option<String> = None; // Can't access DB here; reload will use current workspace
+    mcp.reload(workspace.as_deref()).await;
+    let server_count = mcp.list_servers().await.len();
+    let tool_count = mcp.get_all_tools().await.len();
+    serde_json::to_string(&serde_json::json!({
+        "success": true,
+        "message": format!("MCP 配置已重载：{} 个服务器，{} 个工具可用", server_count, tool_count)
+    })).unwrap_or_default()
+}
+
 async fn tool_skill(_tool_name: &str, params: &serde_json::Value, skill_service: Arc<SkillService>) -> String {
     let name = params["name"].as_str().unwrap_or("");
     if name.is_empty() {
@@ -3318,6 +3339,7 @@ fn is_parallel_safe(tool_name: &str) -> bool {
         | "read_knowledge"
         // Skill inspection
         | "list_skills" | "match_skills"
+        | "mcp_reload"
         // Job inspection
         | "job_output" | "list_jobs"
         // Env
@@ -3738,6 +3760,7 @@ fn get_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
         ("list_skills", "列出所有已加载的技能", schema_obj(json!({"source": {"type": "string"}}), &[])),
         ("match_skills", "根据描述关键词匹配技能", schema_obj(json!({"query": {"type": "string"}, "top_k": {"type": "integer"}}), &["query"])),
         ("execute_skill", "执行技能脚本", schema_obj(json!({"name": {"type": "string"}, "script": {"type": "string"}}), &["name"])),
+        ("mcp_reload", "重载 MCP 配置。修改 mcp.json 后调用使配置生效", schema_obj(json!({}), &[])),
     ];
 
     // Knowledge write (plan / explore / work)
