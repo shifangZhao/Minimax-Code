@@ -442,6 +442,62 @@ export function useAgentConversation(agentType: string) {
     await initSession(groupChatId)
   }
 
+  // ---- Retry / Rewind / Clear ----
+
+  async function retryMessage(messageIndex: number) {
+    const msg = messages.value[messageIndex]
+    if (!msg || msg.role !== 'user') return
+    const content = msg.content
+    const att = (msg as any).attachments
+    await sendMessage(content, att)
+  }
+
+  const showRewindConfirm = ref<{ messageId: number; content: string } | null>(null)
+
+  function rewindToMessage(messageId: number, content: string) {
+    showRewindConfirm.value = { messageId, content }
+  }
+
+  async function confirmRewind(): Promise<string | null> {
+    const info = showRewindConfirm.value
+    if (!info || !sessionId.value) return null
+    try {
+      const { clearStreamState } = useGlobalStreaming()
+      clearStreamState(sessionId.value)
+      const savedContent = await invoke<string>('rewind_conversation', {
+        sessionId: sessionId.value,
+        messageId: info.messageId,
+      })
+      await loadMessages()
+      showRewindConfirm.value = null
+      return savedContent
+    } catch (e) {
+      console.error('Rewind failed:', e)
+      showRewindConfirm.value = null
+      return null
+    }
+  }
+
+  function cancelRewind() {
+    showRewindConfirm.value = null
+  }
+
+  const showClearConfirm = ref(false)
+
+  async function clearConversation() {
+    if (!sessionId.value) return
+    try {
+      const { clearStreamState } = useGlobalStreaming()
+      clearStreamState(sessionId.value)
+      await db.clearSessionHistory(sessionId.value)
+      messages.value = []
+      toolEvents.value = []
+      showClearConfirm.value = false
+    } catch (e) {
+      console.error('Clear failed:', e)
+    }
+  }
+
   return {
     messages,
     loading,
@@ -455,5 +511,12 @@ export function useAgentConversation(agentType: string) {
     clearAsk,
     clearToolEvents,
     switchGroupChat,
+    retryMessage,
+    showRewindConfirm,
+    rewindToMessage,
+    confirmRewind,
+    cancelRewind,
+    showClearConfirm,
+    clearConversation,
   }
 }

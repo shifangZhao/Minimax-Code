@@ -70,6 +70,26 @@ pub struct ChatMessage {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileSnapshot {
+    pub id: i64,
+    pub session_id: i64,
+    pub file_path: String,
+    pub original_content: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationBookmark {
+    pub id: i64,
+    pub session_id: i64,
+    pub name: String,
+    pub file_snapshots: String,  // JSON: Vec<BookmarkFile>
+    pub message_count: i64,
+    pub total_bytes: i64,
+    pub created_at: String,
+}
+
 // ========== Window Commands ==========
 
 #[tauri::command]
@@ -127,7 +147,11 @@ fn get_group_chats(state: State<AppState>) -> Result<Vec<GroupChat>, String> {
 #[tauri::command]
 fn delete_group_chat(state: State<AppState>, id: i64) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    // Delete all agent sessions and their messages first
+    // Cascade delete: snapshots + bookmarks → messages → sessions → group
+    conn.execute("DELETE FROM file_snapshot WHERE session_id IN (SELECT id FROM agent_session WHERE group_chat_id = ?1)", [id])
+        .map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM conversation_bookmark WHERE session_id IN (SELECT id FROM agent_session WHERE group_chat_id = ?1)", [id])
+        .map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM chat_message WHERE session_id IN (SELECT id FROM agent_session WHERE group_chat_id = ?1)", [id])
         .map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM agent_session WHERE group_chat_id = ?1", [id])
@@ -225,6 +249,9 @@ fn delete_message(state: State<AppState>, id: i64) -> Result<(), String> {
 fn clear_session_history(state: State<AppState>, session_id: i64) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM chat_message WHERE session_id = ?1", [session_id])
+        .map_err(|e| e.to_string())?;
+    // Clean up automatic file snapshots (bookmarks survive — they're intentional saves)
+    conn.execute("DELETE FROM file_snapshot WHERE session_id = ?1", [session_id])
         .map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -1078,12 +1105,22 @@ fn create_patch(repo_path: String, target: Option<String>, output_path: Option<S
 
 #[tauri::command]
 fn run_tests(repo_path: String, test_framework: String) -> Result<TestResult, String> {
-    let (cmd, args) = match test_framework.as_str() {
-        "jest" => ("cmd", vec!["/C".to_string(), "npm test -- --coverage=false --json".to_string()]),
-        "pytest" => ("cmd", vec!["/C".to_string(), format!("python -m pytest --tb=short -q")]),
-        "cargo" => ("cmd", vec!["/C".to_string(), "cargo test -- --nocapture".to_string()]),
-        "npm" => ("cmd", vec!["/C".to_string(), "npm test -- --coverage=false".to_string()]),
-        _ => return Err(format!("Unknown test framework: {}", test_framework)),
+    let (cmd, args) = if cfg!(windows) {
+        match test_framework.as_str() {
+            "jest" => ("cmd", vec!["/C".to_string(), "npm test -- --coverage=false --json".to_string()]),
+            "pytest" => ("cmd", vec!["/C".to_string(), "python -m pytest --tb=short -q".to_string()]),
+            "cargo" => ("cmd", vec!["/C".to_string(), "cargo test -- --nocapture".to_string()]),
+            "npm" => ("cmd", vec!["/C".to_string(), "npm test -- --coverage=false".to_string()]),
+            _ => return Err(format!("Unknown test framework: {}", test_framework)),
+        }
+    } else {
+        match test_framework.as_str() {
+            "jest" => ("sh", vec!["-c".to_string(), "npm test -- --coverage=false --json".to_string()]),
+            "pytest" => ("sh", vec!["-c".to_string(), "python -m pytest --tb=short -q".to_string()]),
+            "cargo" => ("sh", vec!["-c".to_string(), "cargo test -- --nocapture".to_string()]),
+            "npm" => ("sh", vec!["-c".to_string(), "npm test -- --coverage=false".to_string()]),
+            _ => return Err(format!("Unknown test framework: {}", test_framework)),
+        }
     };
 
     let mut process = Command::new(cmd);
@@ -1457,6 +1494,240 @@ fn init_user_dir() {
     eprintln!("[init] User dir ready: {}", base.display());
 }
 
+// ========== Undo / Rewind / Bookmark Commands ==========
+
+#[tauri::command]
+fn undo_last_edit(state: State<AppState>, session_id: i64) -> Result<FileSnapshot, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let row = conn.query_row(
+        "SELECT id, session_id, file_path, original_content, created_at FROM file_snapshot WHERE session_id = ?1 ORDER BY id DESC LIMIT 1",
+        [session_id],
+        |row| Ok(FileSnapshot {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            file_path: row.get(2)?,
+            original_content: row.get(3)?,
+            created_at: row.get(4)?,
+        })
+    ).map_err(|_| "No edits to undo".to_string())?;
+
+    if let Some(ref content) = row.original_content {
+        std::fs::write(&row.file_path, content)
+            .map_err(|e| format!("Failed to restore: {}", e))?;
+    } else {
+        if std::path::Path::new(&row.file_path).exists() {
+            std::fs::remove_file(&row.file_path)
+                .map_err(|e| format!("Failed to remove: {}", e))?;
+        }
+    }
+    conn.execute("DELETE FROM file_snapshot WHERE id = ?1", [row.id])
+        .map_err(|e| e.to_string())?;
+    // Refresh LSP diagnostics for the restored file
+    drop(conn);
+    if let Ok(mut mgr) = state.lsp_manager.lock() {
+        if let Some(ref mut m) = *mgr {
+            let _ = m.touch_file(&row.file_path);
+        }
+    }
+    Ok(row)
+}
+
+#[tauri::command]
+fn list_edits(state: State<AppState>, session_id: i64) -> Result<Vec<FileSnapshot>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(
+        "SELECT id, session_id, file_path, original_content, created_at FROM file_snapshot WHERE session_id = ?1 ORDER BY id DESC"
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([session_id], |row| {
+        Ok(FileSnapshot {
+            id: row.get(0)?, session_id: row.get(1)?, file_path: row.get(2)?,
+            original_content: row.get(3)?, created_at: row.get(4)?,
+        })
+    }).map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn undo_edit_by_id(state: State<AppState>, snapshot_id: i64) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let row = conn.query_row(
+        "SELECT file_path, original_content FROM file_snapshot WHERE id = ?1",
+        [snapshot_id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+    ).map_err(|_| "Snapshot not found".to_string())?;
+
+    if let Some(ref content) = row.1 {
+        std::fs::write(&row.0, content).map_err(|e| format!("Failed to restore: {}", e))?;
+    } else if std::path::Path::new(&row.0).exists() {
+        std::fs::remove_file(&row.0).map_err(|e| format!("Failed to remove: {}", e))?;
+    }
+    conn.execute("DELETE FROM file_snapshot WHERE id = ?1", [snapshot_id])
+        .map_err(|e| e.to_string())?;
+    // Refresh LSP diagnostics for the restored file
+    drop(conn);
+    if let Ok(mut mgr) = state.lsp_manager.lock() {
+        if let Some(ref mut m) = *mgr {
+            let _ = m.touch_file(&row.0);
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn rewind_conversation(state: State<AppState>, session_id: i64, message_id: i64) -> Result<String, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+
+    // 1. Get the message content to return for input pre-fill
+    let content: String = conn.query_row(
+        "SELECT content FROM chat_message WHERE id = ?1 AND session_id = ?2",
+        [message_id, session_id],
+        |row| row.get(0)
+    ).map_err(|_| "Message not found".to_string())?;
+
+    // 2. Collect and restore file snapshots before deleting them
+    let snapshots: Vec<(String, Option<String>)> = {
+        let mut stmt = conn.prepare(
+            "SELECT file_path, original_content FROM file_snapshot WHERE session_id = ?1 ORDER BY id ASC"
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([session_id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        }).map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+        rows
+    };
+
+    // Restore each file to its earliest known state (before any modifications in this session)
+    let mut restored: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (file_path, original_content) in &snapshots {
+        if restored.contains(file_path) { continue; }
+        restored.insert(file_path.clone());
+        if let Some(ref content) = original_content {
+            if let Some(parent) = std::path::Path::new(file_path).parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(file_path, content);
+        } else if std::path::Path::new(file_path).exists() {
+            let _ = std::fs::remove_file(file_path);
+        }
+    }
+
+    // 3. Clean up all snapshots for this session
+    conn.execute("DELETE FROM file_snapshot WHERE session_id = ?1", [session_id])
+        .map_err(|e| e.to_string())?;
+
+    // 4. Delete messages at and after the rewind point
+    conn.execute(
+        "DELETE FROM chat_message WHERE session_id = ?1 AND id >= ?2",
+        rusqlite::params![session_id, message_id]
+    ).map_err(|e| e.to_string())?;
+
+    drop(conn);
+
+    // 5. Refresh LSP for all restored files
+    if let Ok(mut mgr) = state.lsp_manager.lock() {
+        if let Some(ref mut m) = *mgr {
+            for file_path in &restored {
+                let _ = m.touch_file(file_path);
+            }
+        }
+    }
+
+    Ok(content)
+}
+
+#[tauri::command]
+fn save_bookmark(state: State<AppState>, session_id: i64, name: String, workspace: String) -> Result<ConversationBookmark, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+
+    // Collect unique file paths from snapshots
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT file_path FROM file_snapshot WHERE session_id = ?1"
+    ).map_err(|e| e.to_string())?;
+    let paths: Vec<String> = stmt.query_map([session_id], |row| row.get(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    let mut files: Vec<serde_json::Value> = Vec::new();
+    let mut total_bytes: i64 = 0;
+    for p in &paths {
+        let abs = std::path::Path::new(&workspace).join(p);
+        let content = std::fs::read_to_string(&abs).ok();
+        if let Some(ref c) = content { total_bytes += c.len() as i64; }
+        files.push(serde_json::json!({
+            "file_path": p,
+            "content": content,
+        }));
+    }
+
+    let message_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM chat_message WHERE session_id = ?1",
+        [session_id], |row| row.get(0)
+    ).unwrap_or(0);
+
+    let snapshots_json = serde_json::to_string(&files).map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "INSERT INTO conversation_bookmark (session_id, name, file_snapshots, message_count, total_bytes) VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![session_id, name, snapshots_json, message_count, total_bytes]
+    ).map_err(|e| e.to_string())?;
+
+    let id = conn.last_insert_rowid();
+    Ok(ConversationBookmark { id, session_id, name, file_snapshots: snapshots_json, message_count, total_bytes, created_at: String::new() })
+}
+
+#[tauri::command]
+fn list_bookmarks(state: State<AppState>, session_id: i64) -> Result<Vec<ConversationBookmark>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(
+        "SELECT id, session_id, name, file_snapshots, message_count, total_bytes, created_at FROM conversation_bookmark WHERE session_id = ?1 ORDER BY created_at DESC"
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([session_id], |row| {
+        Ok(ConversationBookmark {
+            id: row.get(0)?, session_id: row.get(1)?, name: row.get(2)?,
+            file_snapshots: row.get(3)?, message_count: row.get(4)?,
+            total_bytes: row.get(5)?, created_at: row.get(6)?,
+        })
+    }).map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn restore_bookmark(state: State<AppState>, bookmark_id: i64, workspace: String) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let snapshots_json: String = conn.query_row(
+        "SELECT file_snapshots FROM conversation_bookmark WHERE id = ?1",
+        [bookmark_id],
+        |row| row.get(0)
+    ).map_err(|_| "Bookmark not found".to_string())?;
+
+    let files: Vec<serde_json::Value> = serde_json::from_str(&snapshots_json)
+        .map_err(|e| format!("Invalid bookmark data: {}", e))?;
+
+    for f in &files {
+        let file_path = f["file_path"].as_str().unwrap_or("");
+        let abs = std::path::Path::new(&workspace).join(file_path);
+        if let Some(content) = f["content"].as_str() {
+            if let Some(parent) = abs.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(&abs, content).map_err(|e| format!("Failed to restore {}: {}", file_path, e))?;
+        } else if abs.exists() {
+            std::fs::remove_file(&abs).map_err(|e| format!("Failed to remove {}: {}", file_path, e))?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_bookmark(state: State<AppState>, bookmark_id: i64) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM conversation_bookmark WHERE id = ?1", [bookmark_id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub fn run() {
     let app_dir = dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -1549,6 +1820,34 @@ pub fn run() {
         conn.execute("ALTER TABLE chat_message ADD COLUMN raw_json TEXT DEFAULT NULL", [])
             .expect("Failed to add raw_json column");
     }
+
+    // File snapshots for edit undo — saves original content before agent modifications
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS file_snapshot (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            file_path TEXT NOT NULL,
+            original_content TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (session_id) REFERENCES agent_session(id)
+        )",
+        [],
+    ).expect("Failed to create file_snapshot table");
+
+    // Conversation bookmarks for checkpoint/restore — full state snapshots
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS conversation_bookmark (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            file_snapshots TEXT NOT NULL,
+            message_count INTEGER NOT NULL DEFAULT 0,
+            total_bytes INTEGER NOT NULL DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (session_id) REFERENCES agent_session(id)
+        )",
+        [],
+    ).expect("Failed to create conversation_bookmark table");
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS minimax_api_key (
@@ -1681,7 +1980,15 @@ pub fn run() {
             mcp_list_servers,
             mcp_get_tools,
             mcp_call_tool,
-            mcp_call_tool_any
+            mcp_call_tool_any,
+            undo_last_edit,
+            list_edits,
+            undo_edit_by_id,
+            rewind_conversation,
+            save_bookmark,
+            list_bookmarks,
+            restore_bookmark,
+            delete_bookmark
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

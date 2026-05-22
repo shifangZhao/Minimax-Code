@@ -70,6 +70,33 @@ export const db = {
     return invoke('clear_session_history', { sessionId })
   },
 
+  // Undo edit
+  async undoLastEdit(sessionId: number): Promise<any> {
+    return invoke('undo_last_edit', { sessionId })
+  },
+  async listEdits(sessionId: number): Promise<any[]> {
+    return invoke('list_edits', { sessionId })
+  },
+
+  // Rewind
+  async rewindConversation(sessionId: number, messageId: number): Promise<string> {
+    return invoke('rewind_conversation', { sessionId, messageId })
+  },
+
+  // Bookmarks
+  async saveBookmark(sessionId: number, name: string, workspace: string): Promise<any> {
+    return invoke('save_bookmark', { sessionId, name, workspace })
+  },
+  async listBookmarks(sessionId: number): Promise<any[]> {
+    return invoke('list_bookmarks', { sessionId })
+  },
+  async restoreBookmark(bookmarkId: number, workspace: string): Promise<void> {
+    return invoke('restore_bookmark', { bookmarkId, workspace })
+  },
+  async deleteBookmark(bookmarkId: number): Promise<void> {
+    return invoke('delete_bookmark', { bookmarkId })
+  },
+
   async readFile(path: string): Promise<string> {
     return invoke('read_file', { path })
   },

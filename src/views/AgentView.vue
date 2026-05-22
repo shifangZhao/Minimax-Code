@@ -2,6 +2,51 @@
   <div class="agent-view" :class="agentType">
     <div class="agent-header">
       <span class="agent-name">{{ agentName }}</span>
+      <div class="header-actions">
+        <button
+          v-if="recentEdits.length > 0"
+          class="header-btn"
+          title="撤销编辑"
+          @click="sessionId && undoLast(sessionId)"
+        >↩ 撤销</button>
+        <button
+          class="header-btn"
+          title="快照"
+          @click="showBookmarkPanel = !showBookmarkPanel"
+        >📸 快照</button>
+        <button
+          class="header-btn header-btn-danger"
+          title="清空对话"
+          @click="showClearConfirm = true"
+        >🗑</button>
+      </div>
+    </div>
+    <BookmarkPanel
+      :visible="showBookmarkPanel"
+      :items="bookmarks"
+      :showInput="showSaveInput"
+      @save="(name: string) => { bookmarkName = name; sessionId && saveBookmark(sessionId, workspace); }"
+      @restore="(bm: any) => { showRestoreConfirmBm = bm }"
+      @delete="(id: number) => { sessionId && deleteBookmark(id, sessionId) }"
+      @toggleInput="showSaveInput = !showSaveInput"
+    />
+    <div v-if="showRestoreConfirmBm" class="confirm-overlay">
+      <div class="confirm-card">
+        <p>恢复快照 "{{ showRestoreConfirmBm.name }}"？这将覆盖所有已跟踪的文件。</p>
+        <div class="confirm-actions">
+          <button class="confirm-cancel" @click="showRestoreConfirmBm = null">取消</button>
+          <button class="confirm-danger" @click="handleRestoreBookmark()">恢复</button>
+        </div>
+      </div>
+    </div>
+    <div v-if="showClearConfirm" class="confirm-overlay">
+      <div class="confirm-card">
+        <p>清空此对话的所有消息？</p>
+        <div class="confirm-actions">
+          <button class="confirm-cancel" @click="showClearConfirm = false">取消</button>
+          <button class="confirm-danger" @click="clearConversation()">清空</button>
+        </div>
+      </div>
     </div>
     <div class="messages" ref="messagesEl">
       <div
@@ -19,6 +64,10 @@
           </div>
           <div v-if="msg.role === 'user'" class="user-msg">
             <div class="text user-text">{{ msg.content }}</div>
+            <div class="msg-hover-actions">
+              <button class="hover-btn" title="重新生成" @click="retryMessage(i)">⟳</button>
+              <button class="hover-btn" title="回退到此" @click="rewindToMessage(msg.id, msg.content)">↩</button>
+            </div>
             <div v-if="parsedAttachments(msg)" class="user-attachments">
               <div v-for="(att, j) in parsedAttachments(msg)" :key="j" class="msg-att-wrap">
                 <img
@@ -56,6 +105,20 @@
         </div>
       </div>
     </div>
+    <div v-if="showRewindConfirm" class="confirm-overlay">
+      <div class="confirm-card">
+        <p>回退至此消息发送前的状态，该消息及之后的所有内容将被删除。</p>
+        <div class="confirm-actions">
+          <button class="confirm-cancel" @click="cancelRewind()">取消</button>
+          <button class="confirm-danger" @click="handleRewindConfirm()">确认回退</button>
+        </div>
+      </div>
+    </div>
+    <ToastBar
+      :visible="showUndoToast"
+      :message="lastUndone ? `已撤销: ${lastUndone}` : ''"
+      @close="showUndoToast = false"
+    />
     <AskDialog
       v-if="pendingAsk"
       :questions="pendingAsk.questions"
@@ -112,6 +175,10 @@ import { usePermissions } from '../composables/usePermissions'
 import { usePacedText } from '../composables/usePacedText'
 import { renderMarkdown } from '../composables/useMarkdown'
 import AskDialog from '../components/AskDialog.vue'
+import ToastBar from '../components/ToastBar.vue'
+import BookmarkPanel from '../components/BookmarkPanel.vue'
+import { useUndoHistory } from '../composables/useUndoHistory'
+import { useBookmarks } from '../composables/useBookmarks'
 
 const props = defineProps<{
   agentType: string
@@ -132,10 +199,19 @@ const {
   sessionId,
   pendingAsk,
   clearAsk,
+  retryMessage,
+  showRewindConfirm,
+  rewindToMessage,
+  confirmRewind,
+  cancelRewind,
+  showClearConfirm,
+  clearConversation,
 } = useAgentConversation(props.agentType)
 
 const { globalStreamingStates } = useGlobalStreaming()
 const { permRequests, respond: respondPerm } = usePermissions()
+const { recentEdits, lastUndone, showUndoToast, loadEdits, undoLast } = useUndoHistory()
+const { bookmarks, showBookmarkPanel, showSaveInput, bookmarkName, loadBookmarks, saveBookmark, restoreBookmark, deleteBookmark } = useBookmarks()
 
 const messagesEl = ref<HTMLElement>()
 const inputText = ref('')
@@ -192,22 +268,42 @@ const showLoading = computed(() => {
   return loading.value && cs && !cs.done && !cs.text && !cs.thinking
 })
 
+function isInternalCacheMessage(msg: any): boolean {
+  // Check raw_json for tool_result blocks (internal tool execution messages)
+  if (msg.raw_json) {
+    try {
+      const blocks = JSON.parse(msg.raw_json)
+      if (Array.isArray(blocks)) {
+        // Hide tool_result messages — they're internal API messages
+        if (blocks.some((b: any) => b.type === 'tool_result')) return true
+        // Hide intermediate assistant messages with tool_use blocks
+        if (blocks.some((b: any) => b.type === 'tool_use')) return true
+      }
+    } catch {}
+  }
+  // Hide empty user messages (skill context, etc.)
+  if (msg.role === 'user' && !msg.content?.trim()) return true
+  return false
+}
+
 const displayMessages = computed(() => {
-  return messages.value.map(m => {
-    // If content starts with 💭, extract thinking and text
-    if (m.content && m.content.startsWith('💭')) {
-      const parts = m.content.split('\n\n')
+  return messages.value
+    .filter(m => !isInternalCacheMessage(m))
+    .map(m => {
+      // If content starts with 💭, extract thinking and text
+      if (m.content && m.content.startsWith('💭')) {
+        const parts = m.content.split('\n\n')
+        return {
+          ...m,
+          thinking: parts[0].replace('💭 ', ''),
+          content: parts.slice(1).join('\n\n'),
+        }
+      }
       return {
         ...m,
-        thinking: parts[0].replace('💭 ', ''),
-        content: parts.slice(1).join('\n\n'),
+        thinking: (m as any).thinking,
       }
-    }
-    return {
-      ...m,
-      thinking: (m as any).thinking,
-    }
-  })
+    })
 })
 
 function formatContent(text: string): string {
@@ -459,6 +555,42 @@ async function handleAskCancel() {
   clearAsk()
 }
 
+const workspace = ref('')
+const showRestoreConfirmBm = ref<any>(null)
+
+async function handleRestoreBookmark() {
+  const bm = showRestoreConfirmBm.value
+  if (!bm) return
+  await restoreBookmark(bm.id, workspace.value)
+  showRestoreConfirmBm.value = null
+}
+
+async function handleRewindConfirm() {
+  const content = await confirmRewind()
+  if (content) {
+    inputText.value = content
+  }
+}
+
+// Load edits and bookmarks when session changes
+watch(sessionId, async (sid) => {
+  if (sid) {
+    loadEdits(sid)
+    loadBookmarks(sid)
+    // Load workspace for bookmark save
+    try {
+      workspace.value = await invoke<string>('get_workspace')
+    } catch { workspace.value = '' }
+  }
+})
+
+// Load edits when tool ends (file may have been modified)
+watch(() => messages.value.length, async () => {
+  if (sessionId.value) {
+    await loadEdits(sessionId.value)
+  }
+})
+
 watch(() => props.groupChatId, async (newId) => {
   if (newId) {
     await initSession(newId)
@@ -523,6 +655,7 @@ onDeactivated(() => {
   padding: 12px 16px;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border-color);
+  position: relative;
 }
 
 .agent-name {
@@ -1142,5 +1275,131 @@ onDeactivated(() => {
 
 .perm-allow:hover, .perm-once:hover, .perm-deny:hover {
   opacity: 0.85;
+}
+
+/* Header toolbar */
+.header-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.header-btn {
+  padding: 3px 10px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.header-btn:hover {
+  background: var(--bg-input);
+  color: var(--text-primary);
+}
+
+.header-btn-danger:hover {
+  color: #e81123;
+}
+
+/* Message hover actions */
+.user-msg {
+  position: relative;
+}
+
+.msg-hover-actions {
+  display: flex;
+  gap: 2px;
+  position: absolute;
+  top: -6px;
+  right: 0;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.user-msg:hover .msg-hover-actions {
+  opacity: 1;
+}
+
+.hover-btn {
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.hover-btn:hover {
+  background: var(--bg-input);
+  color: var(--text-primary);
+}
+
+/* Confirmation overlay */
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+  background: rgba(0,0,0,0.5);
+}
+
+.confirm-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 20px 24px;
+  min-width: 300px;
+  max-width: 400px;
+}
+
+.confirm-card p {
+  font-size: 14px;
+  color: var(--text-primary);
+  margin: 0 0 16px 0;
+}
+
+.confirm-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.confirm-cancel {
+  padding: 5px 14px;
+  border: none;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.confirm-cancel:hover {
+  background: var(--bg-input);
+  color: var(--text-primary);
+}
+
+.confirm-danger {
+  padding: 5px 14px;
+  border: none;
+  background: #dc3545;
+  color: white;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.confirm-danger:hover {
+  background: #c82333;
 }
 </style>

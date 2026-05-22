@@ -146,6 +146,17 @@ fn mark_last_message_for_cache(msgs: &mut Vec<serde_json::Value>) {
     }
 }
 
+/// Save original file content before modification for undo support.
+fn save_file_snapshot(db: &Arc<StdMutex<Connection>>, session_id: i64, file_path: &str) {
+    if let Ok(conn) = db.lock() {
+        let original = std::fs::read_to_string(file_path).ok();
+        let _ = conn.execute(
+            "INSERT INTO file_snapshot (session_id, file_path, original_content) VALUES (?1, ?2, ?3)",
+            rusqlite::params![session_id, file_path, original],
+        );
+    }
+}
+
 pub struct AgentService {
     api_url: String,
     api_key: Arc<Mutex<String>>,
@@ -875,11 +886,47 @@ async fn execute_tool(
 
     // Extract file path for auto-touch BEFORE params is potentially moved in the match
     let auto_touch_path: Option<String> = match tool_name {
-        "write_file" | "delete_file" | "copy_file" | "move_file" => params["path"].as_str().map(|s| s.to_string()),
-        "edit_file" => params["file_path"].as_str().map(|s| s.to_string()),
-        "create_directory" => params["path"].as_str().map(|s| s.to_string()),
+        "write_file" | "delete_file" | "copy_file" | "move_file" | "edit_file" | "create_directory" =>
+            params["path"].as_str().map(|s| normalize_file_path(s)),
         _ => None,
     };
+
+    // Save file snapshots before modification for undo support
+    match tool_name {
+        "write_file" | "edit_file" | "delete_file" => {
+            if let Some(p) = params["path"].as_str() {
+                save_file_snapshot(&db, session_id, &normalize_file_path(p));
+            }
+        }
+        "write_files" | "modify_files" => {
+            if let Some(files) = params["files"].as_array() {
+                for f in files.iter().filter_map(|f| f.as_object()) {
+                    if let Some(p) = f.get("path").and_then(|p| p.as_str()) {
+                        save_file_snapshot(&db, session_id, &normalize_file_path(p));
+                    }
+                }
+            }
+        }
+        "move_file" => {
+            if let Some(src) = params["source"].as_str() {
+                save_file_snapshot(&db, session_id, &normalize_file_path(src));
+            }
+            if let Some(dst) = params["destination"].as_str() {
+                save_file_snapshot(&db, session_id, &normalize_file_path(dst));
+            }
+        }
+        "copy_file" => {
+            if let Some(dst) = params["destination"].as_str() {
+                save_file_snapshot(&db, session_id, &normalize_file_path(dst));
+            }
+        }
+        "multi_edit" | "edit_lines" => {
+            if let Some(p) = params["path"].as_str() {
+                save_file_snapshot(&db, session_id, &normalize_file_path(p));
+            }
+        }
+        _ => {}
+    }
 
     let result = match tool_name {
         "list_dir" => tool_list_dir(&params).await,
@@ -1112,7 +1159,7 @@ async fn tool_send_to_agent(
 // ========== Tool Implementations (Flat) ==========
 
 async fn tool_list_dir(params: &serde_json::Value) -> String {
-    let path = params["path"].as_str().unwrap_or(".");
+    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     let path = path.to_string();
     tokio::task::spawn_blocking(move || {
         match std::fs::read_dir(&path) {
@@ -1136,7 +1183,7 @@ async fn tool_list_dir(params: &serde_json::Value) -> String {
 }
 
 async fn tool_read_file(params: &serde_json::Value) -> String {
-    let path = params["path"].as_str().unwrap_or("").to_string();
+    let path = normalize_file_path(params["path"].as_str().unwrap_or(""));
     let offset = params["offset"].as_u64().unwrap_or(0) as usize;
     let limit = params["limit"].as_u64().unwrap_or(0) as usize;
 
@@ -1234,7 +1281,8 @@ async fn tool_read_files(params: &serde_json::Value) -> String {
         let results: Vec<String> = paths.iter()
             .filter_map(|p| p.as_str())
             .map(|path| {
-                std::fs::read_to_string(path)
+                let path = normalize_file_path(path);
+                std::fs::read_to_string(&path)
                     .map(|c| format!("=== {} ===\n{}", path, c))
                     .unwrap_or_else(|e| format!("=== {} ===\nError: {}", path, e))
             })
@@ -1246,8 +1294,7 @@ async fn tool_read_files(params: &serde_json::Value) -> String {
 }
 
 async fn tool_git_status(params: &serde_json::Value) -> String {
-    let path = params["path"].as_str().unwrap_or(".");
-    let path = path.to_string();
+    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     tokio::task::spawn_blocking(move || {
         match std::process::Command::new("git")
             .args(["-C", &path, "status", "--porcelain"])
@@ -1268,7 +1315,7 @@ async fn tool_git_status(params: &serde_json::Value) -> String {
 }
 
 async fn tool_git_log(params: &serde_json::Value) -> String {
-    let path = params["path"].as_str().unwrap_or(".");
+    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     let count = params["count"].as_i64().unwrap_or(20) as usize;
     let path = path.to_string();
     tokio::task::spawn_blocking(move || {
@@ -1285,7 +1332,7 @@ async fn tool_git_log(params: &serde_json::Value) -> String {
 }
 
 async fn tool_git_diff(params: &serde_json::Value) -> String {
-    let path = params["path"].as_str().unwrap_or(".");
+    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     let target = params["target"].as_str().unwrap_or("HEAD");
     let path = path.to_string();
     let target = target.to_string();
@@ -1303,7 +1350,7 @@ async fn tool_git_diff(params: &serde_json::Value) -> String {
 }
 
 async fn tool_git_commit(params: &serde_json::Value) -> String {
-    let path = params["path"].as_str().unwrap_or(".");
+    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     let message = params["message"].as_str().unwrap_or("");
     let path = path.to_string();
     let message = message.to_string();
@@ -1327,7 +1374,7 @@ async fn tool_git_commit(params: &serde_json::Value) -> String {
 }
 
 async fn tool_git_branch(params: &serde_json::Value) -> String {
-    let path = params["path"].as_str().unwrap_or(".");
+    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     let path = path.to_string();
     tokio::task::spawn_blocking(move || {
         match std::process::Command::new("git")
@@ -1343,7 +1390,7 @@ async fn tool_git_branch(params: &serde_json::Value) -> String {
 }
 
 async fn tool_git_checkout(params: &serde_json::Value) -> String {
-    let path = params["path"].as_str().unwrap_or(".");
+    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     let branch = params["branch"].as_str().unwrap_or("");
     let path = path.to_string();
     let branch = branch.to_string();
@@ -1367,7 +1414,7 @@ async fn tool_git_checkout(params: &serde_json::Value) -> String {
 }
 
 async fn tool_git_stash(params: &serde_json::Value) -> String {
-    let path = params["path"].as_str().unwrap_or(".");
+    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     let path = path.to_string();
     tokio::task::spawn_blocking(move || {
         match std::process::Command::new("git")
@@ -1389,7 +1436,7 @@ async fn tool_git_stash(params: &serde_json::Value) -> String {
 }
 
 async fn tool_git_stash_pop(params: &serde_json::Value) -> String {
-    let path = params["path"].as_str().unwrap_or(".");
+    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     let path = path.to_string();
     tokio::task::spawn_blocking(move || {
         match std::process::Command::new("git")
@@ -1411,7 +1458,7 @@ async fn tool_git_stash_pop(params: &serde_json::Value) -> String {
 }
 
 async fn tool_search_in_dir(params: &serde_json::Value) -> String {
-    let path = params["path"].as_str().unwrap_or(".");
+    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     let pattern = params["pattern"].as_str().unwrap_or("").to_lowercase();
     let path = path.to_string();
     tokio::task::spawn_blocking(move || {
@@ -1432,7 +1479,7 @@ async fn tool_search_in_dir(params: &serde_json::Value) -> String {
 }
 
 async fn tool_get_env_info(params: &serde_json::Value) -> String {
-    let path = params["path"].as_str().unwrap_or(".");
+    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     let path = path.to_string();
     tokio::task::spawn_blocking(move || get_env_info_sync(&path))
         .await
@@ -1440,7 +1487,7 @@ async fn tool_get_env_info(params: &serde_json::Value) -> String {
 }
 
 async fn tool_analyze_project_structure(params: &serde_json::Value) -> String {
-    let path = params["path"].as_str().unwrap_or(".");
+    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     let path = path.to_string();
     tokio::task::spawn_blocking(move || analyze_project_sync(&path))
         .await
@@ -1448,10 +1495,8 @@ async fn tool_analyze_project_structure(params: &serde_json::Value) -> String {
 }
 
 async fn tool_run_command(params: &serde_json::Value) -> String {
-    let command = params["command"].as_str().unwrap_or("");
-    let cwd = params["path"].as_str();
-    let command = command.to_string();
-    let cwd = cwd.map(|s| s.to_string());
+    let command = params["command"].as_str().unwrap_or("").to_string();
+    let cwd = params["path"].as_str().map(|s| normalize_file_path(s));
     tokio::task::spawn_blocking(move || {
         let mut cmd = if cfg!(windows) {
             let mut c = std::process::Command::new("cmd");
@@ -1480,10 +1525,8 @@ async fn tool_run_command(params: &serde_json::Value) -> String {
 }
 
 async fn tool_write_file(params: &serde_json::Value) -> String {
-    let path = params["path"].as_str().unwrap_or("");
-    let content = params["content"].as_str().unwrap_or("");
-    let path = path.to_string();
-    let content = content.to_string();
+    let path = normalize_file_path(params["path"].as_str().unwrap_or(""));
+    let content = params["content"].as_str().unwrap_or("").to_string();
     tokio::task::spawn_blocking(move || {
         if let Some(parent) = std::path::Path::new(&path).parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
@@ -1504,15 +1547,15 @@ async fn tool_write_files(params: &serde_json::Value) -> String {
         let results: Vec<String> = files.iter()
             .filter_map(|f| f.as_object())
             .map(|obj| {
-                let path = obj.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                let path = normalize_file_path(obj.get("path").and_then(|p| p.as_str()).unwrap_or(""));
                 let content = obj.get("content").and_then(|c| c.as_str()).unwrap_or("");
                 if path.is_empty() {
                     return "Error: empty path".to_string();
                 }
-                if let Some(parent) = std::path::Path::new(path).parent() {
+                if let Some(parent) = std::path::Path::new(&path).parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                match std::fs::write(path, content) {
+                match std::fs::write(&path, content) {
                     Ok(_) => format!("Written: {}", path),
                     Err(e) => format!("Error writing {}: {}", path, e),
                 }
@@ -1525,7 +1568,7 @@ async fn tool_write_files(params: &serde_json::Value) -> String {
 }
 
 async fn tool_find_replace_in_files(params: &serde_json::Value) -> String {
-    let path = params["path"].as_str().unwrap_or(".");
+    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     let find = params["find"].as_str().unwrap_or("");
     let replace = params["replace"].as_str().unwrap_or("");
     let use_regex = params.get("use_regex").and_then(|b| b.as_bool()).unwrap_or(false);
@@ -1546,11 +1589,11 @@ async fn tool_modify_files(params: &serde_json::Value) -> String {
         let results: Vec<String> = files.iter()
             .filter_map(|f| f.as_object())
             .map(|obj| {
-                let path = obj.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                let path = normalize_file_path(obj.get("path").and_then(|p| p.as_str()).unwrap_or(""));
                 if path.is_empty() {
                     return "Error: empty path".to_string();
                 }
-                let original = match std::fs::read_to_string(path) {
+                let original = match std::fs::read_to_string(&path) {
                     Ok(c) => c,
                     Err(e) => return format!("Error reading {}: {}", path, e),
                 };
@@ -1565,7 +1608,7 @@ async fn tool_modify_files(params: &serde_json::Value) -> String {
                 if let Some(new_content) = obj.get("new_content").and_then(|c| c.as_str()) {
                     content = new_content.to_string();
                 }
-                match std::fs::write(path, &content) {
+                match std::fs::write(&path, &content) {
                     Ok(_) => format!("Modified: {}", path),
                     Err(e) => format!("Error modifying {}: {}", path, e),
                 }
@@ -1578,8 +1621,7 @@ async fn tool_modify_files(params: &serde_json::Value) -> String {
 }
 
 async fn tool_get_file_info(params: &serde_json::Value) -> String {
-    let path = params["path"].as_str().unwrap_or("");
-    let path = path.to_string();
+    let path = normalize_file_path(params["path"].as_str().unwrap_or(""));
     tokio::task::spawn_blocking(move || {
         match std::fs::metadata(&path) {
             Ok(meta) => {
@@ -1599,7 +1641,7 @@ async fn tool_get_file_info(params: &serde_json::Value) -> String {
 }
 
 async fn tool_directory_tree(params: &serde_json::Value) -> String {
-    let path = params["path"].as_str().unwrap_or(".");
+    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     let max_depth = params["max_depth"].as_i64().unwrap_or(2) as usize;
     let path = path.to_string();
     tokio::task::spawn_blocking(move || {
@@ -1646,11 +1688,9 @@ fn tree_recursive(dir: &std::path::Path, prefix: &str, max_depth: usize, output:
 }
 
 async fn tool_glob(params: &serde_json::Value) -> String {
-    let pattern = params["pattern"].as_str().unwrap_or("*");
-    let base_path = params["path"].as_str().unwrap_or(".");
+    let pattern = params["pattern"].as_str().unwrap_or("*").to_string();
+    let base_path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     let limit = params["limit"].as_i64().unwrap_or(200) as usize;
-    let pattern = pattern.to_string();
-    let base_path = base_path.to_string();
     tokio::task::spawn_blocking(move || {
         let mut results = Vec::new();
         let skip_dirs = |name: &str| name.starts_with('.') || matches!(name, "node_modules" | "target" | ".git" | "dist" | "build" | ".next" | ".venv" | "__pycache__");
@@ -1712,7 +1752,7 @@ fn glob_to_regex(pattern: &str) -> String {
 }
 
 async fn tool_search_files(params: &serde_json::Value) -> String {
-    let path = params["path"].as_str().unwrap_or(".");
+    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     let pattern = params["pattern"].as_str().unwrap_or("");
     let path = path.to_string();
     let pattern = pattern.to_lowercase();
@@ -1746,7 +1786,7 @@ fn search_files_recursive(dir: &str, pattern: &str, results: &mut Vec<String>, l
 }
 
 async fn tool_edit_file(params: &serde_json::Value) -> String {
-    let path = params["path"].as_str().unwrap_or("").to_string();
+    let path = normalize_file_path(params["path"].as_str().unwrap_or(""));
     let search = params["search"].as_str().unwrap_or("").to_string();
     let replace = params["replace"].as_str().unwrap_or("").to_string();
 
@@ -1841,7 +1881,7 @@ fn truncate_str(s: &str, max: usize) -> String {
 }
 
 async fn tool_edit_lines(params: &serde_json::Value) -> String {
-    let path = params["path"].as_str().unwrap_or("").to_string();
+    let path = normalize_file_path(params["path"].as_str().unwrap_or(""));
     let start_line = params["start_line"].as_u64().unwrap_or(0) as usize;
     let end_line = params["end_line"].as_u64().map(|v| v as usize);
     let content = params["content"].as_str().map(|s| s.to_string());
@@ -1983,8 +2023,7 @@ async fn tool_multi_edit(params: &serde_json::Value) -> String {
 }
 
 async fn tool_create_directory(params: &serde_json::Value) -> String {
-    let path = params["path"].as_str().unwrap_or("");
-    let path = path.to_string();
+    let path = normalize_file_path(params["path"].as_str().unwrap_or(""));
     tokio::task::spawn_blocking(move || {
         match std::fs::create_dir_all(&path) {
             Ok(_) => format!("Created directory: {}", path),
@@ -1996,10 +2035,8 @@ async fn tool_create_directory(params: &serde_json::Value) -> String {
 }
 
 async fn tool_move_file(params: &serde_json::Value) -> String {
-    let source = params["source"].as_str().unwrap_or("");
-    let destination = params["destination"].as_str().unwrap_or("");
-    let source = source.to_string();
-    let destination = destination.to_string();
+    let source = normalize_file_path(params["source"].as_str().unwrap_or(""));
+    let destination = normalize_file_path(params["destination"].as_str().unwrap_or(""));
     tokio::task::spawn_blocking(move || {
         match std::fs::rename(&source, &destination) {
             Ok(_) => format!("Moved: {} -> {}", source, destination),
@@ -2011,8 +2048,7 @@ async fn tool_move_file(params: &serde_json::Value) -> String {
 }
 
 async fn tool_delete_file(params: &serde_json::Value) -> String {
-    let path = params["path"].as_str().unwrap_or("");
-    let path = path.to_string();
+    let path = normalize_file_path(params["path"].as_str().unwrap_or(""));
     tokio::task::spawn_blocking(move || {
         if let Ok(meta) = std::fs::metadata(&path) {
             if meta.is_dir() {
@@ -2029,10 +2065,8 @@ async fn tool_delete_file(params: &serde_json::Value) -> String {
 }
 
 async fn tool_copy_file_fn(params: &serde_json::Value) -> String {
-    let source = params["source"].as_str().unwrap_or("");
-    let destination = params["destination"].as_str().unwrap_or("");
-    let source = source.to_string();
-    let destination = destination.to_string();
+    let source = normalize_file_path(params["source"].as_str().unwrap_or(""));
+    let destination = normalize_file_path(params["destination"].as_str().unwrap_or(""));
     tokio::task::spawn_blocking(move || {
         copy_recursive(&source, &destination)
     })
@@ -2132,7 +2166,7 @@ fn html_to_text(html: &str) -> String {
 
 async fn tool_run_background(params: &serde_json::Value) -> String {
     let command = params["command"].as_str().unwrap_or("");
-    let path = params["path"].as_str().unwrap_or(".");
+    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     let wait_sec = params["wait_sec"].as_i64().unwrap_or(3) as u64;
     if command.is_empty() {
         return "Error: command is required".to_string();
@@ -2338,7 +2372,7 @@ async fn tool_list_jobs(_params: &serde_json::Value) -> String {
 }
 
 async fn tool_run_tests(params: &serde_json::Value) -> String {
-    let path = params["path"].as_str().unwrap_or(".");
+    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     let framework = params["test_framework"].as_str().unwrap_or("npm");
     let path = path.to_string();
     let framework = framework.to_string();
@@ -2859,6 +2893,43 @@ fn user_home_dir() -> std::path::PathBuf {
     }
 }
 
+/// Normalize a file path for the current OS.
+/// - On Windows: converts Unix-style `/X/path` to `X:/path` and normalizes separators
+/// - Handles both backslash and forward-slash paths
+/// - Resolves `~` to home directory
+fn normalize_file_path(raw: &str) -> String {
+    let trimmed = raw.trim().trim_matches('"').trim_matches('\'');
+
+    // Expand ~ to home directory
+    let expanded = if trimmed.starts_with('~') {
+        let home = user_home_dir();
+        home.join(trimmed.trim_start_matches('~').trim_start_matches('/').trim_start_matches('\\'))
+            .to_string_lossy()
+            .to_string()
+    } else {
+        trimmed.to_string()
+    };
+
+    if cfg!(windows) {
+        // Convert Unix-style /X/path to X:/path (e.g. /e/foo → E:/foo)
+        let normalized = if expanded.len() >= 2
+            && expanded.starts_with('/')
+            && expanded.as_bytes().get(1).map_or(false, |b| b.is_ascii_alphabetic())
+            && expanded.as_bytes().get(2).map_or(true, |b| *b == b'/' || *b == b'\\')
+        {
+            let drive = (expanded.as_bytes()[1] as char).to_ascii_uppercase();
+            format!("{}:/{}", drive, &expanded[3..])
+        } else {
+            expanded
+        };
+        // Normalize separators to backslash for Windows
+        normalized.replace('/', "\\")
+    } else {
+        // On Unix: normalize backslashes to forward slashes
+        expanded.replace('\\', "/")
+    }
+}
+
 fn get_project_name() -> String {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
@@ -2959,7 +3030,7 @@ fn schema_obj(props: serde_json::Value, required: &[&str]) -> serde_json::Value 
 // ========== Code Graph Tool Implementations ==========
 
 async fn tool_build_code_graph(params: &serde_json::Value, code_graph: Arc<StdMutex<CodeGraph>>) -> String {
-    let path = params["path"].as_str().unwrap_or(".");
+    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     let path = path.to_string();
     tokio::task::spawn_blocking(move || {
         let mut cg = code_graph.lock().unwrap();
@@ -2997,7 +3068,7 @@ async fn tool_build_code_graph(params: &serde_json::Value, code_graph: Arc<StdMu
 }
 
 async fn tool_code_graph_sync(params: &serde_json::Value, code_graph: Arc<StdMutex<CodeGraph>>) -> String {
-    let path = params["path"].as_str().unwrap_or(".");
+    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     let files: Vec<String> = params["files"].as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
@@ -3115,7 +3186,7 @@ async fn tool_read_lints(
     lsp_manager: Arc<StdMutex<Option<LspManager>>>,
     db: Arc<StdMutex<Connection>>,
 ) -> String {
-    let path: Option<String> = params["path"].as_str().map(|s| s.to_string());
+    let path: Option<String> = params["path"].as_str().map(|s| normalize_file_path(s));
 
     tokio::task::spawn_blocking(move || {
         let workspace = {
@@ -3154,7 +3225,7 @@ async fn tool_touch_file(
     lsp_manager: Arc<StdMutex<Option<LspManager>>>,
     db: Arc<StdMutex<Connection>>,
 ) -> String {
-    let file_path: String = params["file_path"].as_str().unwrap_or("").to_string();
+    let file_path: String = normalize_file_path(params["file_path"].as_str().unwrap_or(""));
 
     tokio::task::spawn_blocking(move || {
         let workspace = {
