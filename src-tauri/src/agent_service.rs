@@ -18,7 +18,6 @@ use std::sync::{Arc, Mutex as StdMutex};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{Mutex, RwLock};
 
-use crate::code_graph::CodeGraph;
 use crate::context_compressor::{compress_context, estimate_tokens};
 use crate::lsp_manager::LspManager;
 use crate::lsp_types::format_diagnostics;
@@ -270,7 +269,6 @@ pub struct AgentService {
     skill_service: Arc<SkillService>,
     mcp_service: Arc<RwLock<McpService>>,
     db: Arc<StdMutex<Connection>>,
-    code_graph: Arc<StdMutex<CodeGraph>>,
     lsp_manager: Arc<StdMutex<Option<LspManager>>>,
     permission_service: Arc<StdMutex<PermissionService>>,
     pending_asks: PendingAsks,
@@ -288,7 +286,6 @@ impl Clone for AgentService {
             skill_service: self.skill_service.clone(),
             mcp_service: self.mcp_service.clone(),
             db: self.db.clone(),
-            code_graph: self.code_graph.clone(),
             lsp_manager: self.lsp_manager.clone(),
             permission_service: self.permission_service.clone(),
             pending_asks: self.pending_asks.clone(),
@@ -297,7 +294,7 @@ impl Clone for AgentService {
 }
 
 impl AgentService {
-    pub fn new(api_key: String, api_url: String, messages_path: String, model: String, context_window: usize, provider: String, skill_service: Arc<SkillService>, mcp_service: Arc<RwLock<McpService>>, db: Arc<StdMutex<Connection>>, code_graph: Arc<StdMutex<CodeGraph>>, lsp_manager: Arc<StdMutex<Option<LspManager>>>, permission_service: Arc<StdMutex<PermissionService>>, pending_asks: PendingAsks) -> Self {
+    pub fn new(api_key: String, api_url: String, messages_path: String, model: String, context_window: usize, provider: String, skill_service: Arc<SkillService>, mcp_service: Arc<RwLock<McpService>>, db: Arc<StdMutex<Connection>>, lsp_manager: Arc<StdMutex<Option<LspManager>>>, permission_service: Arc<StdMutex<PermissionService>>, pending_asks: PendingAsks) -> Self {
         Self {
             api_url,
             messages_path,
@@ -308,7 +305,6 @@ impl AgentService {
             skill_service,
             mcp_service,
             db,
-            code_graph,
             lsp_manager,
             permission_service,
             pending_asks,
@@ -555,7 +551,6 @@ impl AgentService {
                 skill_service.clone(),
                 mcp_service.clone(),
                 self.db.clone(),
-                self.code_graph.clone(),
                 lsp_manager.clone(),
                 permission_service.clone(),
                 pending_asks.clone(),
@@ -651,7 +646,6 @@ async fn process_sse_stream(
     skill_service: Arc<SkillService>,
     mcp_service: Arc<RwLock<McpService>>,
     db: Arc<StdMutex<Connection>>,
-    code_graph: Arc<StdMutex<CodeGraph>>,
     lsp_manager: Arc<StdMutex<Option<LspManager>>>,
     permission_service: Arc<StdMutex<PermissionService>>,
     pending_asks: PendingAsks,
@@ -866,7 +860,6 @@ async fn process_sse_stream(
                 let skill_service = skill_service.clone();
                 let mcp_service = mcp_service.clone();
                 let db = db.clone();
-                let code_graph = code_graph.clone();
                 let lsp_manager = lsp_manager.clone();
                 let permission_service = permission_service.clone();
                 let pending_asks = pending_asks.clone();
@@ -877,7 +870,7 @@ async fn process_sse_stream(
                         &tool_name, &final_input, sid,
                         api_key, api_url, model, provider,
                         skill_service, mcp_service,
-                        db, code_graph, lsp_manager, permission_service, pending_asks, app,
+                        db, lsp_manager, permission_service, pending_asks, app,
                     ).await;
                     (i, tool_name, result)
                 })
@@ -1004,7 +997,6 @@ async fn execute_tool(
     skill_service: Arc<SkillService>,
     mcp_service: Arc<RwLock<McpService>>,
     db: Arc<StdMutex<Connection>>,
-    code_graph: Arc<StdMutex<CodeGraph>>,
     lsp_manager: Arc<StdMutex<Option<LspManager>>>,
     permission_service: Arc<StdMutex<PermissionService>>,
     pending_asks: PendingAsks,
@@ -1180,15 +1172,7 @@ async fn execute_tool(
         "read_knowledge" => tool_read_knowledge(&params).await,
         "write_knowledge" => tool_write_knowledge(&params).await,
         "list_knowledge" => tool_list_knowledge().await,
-        "send_to_agent" => tool_send_to_agent(session_id, &params, api_key.clone(), skill_service.clone(), mcp_service.clone(), db.clone(), code_graph.clone(), lsp_manager.clone(), permission_service.clone(), pending_asks.clone(), app_handle.clone()).await,
-        "build_code_graph" => tool_build_code_graph(&params, code_graph.clone()).await,
-        "code_graph_sync" => tool_code_graph_sync(&params, code_graph.clone()).await,
-        "code_graph_search" => tool_code_graph_search(&params, code_graph.clone()).await,
-        "code_graph_callers" => tool_code_graph_callers(&params, code_graph.clone()).await,
-        "code_graph_callees" => tool_code_graph_callees(&params, code_graph.clone()).await,
-        "code_graph_explore" => tool_code_graph_explore(&params, code_graph.clone()).await,
-        "code_graph_file" => tool_code_graph_file(&params, code_graph.clone()).await,
-        "code_graph_stats" => tool_code_graph_stats(code_graph.clone()).await,
+        "send_to_agent" => tool_send_to_agent(session_id, &params, api_key.clone(), skill_service.clone(), mcp_service.clone(), db.clone(), lsp_manager.clone(), permission_service.clone(), pending_asks.clone(), app_handle.clone()).await,
         "read_lints" => tool_read_lints(&params, lsp_manager.clone(), db.clone()).await,
         "touch_file" => tool_touch_file(&params, lsp_manager.clone(), db.clone()).await,
         "ask_choice" => tool_ask_choice(&params, session_id, "unknown", pending_asks.clone(), app_handle.clone()).await,
@@ -1225,7 +1209,6 @@ async fn tool_send_to_agent(
     skill_service: Arc<SkillService>,
     mcp_service: Arc<RwLock<McpService>>,
     db: Arc<StdMutex<Connection>>,
-    code_graph: Arc<StdMutex<CodeGraph>>,
     lsp_manager: Arc<StdMutex<Option<LspManager>>>,
     permission_service: Arc<StdMutex<PermissionService>>,
     pending_asks: PendingAsks,
@@ -1361,7 +1344,7 @@ async fn tool_send_to_agent(
 
             std::thread::spawn(move || {
                 handle.block_on(async move {
-                    let agent = AgentService::new(api_key, api_url, messages_path, model, context_window, provider, skill_service, mcp_service, db, code_graph, lm, pm, pa);
+                    let agent = AgentService::new(api_key, api_url, messages_path, model, context_window, provider, skill_service, mcp_service, db, lm, pm, pa);
                     agent.stream_chat(&agent_type, history, None, workspace, app, target_session_id).await;
                 });
             });
@@ -3332,9 +3315,6 @@ fn is_parallel_safe(tool_name: &str) -> bool {
         | "git_status" | "git_log" | "git_diff"
         // Web
         | "web_search" | "web_fetch"
-        // Code graph (all read)
-        | "code_graph_search" | "code_graph_callers" | "code_graph_callees"
-        | "code_graph_explore" | "code_graph_file" | "code_graph_stats"
         // Knowledge read
         | "read_knowledge"
         // Skill inspection
@@ -3359,160 +3339,6 @@ fn schema_obj(props: serde_json::Value, required: &[&str]) -> serde_json::Value 
         s["required"] = json!(required);
     }
     s
-}
-
-// ========== Code Graph Tool Implementations ==========
-
-async fn tool_build_code_graph(params: &serde_json::Value, code_graph: Arc<StdMutex<CodeGraph>>) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    let path = path.to_string();
-    tokio::task::spawn_blocking(move || {
-        let mut cg = code_graph.lock().unwrap();
-
-        // Try loading existing graph first
-        match cg.load(&path) {
-            Ok(true) => {
-                let stats = cg.stats.clone();
-                return json!({
-                    "success": true,
-                    "loaded": true,
-                    "stats": stats,
-                    "message": format!("已加载已有图谱：{} 节点，{} 边，{} 文件（上次构建耗时 {} ms）",
-                        stats.total_nodes, stats.total_edges, stats.total_files, stats.build_time_ms)
-                }).to_string();
-            }
-            Ok(false) => {}, // No saved graph, build new
-            Err(e) => eprintln!("[code_graph] Load failed: {}", e),
-        }
-
-        // Build new graph
-        match cg.build(&path) {
-            Ok(stats) => json!({
-                "success": true,
-                "loaded": false,
-                "stats": stats,
-                "message": format!("图谱构建完成并已保存：{} 节点，{} 边，{} 文件，耗时 {} ms",
-                    stats.total_nodes, stats.total_edges, stats.total_files, stats.build_time_ms)
-            }).to_string(),
-            Err(e) => json!({"success": false, "error": e}).to_string(),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| json!({"success": false, "error": "Task cancelled"}).to_string())
-}
-
-async fn tool_code_graph_sync(params: &serde_json::Value, code_graph: Arc<StdMutex<CodeGraph>>) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    let files: Vec<String> = params["files"].as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        .unwrap_or_default();
-    if files.is_empty() {
-        return json!({"success": false, "error": "files list is required"}).to_string();
-    }
-    let path = path.to_string();
-    tokio::task::spawn_blocking(move || {
-        let mut cg = code_graph.lock().unwrap();
-        match cg.sync(&path, &files) {
-            Ok(stats) => json!({
-                "success": true,
-                "stats": stats,
-                "synced_files": files.len(),
-                "message": format!("增量同步完成：{} 文件，图谱现含 {} 节点 {} 边",
-                    files.len(), stats.total_nodes, stats.total_edges)
-            }).to_string(),
-            Err(e) => json!({"success": false, "error": e}).to_string(),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| json!({"success": false, "error": "Task cancelled"}).to_string())
-}
-
-async fn tool_code_graph_search(params: &serde_json::Value, code_graph: Arc<StdMutex<CodeGraph>>) -> String {
-    let query = params["query"].as_str().unwrap_or("");
-    let top_k = params["top_k"].as_i64().unwrap_or(20) as usize;
-    if query.is_empty() {
-        return json!({"success": false, "error": "query is required"}).to_string();
-    }
-    let query = query.to_string();
-    tokio::task::spawn_blocking(move || {
-        let cg = code_graph.lock().unwrap();
-        let results = cg.search(&query, top_k);
-        json!({"success": true, "count": results.len(), "results": results}).to_string()
-    })
-    .await
-    .unwrap_or_else(|_| json!({"success": false, "error": "Task cancelled"}).to_string())
-}
-
-async fn tool_code_graph_callers(params: &serde_json::Value, code_graph: Arc<StdMutex<CodeGraph>>) -> String {
-    let node_id = params["node_id"].as_str().unwrap_or("");
-    let max_depth = params["max_depth"].as_i64().unwrap_or(1) as usize;
-    if node_id.is_empty() {
-        return json!({"success": false, "error": "node_id is required"}).to_string();
-    }
-    let node_id = node_id.to_string();
-    tokio::task::spawn_blocking(move || {
-        let cg = code_graph.lock().unwrap();
-        let sub = cg.get_callers(&node_id, max_depth);
-        json!({"success": true, "subgraph": sub}).to_string()
-    })
-    .await
-    .unwrap_or_else(|_| json!({"success": false, "error": "Task cancelled"}).to_string())
-}
-
-async fn tool_code_graph_callees(params: &serde_json::Value, code_graph: Arc<StdMutex<CodeGraph>>) -> String {
-    let node_id = params["node_id"].as_str().unwrap_or("");
-    let max_depth = params["max_depth"].as_i64().unwrap_or(1) as usize;
-    if node_id.is_empty() {
-        return json!({"success": false, "error": "node_id is required"}).to_string();
-    }
-    let node_id = node_id.to_string();
-    tokio::task::spawn_blocking(move || {
-        let cg = code_graph.lock().unwrap();
-        let sub = cg.get_callees(&node_id, max_depth);
-        json!({"success": true, "subgraph": sub}).to_string()
-    })
-    .await
-    .unwrap_or_else(|_| json!({"success": false, "error": "Task cancelled"}).to_string())
-}
-
-async fn tool_code_graph_explore(params: &serde_json::Value, code_graph: Arc<StdMutex<CodeGraph>>) -> String {
-    let query = params["query"].as_str().unwrap_or("");
-    let max_nodes = params["max_nodes"].as_i64().unwrap_or(30) as usize;
-    if query.is_empty() {
-        return json!({"success": false, "error": "query is required"}).to_string();
-    }
-    let query = query.to_string();
-    tokio::task::spawn_blocking(move || {
-        let cg = code_graph.lock().unwrap();
-        let sub = cg.explore(&query, max_nodes);
-        json!({"success": true, "subgraph": sub}).to_string()
-    })
-    .await
-    .unwrap_or_else(|_| json!({"success": false, "error": "Task cancelled"}).to_string())
-}
-
-async fn tool_code_graph_file(params: &serde_json::Value, code_graph: Arc<StdMutex<CodeGraph>>) -> String {
-    let file_path = params["file_path"].as_str().unwrap_or("");
-    if file_path.is_empty() {
-        return json!({"success": false, "error": "file_path is required"}).to_string();
-    }
-    let file_path = file_path.to_string();
-    tokio::task::spawn_blocking(move || {
-        let cg = code_graph.lock().unwrap();
-        let symbols = cg.get_file_symbols(&file_path);
-        json!({"success": true, "count": symbols.len(), "symbols": symbols}).to_string()
-    })
-    .await
-    .unwrap_or_else(|_| json!({"success": false, "error": "Task cancelled"}).to_string())
-}
-
-async fn tool_code_graph_stats(code_graph: Arc<StdMutex<CodeGraph>>) -> String {
-    tokio::task::spawn_blocking(move || {
-        let cg = code_graph.lock().unwrap();
-        json!({"success": true, "stats": cg.stats}).to_string()
-    })
-    .await
-    .unwrap_or_else(|_| json!({"success": false, "error": "Task cancelled"}).to_string())
 }
 
 async fn tool_read_lints(
@@ -3643,32 +3469,6 @@ fn format_lints_result(diags: &[crate::lsp_types::FileDiagnostics]) -> String {
     json!({"success": true, "diagnostics": output}).to_string()
 }
 
-fn code_graph_read_tools() -> Vec<(&'static str, &'static str, serde_json::Value)> {
-    vec![
-        ("code_graph_search", "在代码图谱中按名称搜索符号（函数/类/接口等）",
-            schema_obj(json!({"query": {"type": "string"}, "top_k": {"type": "integer"}}), &["query"])),
-        ("code_graph_callers", "查找调用指定符号的所有位置（谁在调用它）",
-            schema_obj(json!({"node_id": {"type": "string"}, "max_depth": {"type": "integer"}}), &["node_id"])),
-        ("code_graph_callees", "查找指定符号调用了哪些符号",
-            schema_obj(json!({"node_id": {"type": "string"}, "max_depth": {"type": "integer"}}), &["node_id"])),
-        ("code_graph_explore", "深度探索：围绕查询词返回相关符号、调用关系、包含关系的完整子图。单次调用替代多次搜索",
-            schema_obj(json!({"query": {"type": "string"}, "max_nodes": {"type": "integer"}}), &["query"])),
-        ("code_graph_file", "查看某个文件中的所有符号",
-            schema_obj(json!({"file_path": {"type": "string"}}), &["file_path"])),
-        ("code_graph_stats", "获取已构建图谱的统计信息（文件数、节点数、语言分布等）",
-            schema_obj(json!({}), &[])),
-    ]
-}
-
-fn code_graph_explore_tools() -> Vec<(&'static str, &'static str, serde_json::Value)> {
-    vec![
-        ("build_code_graph", "扫描并构建/加载项目代码图谱",
-            schema_obj(json!({"path": {"type": "string"}}), &["path"])),
-        ("code_graph_sync", "增量更新图谱：接收变更文件列表，仅重新解析变更的文件。用于代码提交后快速同步",
-            schema_obj(json!({"path": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}}), &["path", "files"])),
-    ]
-}
-
 fn get_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
     let mut tools = Vec::new();
 
@@ -3791,9 +3591,6 @@ fn get_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
             tools.push(make_tool(ask_tool.0, ask_tool.1, ask_tool.2.clone()));
             add_tools(&mut tools, comm_tools);
             add_tools(&mut tools, skill_tools);
-            for (name, desc, schema) in code_graph_read_tools() {
-                tools.push(make_tool(name, desc, schema));
-            }
         }
         "plan" => {
             add_tools(&mut tools, read_only_files);
@@ -3806,9 +3603,6 @@ fn get_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
             tools.push(make_tool(ask_tool.0, ask_tool.1, ask_tool.2.clone()));
             add_tools(&mut tools, comm_tools);
             add_tools(&mut tools, skill_tools);
-            for (name, desc, schema) in code_graph_read_tools() {
-                tools.push(make_tool(name, desc, schema));
-            }
         }
         "explore" => {
             add_tools(&mut tools, read_only_files);
@@ -3820,12 +3614,6 @@ fn get_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
             tools.push(make_tool(kw.0, kw.1, kw.2.clone()));
             add_tools(&mut tools, comm_tools);
             // Explore gets build + sync + read tools
-            for (name, desc, schema) in code_graph_explore_tools() {
-                tools.push(make_tool(name, desc, schema));
-            }
-            for (name, desc, schema) in code_graph_read_tools() {
-                tools.push(make_tool(name, desc, schema));
-            }
         }
         "review" => {
             add_tools(&mut tools, read_only_files);
@@ -3839,9 +3627,6 @@ fn get_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
             add_tools(&mut tools, knowledge_read);
             add_tools(&mut tools, comm_tools);
             add_tools(&mut tools, skill_tools);
-            for (name, desc, schema) in code_graph_read_tools() {
-                tools.push(make_tool(name, desc, schema));
-            }
         }
         "work" => {
             add_tools(&mut tools, read_only_files);
@@ -3857,9 +3642,6 @@ fn get_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
             tools.push(make_tool(kw.0, kw.1, kw.2.clone()));
             add_tools(&mut tools, comm_tools);
             add_tools(&mut tools, skill_tools);
-            for (name, desc, schema) in code_graph_read_tools() {
-                tools.push(make_tool(name, desc, schema));
-            }
         }
         "ace" => {
             // Ace: all tools from all agents, minus send_to_agent
@@ -3876,12 +3658,6 @@ fn get_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
             tools.push(make_tool(kw.0, kw.1, kw.2.clone()));
             tools.push(make_tool(ask_tool.0, ask_tool.1, ask_tool.2.clone()));  // ask_choice
             add_tools(&mut tools, skill_tools);
-            for (name, desc, schema) in code_graph_explore_tools() {
-                tools.push(make_tool(name, desc, schema));
-            }
-            for (name, desc, schema) in code_graph_read_tools() {
-                tools.push(make_tool(name, desc, schema));
-            }
         }
         _ => {
             // Fallback: same as front

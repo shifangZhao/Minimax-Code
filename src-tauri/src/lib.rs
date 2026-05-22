@@ -1,6 +1,5 @@
 mod agent_service;
 use agent_service::restore_snapshot_file;
-mod code_graph;
 mod context_compressor;
 mod lsp_client;
 mod lsp_manager;
@@ -16,7 +15,6 @@ pub(crate) const VLM_TIMEOUT_SECS: u64 = 60;
 pub(crate) const MCP_HTTP_TIMEOUT_SECS: u64 = 30;
 
 use agent_service::{AgentService, Message};
-use code_graph::CodeGraph;
 use lsp_manager::LspManager;
 use mcp_service::{McpService, McpTool};
 use permission::{PermissionService, PermissionMode, PermissionAction};
@@ -33,7 +31,6 @@ struct AppState {
     db: Arc<Mutex<Connection>>,
     skill_service: Arc<SkillService>,
     mcp_service: Arc<RwLock<McpService>>,
-    code_graph: Arc<Mutex<CodeGraph>>,
     lsp_manager: Arc<Mutex<Option<LspManager>>>,
     permission_service: Arc<Mutex<PermissionService>>,
     pending_asks: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
@@ -1466,7 +1463,7 @@ async fn agent_chat_stream(
     }
 
     // Create agent service
-    let service = AgentService::new(api_key, api_url, messages_path, model, context_window, provider, state.skill_service.clone(), state.mcp_service.clone(), state.db.clone(), state.code_graph.clone(), state.lsp_manager.clone(), state.permission_service.clone(), state.pending_asks.clone());
+    let service = AgentService::new(api_key, api_url, messages_path, model, context_window, provider, state.skill_service.clone(), state.mcp_service.clone(), state.db.clone(), state.lsp_manager.clone(), state.permission_service.clone(), state.pending_asks.clone());
     eprintln!("[agent_chat_stream] AgentService created, spawning stream_chat");
 
     // Start streaming - spawn and await
@@ -2232,7 +2229,6 @@ pub fn run() {
             db: Arc::new(Mutex::new(conn)),
             skill_service: skill_service.clone(),
             mcp_service: Arc::new(RwLock::new(McpService::new())),
-            code_graph: Arc::new(Mutex::new(CodeGraph::new())),
             lsp_manager: Arc::new(Mutex::new(None)),
             permission_service: Arc::new(Mutex::new(perm_svc)),
             pending_asks: Arc::new(Mutex::new(HashMap::new())),
