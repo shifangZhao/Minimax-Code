@@ -335,6 +335,8 @@ const showLoading = computed(() => {
 })
 
 function isInternalCacheMessage(msg: any): boolean {
+  // Hide built-in skill reference messages (internal, not shown to user)
+  if (msg.role === 'user' && msg.content?.startsWith('## 内置参考资料')) return true
   // Check raw_json for tool_result blocks (internal tool execution messages)
   if (msg.raw_json) {
     try {
@@ -349,6 +351,15 @@ function isInternalCacheMessage(msg: any): boolean {
   }
   // Hide empty user messages (skill context, etc.)
   if (msg.role === 'user' && !msg.content?.trim()) return true
+  // Hide skill/match_skills/list_skills tool results (exposed in tool call display)
+  if (msg.tool_calls) {
+    try {
+      const tc = JSON.parse(msg.tool_calls)
+      if (Array.isArray(tc) && tc.some((t: any) =>
+        ['skill', 'match_skills', 'list_skills'].includes(t.function?.name)
+      )) return true
+    } catch {}
+  }
   return false
 }
 

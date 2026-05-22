@@ -10,6 +10,7 @@
         <div class="provider-tabs">
           <button :class="['provider-tab', { active: provider === 'minimax' }]" @click="provider = 'minimax'">MiniMax</button>
           <button :class="['provider-tab', { active: provider === 'custom' }]" @click="provider = 'custom'">自定义 Anthropic</button>
+          <button :class="['provider-tab', { active: provider === 'agents' }]" @click="provider = 'agents'">Team 配置</button>
         </div>
 
         <!-- MiniMax Panel -->
@@ -31,6 +32,29 @@
               <option value="MiniMax-M2.1">MiniMax-M2.1 (204,800)</option>
               <option value="MiniMax-M2.1-highspeed">MiniMax-M2.1-highspeed (204,800)</option>
               <option value="MiniMax-M2">MiniMax-M2 (204,800)</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Agent Models Panel -->
+        <div v-if="provider === 'agents'" class="provider-panel">
+          <p class="hint" style="margin-bottom:12px">为每个 Team 智能体单独指定模型。留空则使用上方配置的全局模型。</p>
+          <div v-for="ag in teamAgents" :key="ag.key" class="agent-config-row">
+            <span class="agent-label">{{ ag.name }}</span>
+            <select v-model="agentModels[ag.key]" class="agent-model-select">
+              <option value="">使用全局配置</option>
+              <optgroup label="MiniMax">
+                <option value="minimax|MiniMax-M2.7|204800">MiniMax-M2.7</option>
+                <option value="minimax|MiniMax-M2.7-highspeed|204800">M2.7-highspeed</option>
+                <option value="minimax|MiniMax-M2.5|204800">MiniMax-M2.5</option>
+                <option value="minimax|MiniMax-M2.5-highspeed|204800">M2.5-highspeed</option>
+                <option value="minimax|MiniMax-M2.1|204800">MiniMax-M2.1</option>
+                <option value="minimax|MiniMax-M2.1-highspeed|204800">M2.1-highspeed</option>
+                <option value="minimax|MiniMax-M2|204800">MiniMax-M2</option>
+              </optgroup>
+              <optgroup v-if="customConfigs.length > 0" label="自定义模型">
+                <option v-for="cfg in customConfigs" :key="cfg.id" :value="`custom|${cfg.model}|${cfg.context_window}`">{{ cfg.name }} ({{ cfg.model }})</option>
+              </optgroup>
             </select>
           </div>
         </div>
@@ -95,6 +119,7 @@
             <option value="guarded">Guarded — 修改操作都需确认</option>
           </select>
         </div>
+
       </div>
       <div class="panel-footer">
         <button class="save-btn" @click="saveAll" :disabled="saving">
@@ -125,6 +150,29 @@ const permMode = ref('normal')
 const saving = ref(false)
 const showKey = ref(false)
 const showCustomKey = ref(false)
+
+// Per-agent model config
+const teamAgents = [
+  { key: 'front', name: 'Front — 入口' },
+  { key: 'plan', name: 'Plan — 方案' },
+  { key: 'work', name: 'Work — 执行' },
+  { key: 'review', name: 'Review — 审查' },
+  { key: 'explore', name: 'Explore — 探索' },
+]
+const agentModels = ref<Record<string, string>>({})
+
+async function loadAgentConfigs() {
+  for (const ag of teamAgents) {
+    try {
+      const cfg = await invoke<any>('get_agent_model_config', { agentType: ag.key })
+      if (cfg) {
+        agentModels.value[ag.key] = `${cfg.provider}|${cfg.model}|${cfg.context_window}`
+      } else {
+        agentModels.value[ag.key] = ''
+      }
+    } catch { agentModels.value[ag.key] = '' }
+  }
+}
 
 // Custom configs list
 interface CustomConfig { id: number; name: string; api_url: string; api_key: string; model: string; context_window: number }
@@ -197,6 +245,7 @@ const loadSettings = async () => {
     permMode.value = JSON.parse(mode) || 'normal'
 
     await loadCustomConfigs()
+    await loadAgentConfigs()
   } catch (e) {
     console.error('Failed to load settings:', e)
   }
@@ -219,6 +268,16 @@ const saveAll = async () => {
       }
     })
     await invoke('set_permission_mode', { mode: permMode.value })
+    // Save per-agent model configs
+    for (const ag of teamAgents) {
+      const val = agentModels.value[ag.key]
+      if (val) {
+        const [provider, model, cw] = val.split('|')
+        await invoke('set_agent_model_config', { agentType: ag.key, provider, model, contextWindow: parseInt(cw) || 204800 })
+      } else {
+        await invoke('delete_agent_model_config', { agentType: ag.key }).catch(() => {})
+      }
+    }
     close()
   } catch (e) {
     console.error('Failed to save settings:', e)
@@ -336,4 +395,36 @@ const close = () => emit('close')
   color: white; border-radius: 4px; font-size: 13px; cursor: pointer;
 }
 .save-btn:hover { opacity: 0.9; }
+
+.agent-config-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.agent-label {
+  width: 120px;
+  font-size: 12px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.agent-model-select {
+  flex: 1;
+  height: 28px;
+  padding: 0 6px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 11px;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.agent-model-select:focus {
+  border-color: var(--accent);
+}
 </style>

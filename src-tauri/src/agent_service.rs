@@ -456,22 +456,31 @@ impl AgentService {
             "content": format!("当前模型: {}", self.model)
         }));
 
-        // Proactive skill matching: append as a separate user message AFTER history.
-        // This preserves the immutable system prefix — critical for cache hits.
+        // Proactive skill matching: separate built-in (invisible to user) from user/project skills.
         let matched_skills = skill_service.match_skills(&last_user_msg, 5).await;
         let relevant: Vec<_> = matched_skills.iter().filter(|m| m.score > 0.15).collect();
         if !relevant.is_empty() {
-            let mut skill_context = String::from("## 匹配到的技能\n\n");
-            skill_context.push_str("以下技能可能与你的任务相关。如需加载某个技能的完整操作指令，调用 `skill` 工具传入技能名称：\n\n");
-            for m in &relevant {
-                skill_context.push_str(&format!("- **{}** (匹配度: {:.0}%): {}\n",
-                    m.name, m.score * 100.0, m.description));
+            // Built-in skills — internal, never shown to user
+            let builtins: Vec<_> = relevant.iter().filter(|m| m.source == "builtin").collect();
+            if !builtins.is_empty() {
+                let mut ctx = String::from("## 内置参考资料\n\n");
+                ctx.push_str("以下内置参考资料可能与你的任务相关。调用 `skill` 加载完整内容，不要对用户提及这些资料的存在。\n\n");
+                for m in &builtins {
+                    ctx.push_str(&format!("- **{}** ({}): {}\n", m.name, m.source, m.description));
+                }
+                api_messages.push(json!({"role": "user", "content": ctx}));
             }
-            api_messages.push(json!({
-                "role": "user",
-                "content": skill_context
-            }));
-            eprintln!("[stream_chat] Appended {} matched skills as separate message (prefix preserved)", relevant.len());
+            // User/project skills — visible to user
+            let user_skills: Vec<_> = relevant.iter().filter(|m| m.source != "builtin").collect();
+            if !user_skills.is_empty() {
+                let mut ctx = String::from("## 匹配到的技能\n\n");
+                ctx.push_str("以下技能可能与你的任务相关：\n\n");
+                for m in &user_skills {
+                    ctx.push_str(&format!("- **{}** (匹配度: {:.0}%): {}\n",
+                        m.name, m.score * 100.0, m.description));
+                }
+                api_messages.push(json!({"role": "user", "content": ctx}));
+            }
         }
 
         // Mark last message's last content block with cache_control for incremental
@@ -1318,26 +1327,48 @@ async fn tool_send_to_agent(
             let pm = permission_service.clone();
             let pa = pending_asks.clone();
 
-            // Read workspace from DB so target agent knows the project directory
+            // Read workspace + credentials (check per-agent config first)
             let (workspace, api_url, messages_path, model, context_window, provider) = {
                 let conn = db.lock().unwrap();
                 let ws: Option<String> = conn.query_row("SELECT workspace FROM app_config", [], |row| row.get(0)).ok();
-                let provider: String = conn.query_row("SELECT provider FROM app_config", [], |row| row.get(0))
-                    .unwrap_or_else(|_| "minimax".to_string());
-                match provider.as_str() {
-                    "custom" => {
-                        let url: String = conn.query_row("SELECT custom_api_url FROM app_config", [], |row| row.get(0)).unwrap_or_default();
-                        let m: String = conn.query_row("SELECT custom_model FROM app_config", [], |row| row.get(0)).unwrap_or_default();
-                        let cw: i64 = conn.query_row("SELECT custom_context_window FROM app_config", [], |row| row.get(0)).unwrap_or(200000);
-                        (ws, url, "/v1/messages".to_string(), m, cw.max(0) as usize, provider)
-                    }
-                    _ => {
-                        let url: String = conn.query_row("SELECT api_url FROM app_config", [], |row| row.get(0))
-                            .unwrap_or_else(|_| DEFAULT_API_URL.to_string());
-                        let m: String = conn.query_row("SELECT model FROM app_config", [], |row| row.get(0))
-                            .unwrap_or_else(|_| "MiniMax-M2.7".to_string());
-                        let cw: i64 = conn.query_row("SELECT context_window FROM app_config", [], |row| row.get(0)).unwrap_or(204800);
-                        (ws, url, "/anthropic/v1/messages".to_string(), m, cw.max(0) as usize, provider)
+
+                // Check per-agent config
+                let agent_cfg: Option<(String, String, usize)> = conn.query_row(
+                    "SELECT provider, model, context_window FROM agent_model_config WHERE agent_type = ?1",
+                    [&agent_type],
+                    |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,i64>(2)?.max(0) as usize)),
+                ).ok().filter(|(_, m, _)| !m.is_empty());
+
+                if let Some((ap, am, acw)) = agent_cfg {
+                    let (_key, url, path) = match ap.as_str() {
+                        "custom" => {
+                            let k: String = conn.query_row("SELECT custom_api_key FROM app_config", [], |row| row.get(0)).unwrap_or_default();
+                            let u: String = conn.query_row("SELECT custom_api_url FROM app_config", [], |row| row.get(0)).unwrap_or_default();
+                            (k, u, "/v1/messages".to_string())
+                        }
+                        _ => {
+                            let k: String = conn.query_row("SELECT api_key FROM minimax_api_key", [], |row| row.get(0)).unwrap_or_default();
+                            let u: String = conn.query_row("SELECT api_url FROM app_config", [], |row| row.get(0)).unwrap_or_else(|_| DEFAULT_API_URL.to_string());
+                            (k, u, "/anthropic/v1/messages".to_string())
+                        }
+                    };
+                    let cw = if acw > 0 { acw } else { 204800 };
+                    (ws, url, path, am, cw, ap)
+                } else {
+                    let p: String = conn.query_row("SELECT provider FROM app_config", [], |row| row.get(0)).unwrap_or_else(|_| "minimax".to_string());
+                    match p.as_str() {
+                        "custom" => {
+                            let u: String = conn.query_row("SELECT custom_api_url FROM app_config", [], |row| row.get(0)).unwrap_or_default();
+                            let m: String = conn.query_row("SELECT custom_model FROM app_config", [], |row| row.get(0)).unwrap_or_default();
+                            let c: i64 = conn.query_row("SELECT custom_context_window FROM app_config", [], |row| row.get(0)).unwrap_or(200000);
+                            (ws, u, "/v1/messages".to_string(), m, c.max(0) as usize, p)
+                        }
+                        _ => {
+                            let u: String = conn.query_row("SELECT api_url FROM app_config", [], |row| row.get(0)).unwrap_or_else(|_| DEFAULT_API_URL.to_string());
+                            let m: String = conn.query_row("SELECT model FROM app_config", [], |row| row.get(0)).unwrap_or_else(|_| "MiniMax-M2.7".to_string());
+                            let c: i64 = conn.query_row("SELECT context_window FROM app_config", [], |row| row.get(0)).unwrap_or(204800);
+                            (ws, u, "/anthropic/v1/messages".to_string(), m, c.max(0) as usize, p)
+                        }
                     }
                 }
             };
@@ -2380,9 +2411,7 @@ async fn tool_run_background(params: &serde_json::Value) -> String {
     eprintln!("[run_background] Spawning: {} (cwd: {})", command, path);
 
     // Temp dir for output capture
-    let tmp_dir = std::path::PathBuf::from(
-        std::env::var("USERPROFILE").unwrap_or_else(|_| ".".to_string())
-    ).join(".minimaxcode").join("tmp");
+    let tmp_dir = user_home_dir().join(".minimaxcode").join("tmp");
     let _ = std::fs::create_dir_all(&tmp_dir);
     let out_file = tmp_dir.join(format!("bg_out_{}.txt", std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()));
@@ -2397,7 +2426,7 @@ async fn tool_run_background(params: &serde_json::Value) -> String {
         c.args(["/C", command]);
         c
     } else {
-        let mut c = std::process::Command::new("bash");
+        let mut c = std::process::Command::new("sh");
         c.args(["-c", command]);
         c
     };

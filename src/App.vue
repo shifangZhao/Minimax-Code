@@ -29,6 +29,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { db } from './services/db'
 import { useGlobalStreaming } from './composables/useGlobalStreaming'
 import { usePermissions } from './composables/usePermissions'
@@ -60,6 +61,9 @@ const onGroupChatCreated = (chatId: number) => {
 // Global fallback: listen for agent_invoked and capture stream events + save to DB
 // This handles cases where the target agent's tab is not yet mounted (router lazy load)
 onMounted(async () => {
+  // Disable resize ratio overlay on Windows
+  try { await getCurrentWindow().setShadow(false) } catch {}
+
   // Listen for permission requests
   permUnlisten = await listen<any>('permission_asked', (event) => {
     permRequests.value.push(event.payload)

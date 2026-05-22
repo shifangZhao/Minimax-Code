@@ -485,6 +485,53 @@ fn delete_custom_config(state: State<AppState>, id: i64) -> Result<(), String> {
     Ok(())
 }
 
+// ========== Per-Agent Model Config ==========
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentModelConfig {
+    pub agent_type: String,
+    pub provider: String,
+    pub model: String,
+    pub context_window: usize,
+}
+
+#[tauri::command]
+fn get_agent_model_config(state: State<AppState>, agent_type: String) -> Result<Option<AgentModelConfig>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let result: Result<AgentModelConfig, rusqlite::Error> = conn.query_row(
+        "SELECT agent_type, provider, model, context_window FROM agent_model_config WHERE agent_type = ?1",
+        [&agent_type],
+        |row| Ok(AgentModelConfig {
+            agent_type: row.get(0)?, provider: row.get(1)?, model: row.get(2)?,
+            context_window: row.get::<_, i64>(3)?.max(0) as usize,
+        }),
+    );
+    match result {
+        Ok(cfg) => Ok(Some(cfg)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
+fn set_agent_model_config(state: State<AppState>, agent_type: String, provider: String, model: String, context_window: usize) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO agent_model_config (agent_type, provider, model, context_window) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(agent_type) DO UPDATE SET provider=?2, model=?3, context_window=?4",
+        rusqlite::params![agent_type, provider, model, context_window as i64],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_agent_model_config(state: State<AppState>, agent_type: String) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM agent_model_config WHERE agent_type = ?1", [&agent_type])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 // ========== File System Commands ==========
 
 #[tauri::command]
@@ -777,8 +824,9 @@ fn git_stash_pop(repo_path: String) -> Result<CommandOutput, String> {
 }
 
 fn run_git_command(repo_path: &str, args: &str) -> Result<CommandOutput, String> {
+    let escaped_path = std::path::Path::new(repo_path).display().to_string();
     let (cmd, shell_args) = if cfg!(windows) {
-        ("cmd", vec!["/C".to_string(), format!("git -C \"{}\" {}", repo_path.replace("/", "\\"), args)])
+        ("cmd", vec!["/C".to_string(), format!("git -C \"{}\" {}", escaped_path, args)])
     } else {
         ("sh", vec!["-c".to_string(), format!("git -C \"{}\" {}", repo_path, args)])
     };
@@ -1215,8 +1263,10 @@ fn apply_patch(repo_path: String, patch_content: String) -> Result<CommandOutput
     let patch_file = std::env::temp_dir().join("agent_patch.diff");
     std::fs::write(&patch_file, &patch_content).map_err(|e| e.to_string())?;
 
+    let escaped_repo = std::path::Path::new(&repo_path).display().to_string();
+    let escaped_patch = std::path::Path::new(&patch_file).display().to_string();
     let (cmd, args) = if cfg!(windows) {
-        ("cmd", vec!["/C".to_string(), format!("git -C \"{}\" apply --3way \"{}\"", repo_path.replace("/", "\\"), patch_file.to_string_lossy().replace("/", "\\"))])
+        ("cmd", vec!["/C".to_string(), format!("git -C \"{}\" apply --3way \"{}\"", escaped_repo, escaped_patch)])
     } else {
         ("sh", vec!["-c".to_string(), format!("git -C \"{}\" apply --3way \"{}\"", repo_path, patch_file.to_string_lossy())])
     };
@@ -1237,8 +1287,9 @@ fn apply_patch(repo_path: String, patch_content: String) -> Result<CommandOutput
 #[tauri::command]
 fn create_patch(repo_path: String, target: Option<String>, output_path: Option<String>) -> Result<String, String> {
     let t = target.unwrap_or_else(|| "HEAD".to_string());
+    let escaped_repo = std::path::Path::new(&repo_path).display().to_string();
     let (_cmd, shell_arg) = if cfg!(windows) {
-        ("cmd", format!("git -C \"{}\" {} diff {}", repo_path.replace("/", "\\"), t, if output_path.is_some() { format!("> \"{}\"", output_path.as_ref().unwrap().replace("/", "\\")) } else { String::new() }))
+        ("cmd", format!("git -C \"{}\" {} diff {}", escaped_repo, t, if output_path.is_some() { format!("> \"{}\"", std::path::Path::new(output_path.as_ref().unwrap()).display()) } else { String::new() }))
     } else {
         ("sh", format!("git -C \"{}\" diff {} {}", repo_path, t, if output_path.is_some() { format!("> \"{}\"", output_path.as_ref().unwrap()) } else { String::new() }))
     };
@@ -1415,44 +1466,62 @@ async fn agent_chat_stream(
     let messages: Vec<Message> = serde_json::from_str(&messages)
         .map_err(|e| format!("Failed to parse messages: {}", e))?;
 
-    // Get API credentials from database based on provider
+    // Get API credentials: check per-agent config first, then global
     let (api_key, api_url, messages_path, model, context_window, provider) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        let provider: String = conn.query_row(
-            "SELECT provider FROM app_config", [], |row| row.get(0)
-        ).unwrap_or_else(|_| "minimax".to_string());
 
-        match provider.as_str() {
-            "custom" => {
-                let key: String = conn.query_row(
-                    "SELECT custom_api_key FROM app_config", [], |row| row.get(0)
-                ).unwrap_or_default();
-                let url: String = conn.query_row(
-                    "SELECT custom_api_url FROM app_config", [], |row| row.get(0)
-                ).unwrap_or_default();
-                let m: String = conn.query_row(
-                    "SELECT custom_model FROM app_config", [], |row| row.get(0)
-                ).unwrap_or_default();
-                let cw: i64 = conn.query_row(
-                    "SELECT custom_context_window FROM app_config", [], |row| row.get(0)
-                ).unwrap_or(200000);
-                (key, url, "/v1/messages".to_string(), m, cw.max(0) as usize, provider)
-            }
-            _ => {
-                // minimax (default)
-                let key: Option<String> = conn
-                    .query_row("SELECT api_key FROM minimax_api_key", [], |row| row.get(0))
-                    .ok();
-                let url: String = conn
-                    .query_row("SELECT api_url FROM app_config", [], |row| row.get(0))
-                    .unwrap_or_else(|_| DEFAULT_API_URL.to_string());
-                let m: String = conn
-                    .query_row("SELECT model FROM app_config", [], |row| row.get(0))
-                    .unwrap_or_else(|_| "MiniMax-M2.7".to_string());
-                let cw: i64 = conn
-                    .query_row("SELECT context_window FROM app_config", [], |row| row.get(0))
-                    .unwrap_or(204800);
-                (key.unwrap_or_default(), url, "/anthropic/v1/messages".to_string(), m, cw.max(0) as usize, provider)
+        // Check if this agent has its own model config
+        let agent_cfg: Option<(String, String, usize)> = conn.query_row(
+            "SELECT provider, model, context_window FROM agent_model_config WHERE agent_type = ?1",
+            [&agent_type],
+            |row| Ok((
+                row.get::<_, String>(0)?,  // provider
+                row.get::<_, String>(1)?,  // model
+                row.get::<_, i64>(2)?.max(0) as usize,  // context_window
+            )),
+        ).ok().filter(|(_, model, _)| !model.is_empty());
+
+        if let Some((agent_provider, agent_model, agent_cw)) = agent_cfg {
+            // Use per-agent config, but get API key/URL from global config
+            let (global_key, global_url, global_path) = match agent_provider.as_str() {
+                "custom" => {
+                    let key: String = conn.query_row("SELECT custom_api_key FROM app_config", [], |row| row.get(0)).unwrap_or_default();
+                    let url: String = conn.query_row("SELECT custom_api_url FROM app_config", [], |row| row.get(0)).unwrap_or_default();
+                    (key, url, "/v1/messages".to_string())
+                }
+                _ => {
+                    let key: Option<String> = conn.query_row("SELECT api_key FROM minimax_api_key", [], |row| row.get(0)).ok();
+                    let url: String = conn.query_row("SELECT api_url FROM app_config", [], |row| row.get(0)).unwrap_or_else(|_| DEFAULT_API_URL.to_string());
+                    (key.unwrap_or_default(), url, "/anthropic/v1/messages".to_string())
+                }
+            };
+            let cw = if agent_cw > 0 { agent_cw } else if agent_provider == "custom" {
+                conn.query_row("SELECT custom_context_window FROM app_config", [], |row| row.get::<_, i64>(0)).unwrap_or(200000).max(0) as usize
+            } else {
+                conn.query_row("SELECT context_window FROM app_config", [], |row| row.get::<_, i64>(0)).unwrap_or(204800).max(0) as usize
+            };
+            (global_key, global_url, global_path, agent_model, cw, agent_provider)
+        } else {
+            // Fall back to global config
+            let provider: String = conn.query_row(
+                "SELECT provider FROM app_config", [], |row| row.get(0)
+            ).unwrap_or_else(|_| "minimax".to_string());
+
+            match provider.as_str() {
+                "custom" => {
+                    let key: String = conn.query_row("SELECT custom_api_key FROM app_config", [], |row| row.get(0)).unwrap_or_default();
+                    let url: String = conn.query_row("SELECT custom_api_url FROM app_config", [], |row| row.get(0)).unwrap_or_default();
+                    let m: String = conn.query_row("SELECT custom_model FROM app_config", [], |row| row.get(0)).unwrap_or_default();
+                    let cw: i64 = conn.query_row("SELECT custom_context_window FROM app_config", [], |row| row.get(0)).unwrap_or(200000);
+                    (key, url, "/v1/messages".to_string(), m, cw.max(0) as usize, provider)
+                }
+                _ => {
+                    let key: Option<String> = conn.query_row("SELECT api_key FROM minimax_api_key", [], |row| row.get(0)).ok();
+                    let url: String = conn.query_row("SELECT api_url FROM app_config", [], |row| row.get(0)).unwrap_or_else(|_| DEFAULT_API_URL.to_string());
+                    let m: String = conn.query_row("SELECT model FROM app_config", [], |row| row.get(0)).unwrap_or_else(|_| "MiniMax-M2.7".to_string());
+                    let cw: i64 = conn.query_row("SELECT context_window FROM app_config", [], |row| row.get(0)).unwrap_or(204800);
+                    (key.unwrap_or_default(), url, "/anthropic/v1/messages".to_string(), m, cw.max(0) as usize, provider)
+                }
             }
         }
     };
@@ -2186,6 +2255,16 @@ pub fn run() {
     }
 
     conn.execute(
+        "CREATE TABLE IF NOT EXISTS agent_model_config (
+            agent_type TEXT PRIMARY KEY,
+            provider TEXT NOT NULL DEFAULT 'minimax',
+            model TEXT NOT NULL DEFAULT '',
+            context_window INTEGER NOT NULL DEFAULT 0
+        )",
+        [],
+    ).expect("Failed to create agent_model_config table");
+
+    conn.execute(
         "CREATE TABLE IF NOT EXISTS app_config (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             workspace TEXT NOT NULL DEFAULT '',
@@ -2290,6 +2369,9 @@ pub fn run() {
             list_custom_configs,
             save_custom_config,
             delete_custom_config,
+            get_agent_model_config,
+            set_agent_model_config,
+            delete_agent_model_config,
             agent_chat_stream,
             read_file,
             write_file,
