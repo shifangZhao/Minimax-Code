@@ -23,9 +23,12 @@ use serde::{Deserialize, Serialize};
 use skill_service::{Skill, SkillMatch, SkillService};
 use std::collections::HashMap;
 use std::process::Command;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{oneshot, RwLock};
 use tauri::{State, Window, AppHandle};
+
+type CancelRegistry = Arc<Mutex<HashMap<i64, Arc<AtomicBool>>>>;
 
 struct AppState {
     db: Arc<Mutex<Connection>>,
@@ -34,6 +37,7 @@ struct AppState {
     lsp_manager: Arc<Mutex<Option<LspManager>>>,
     permission_service: Arc<Mutex<PermissionService>>,
     pending_asks: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
+    cancel_registry: CancelRegistry,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1535,13 +1539,37 @@ async fn agent_chat_stream(
     let service = AgentService::new(api_key, api_url, messages_path, model, context_window, provider, state.skill_service.clone(), state.mcp_service.clone(), state.db.clone(), state.lsp_manager.clone(), state.permission_service.clone(), state.pending_asks.clone());
     eprintln!("[agent_chat_stream] AgentService created, spawning stream_chat");
 
+    // Register cancel token for this stream session
+    let cancel_flag = {
+        let mut registry = state.cancel_registry.lock().map_err(|e| e.to_string())?;
+        registry.remove(&session_id); // clean stale flag from previous stream
+        let flag = Arc::new(AtomicBool::new(false));
+        registry.insert(session_id, flag.clone());
+        flag
+    };
+    let cancel_registry = state.cancel_registry.clone();
+
     // Start streaming - spawn and await
     let _ = tokio::spawn(async move {
-        service.stream_chat(&agent_type, messages, system, workspace, app_handle, session_id).await;
+        service.stream_chat(&agent_type, messages, system, workspace, app_handle, session_id, cancel_flag).await;
+        // Clean up cancel flag when stream ends (normal or aborted)
+        if let Ok(mut registry) = cancel_registry.lock() {
+            registry.remove(&session_id);
+        }
     });
 
     eprintln!("[agent_chat_stream] stream_chat spawned");
 
+    Ok(())
+}
+
+#[tauri::command]
+fn abort_stream(state: State<'_, AppState>, session_id: i64) -> Result<(), String> {
+    let registry = state.cancel_registry.lock().map_err(|e| e.to_string())?;
+    if let Some(flag) = registry.get(&session_id) {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        eprintln!("[abort_stream] Cancel flag set for session {}", session_id);
+    }
     Ok(())
 }
 
@@ -2311,6 +2339,7 @@ pub fn run() {
             lsp_manager: Arc::new(Mutex::new(None)),
             permission_service: Arc::new(Mutex::new(perm_svc)),
             pending_asks: Arc::new(Mutex::new(HashMap::new())),
+            cancel_registry: Arc::new(Mutex::new(HashMap::new())),
         })
         .setup(move |_app| {
             // Set builtin skills root - use directory relative to executable
@@ -2373,6 +2402,7 @@ pub fn run() {
             set_agent_model_config,
             delete_agent_model_config,
             agent_chat_stream,
+            abort_stream,
             read_file,
             write_file,
             list_dir,

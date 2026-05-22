@@ -4,6 +4,13 @@
       <span class="agent-name">{{ agentName }}</span>
       <div class="header-actions">
         <button
+          v-if="loading"
+          class="header-btn header-btn-stop"
+          title="停止生成"
+          :disabled="stopClicked"
+          @click="stopStream()"
+        >■ 停止</button>
+        <button
           v-if="recentEdits.length > 0"
           class="header-btn"
           title="撤销编辑"
@@ -180,6 +187,7 @@
         :placeholder="inputPlaceholder"
         @keydown.enter.exact="onSendKey"
         @paste="onPaste"
+        @input="autoResize"
         rows="1"
       ></textarea>
       <div class="input-toolbar">
@@ -191,8 +199,11 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="17" y1="2" x2="7" y2="22"/></svg>
           </button>
         </div>
-        <button class="send-btn" @click="onSend" :disabled="loading" title="发送">
+        <button v-if="!loading" class="send-btn" @click="onSend" title="发送">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+        </button>
+        <button v-else class="send-btn stop-btn" @click="stopStream()" title="停止生成">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
         </button>
       </div>
     </div>
@@ -254,6 +265,7 @@ const inputEl = ref<HTMLTextAreaElement>()
 const inputText = ref('')
 const showCommands = ref(false)
 const manualCommands = ref(false)  // true when user clicked / button
+const stopClicked = ref(false)
 
 const commands = [
   { name: '/compact', desc: '手动压缩上下文，减少 token 占用' },
@@ -558,6 +570,21 @@ function onSendKey(e: KeyboardEvent) {
   }
 }
 
+function autoResize(e: Event) {
+  const el = e.target as HTMLTextAreaElement
+  el.style.height = 'auto'
+  el.style.height = Math.min(el.scrollHeight, 200) + 'px'
+  el.style.overflowY = el.scrollHeight > 200 ? 'auto' : 'hidden'
+}
+
+function stopStream() {
+  stopClicked.value = true
+  const state = globalStreamingStates.value.get(streamKey.value)
+  if (state?.abort) {
+    state.abort()
+  }
+}
+
 async function onSend() {
   const text = inputText.value.trim()
 
@@ -597,6 +624,7 @@ async function onSend() {
   manualCommands.value = false
   if ((!text && attachedFiles.value.length === 0) || loading.value) return
   inputText.value = ''
+  stopClicked.value = false
 
   if (attachedFiles.value.length > 0) {
     const files = [...attachedFiles.value]
@@ -757,6 +785,17 @@ watch(() => messages.value.length, (len, oldLen) => {
 })
 
 // Persist scroll position across tab switches (KeepAlive)
+// Auto-resize textarea when inputText is cleared programmatically (after send)
+watch(inputText, () => {
+  nextTick(() => {
+    if (inputEl.value) {
+      inputEl.value.style.height = 'auto'
+      inputEl.value.style.height = Math.min(inputEl.value.scrollHeight, 200) + 'px'
+      inputEl.value.style.overflowY = inputEl.value.scrollHeight > 200 ? 'auto' : 'hidden'
+    }
+  })
+})
+
 onMounted(() => {
   messagesEl.value?.addEventListener('scroll', saveScrollPos, { passive: true })
 })
@@ -1393,7 +1432,7 @@ onDeactivated(() => {
 
 .input-area textarea {
   width: 100%;
-  min-height: 56px;
+  min-height: 40px;
   max-height: 200px;
   padding: 10px 12px;
   background-color: var(--bg-input);
@@ -1406,6 +1445,8 @@ onDeactivated(() => {
   outline: none;
   resize: none;
   box-sizing: border-box;
+  overflow-y: hidden;
+  transition: height 0.1s;
 }
 
 .input-area textarea:focus {
@@ -1468,6 +1509,14 @@ onDeactivated(() => {
 .send-btn:disabled {
   opacity: 0.3;
   cursor: not-allowed;
+}
+
+.stop-btn {
+  background: #e81123 !important;
+}
+
+.stop-btn:hover {
+  opacity: 0.85;
 }
 
 .rename-overlay {
@@ -1639,6 +1688,17 @@ onDeactivated(() => {
 
 .header-btn-danger:hover {
   color: #e81123;
+}
+
+.header-btn-stop {
+  color: #e81123;
+  border-color: #e81123;
+  font-weight: 600;
+}
+
+.header-btn-stop:hover:not(:disabled) {
+  background: #e81123;
+  color: white;
 }
 
 /* Message hover actions */

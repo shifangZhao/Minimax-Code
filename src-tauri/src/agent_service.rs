@@ -14,6 +14,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{Mutex, RwLock};
@@ -52,6 +53,8 @@ pub enum StreamEvent {
     ToolEnd { tool: String, tool_id: String, result: String },
     #[serde(rename = "done")]
     Done,
+    #[serde(rename = "aborted")]
+    Aborted,
     #[serde(rename = "error")]
     Error { content: String },
     #[serde(rename = "cache_usage")]
@@ -319,6 +322,7 @@ impl AgentService {
         workspace: Option<String>,
         app_handle: AppHandle,
         session_id: i64,
+        cancel_flag: Arc<AtomicBool>,
     ) {
         let api_key = self.api_key.lock().await.clone();
         let skill_service = self.skill_service.clone();
@@ -348,12 +352,13 @@ impl AgentService {
             _ => FRONT_SYSTEM,
         };
 
-        // Build immutable system prompt — NEVER mutate after construction.
-        // Prefix-based KV caching depends on byte-identical prefix across turns.
-        let system_text = match workspace {
-            Some(ws) => format!("{}\n\n# 工作目录\n{}", base_system, ws),
-            None => base_system.to_string(),
-        };
+        // Build system prompt. Model info is included here so the model
+        // treats it as system-level identity, not user input.
+        let mut system_text = base_system.to_string();
+        if let Some(ws) = &workspace {
+            system_text.push_str(&format!("\n\n# 工作目录\n{}", ws));
+        }
+        system_text.push_str(&format!("\n\n当前运行模型: {}", self.model));
 
         // System prompt as top-level `system` field (Anthropic format).
         // cache_control only for MiniMax (KV cache). Custom providers may reject it.
@@ -449,13 +454,6 @@ impl AgentService {
             }));
         }
 
-        // Model info as dynamic message — keeps system prompt immutable for cache.
-        // Placed before skill context so the stable model_name prefix can be cached.
-        api_messages.push(json!({
-            "role": "user",
-            "content": format!("当前模型: {}", self.model)
-        }));
-
         // Proactive skill matching: separate built-in (invisible to user) from user/project skills.
         let matched_skills = skill_service.match_skills(&last_user_msg, 5).await;
         let relevant: Vec<_> = matched_skills.iter().filter(|m| m.score > 0.15).collect();
@@ -493,6 +491,13 @@ impl AgentService {
 
         // Main loop: continue until stop_reason is not "tool_use"
         loop {
+            // Check cancel flag before each API round-trip
+            if cancel_flag.load(Ordering::SeqCst) {
+                eprintln!("[stream_chat] Canceled at loop start for session {}", session_id);
+                let _ = app.emit(&session_key, StreamEvent::Aborted);
+                break;
+            }
+
             // Compress context when approaching token limit (80% of context window)
             compress_context(agent_type, &mut api_messages, self.context_window);
 
@@ -564,10 +569,30 @@ impl AgentService {
                 permission_service.clone(),
                 pending_asks.clone(),
                 &mut api_messages,
+                cancel_flag.clone(),
             ).await;
 
             eprintln!("[stream_chat] Model: {}, stop_reason: {:?}, thinking: {} chars, text: {} chars, tool_uses: {}", self.model,
                 stop_reason, assistant_thinking.len(), assistant_text.len(), tool_uses.len());
+
+            // Check cancel flag after SSE process returns
+            if cancel_flag.load(Ordering::SeqCst) {
+                eprintln!("[stream_chat] Canceled after SSE for session {}", session_id);
+                // Save partial content so it survives reload
+                if !assistant_thinking.is_empty() || !assistant_text.is_empty() {
+                    let mut partial = Vec::new();
+                    if !assistant_thinking.is_empty() {
+                        partial.push(json!({"type": "thinking", "thinking": assistant_thinking}));
+                    }
+                    if !assistant_text.is_empty() {
+                        partial.push(json!({"type": "text", "text": assistant_text}));
+                    }
+                    let partial_msg = json!({"role": "assistant", "content": partial});
+                    save_api_message(&self.db, session_id, &partial_msg);
+                }
+                let _ = app.emit(&session_key, StreamEvent::Aborted);
+                break;
+            }
 
             // If stop_reason is not "tool_use", we're done
             if stop_reason.as_deref() != Some("tool_use") {
@@ -659,6 +684,7 @@ async fn process_sse_stream(
     permission_service: Arc<StdMutex<PermissionService>>,
     pending_asks: PendingAsks,
     _api_messages: &mut Vec<serde_json::Value>,
+    cancel_flag: Arc<AtomicBool>,
 ) -> (Option<String>, String, String, Vec<(String, String, String)>, Vec<(String, String, String)>) {
     eprintln!("[process_sse_stream] Starting with session_key: {}", session_key);
     let mut current_tool_id: Option<String> = None;
@@ -683,7 +709,27 @@ async fn process_sse_stream(
 
     futures_util::pin_mut!(stream);
 
+    // Cancel check counter — avoid atomic load on every SSE event
+    let mut cancel_check_counter: u32 = 0;
+
     while let Some(item) = stream.next().await {
+        // Check cancel flag every ~50 SSE events (~50ms at typical rate)
+        cancel_check_counter += 1;
+        if cancel_check_counter % 50 == 0 {
+            if cancel_flag.load(Ordering::SeqCst) {
+                eprintln!("[process_sse_stream] Canceled mid-stream for session {}", session_id);
+                // Flush buffered text before returning
+                if !pending_text.is_empty() || !pending_thinking.is_empty() {
+                    let ev = StreamEvent::ContentBlockDelta {
+                        content: std::mem::take(&mut pending_text),
+                        thinking: std::mem::take(&mut pending_thinking),
+                    };
+                    let _ = app.emit(&session_key, ev);
+                }
+                return (None, assistant_text, assistant_thinking, Vec::new(), Vec::new());
+            }
+        }
+
         match item {
             Ok(bytes) => {
                 if let Ok(text) = String::from_utf8(bytes.to_vec()) {
@@ -826,6 +872,12 @@ async fn process_sse_stream(
             .map(|v| v == "serial")
             .unwrap_or(false);
 
+        // Check cancel before tool dispatch
+        if cancel_flag.load(Ordering::SeqCst) {
+            eprintln!("[process_sse_stream] Canceled before tool dispatch for session {}", session_id);
+            return (None, assistant_text, assistant_thinking, tool_uses, Vec::new());
+        }
+
         let mut idx = 0;
         while idx < tool_uses.len() {
             // Build chunk: consecutive parallel-safe tools up to parallel_max
@@ -874,12 +926,14 @@ async fn process_sse_stream(
                 let pending_asks = pending_asks.clone();
                 let app = app.clone();
                 let sid = session_id;
+                let cancel_flag = cancel_flag.clone();
                 tokio::spawn(async move {
                     let result = execute_tool(
                         &tool_name, &final_input, sid,
                         api_key, api_url, model, provider,
                         skill_service, mcp_service,
                         db, lsp_manager, permission_service, pending_asks, app,
+                        cancel_flag,
                     ).await;
                     (i, tool_name, result)
                 })
@@ -1010,6 +1064,7 @@ async fn execute_tool(
     permission_service: Arc<StdMutex<PermissionService>>,
     pending_asks: PendingAsks,
     app_handle: AppHandle,
+    cancel_flag: Arc<AtomicBool>,
 ) -> String {
     let params: serde_json::Value = serde_json::from_str(input).unwrap_or(json!({}));
 
@@ -1181,7 +1236,7 @@ async fn execute_tool(
         "read_knowledge" => tool_read_knowledge(&params).await,
         "write_knowledge" => tool_write_knowledge(&params).await,
         "list_knowledge" => tool_list_knowledge().await,
-        "send_to_agent" => tool_send_to_agent(session_id, &params, api_key.clone(), skill_service.clone(), mcp_service.clone(), db.clone(), lsp_manager.clone(), permission_service.clone(), pending_asks.clone(), app_handle.clone()).await,
+        "send_to_agent" => tool_send_to_agent(session_id, &params, api_key.clone(), skill_service.clone(), mcp_service.clone(), db.clone(), lsp_manager.clone(), permission_service.clone(), pending_asks.clone(), app_handle.clone(), cancel_flag.clone()).await,
         "read_lints" => tool_read_lints(&params, lsp_manager.clone(), db.clone()).await,
         "touch_file" => tool_touch_file(&params, lsp_manager.clone(), db.clone()).await,
         "ask_choice" => tool_ask_choice(&params, session_id, "unknown", pending_asks.clone(), app_handle.clone()).await,
@@ -1222,12 +1277,18 @@ async fn tool_send_to_agent(
     permission_service: Arc<StdMutex<PermissionService>>,
     pending_asks: PendingAsks,
     app_handle: AppHandle,
+    cancel_flag: Arc<AtomicBool>,
 ) -> String {
     let target_agent = params["target_agent"].as_str().unwrap_or("");
     let message = params["message"].as_str().unwrap_or("");
 
     if target_agent.is_empty() || message.is_empty() {
         return json!({"error": "target_agent and message are required"}).to_string();
+    }
+
+    // Check parent cancel flag before spawning sub-agent
+    if cancel_flag.load(Ordering::SeqCst) {
+        return json!({"error": "Parent agent was aborted"}).to_string();
     }
 
     // Look up caller's agent type first
@@ -1376,7 +1437,7 @@ async fn tool_send_to_agent(
             std::thread::spawn(move || {
                 handle.block_on(async move {
                     let agent = AgentService::new(api_key, api_url, messages_path, model, context_window, provider, skill_service, mcp_service, db, lm, pm, pa);
-                    agent.stream_chat(&agent_type, history, None, workspace, app, target_session_id).await;
+                    agent.stream_chat(&agent_type, history, None, workspace, app, target_session_id, cancel_flag).await;
                 });
             });
 
