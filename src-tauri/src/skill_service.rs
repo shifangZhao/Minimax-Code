@@ -8,6 +8,18 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::process::Command;
+
+fn hidden_cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut cmd = Command::new(program.as_ref());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::RwLock as StdRwLock;
@@ -271,16 +283,16 @@ impl SkillService {
             .unwrap_or("");
 
         let output = match ext {
-            "py" => std::process::Command::new("python")
+            "py" => hidden_cmd("python")
                 .arg(script_path)
                 .output(),
             "sh" => {
                 let shell = if cfg!(windows) { "bash" } else { "sh" };
-                std::process::Command::new(shell)
+                hidden_cmd(shell)
                     .arg(script_path)
                     .output()
             }
-            _ => std::process::Command::new(script_path)
+            _ => hidden_cmd(script_path)
                 .output(),
         };
 

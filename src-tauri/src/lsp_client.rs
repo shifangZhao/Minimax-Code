@@ -10,6 +10,17 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+
+fn hidden_cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut cmd = std::process::Command::new(program.as_ref());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -42,7 +53,7 @@ impl LspClient {
         cmd: &str,
         args: &[String],
     ) -> Option<Self> {
-        let mut child = match Command::new(cmd)
+        let mut child = match hidden_cmd(cmd)
             .args(args)
             .current_dir(root)
             .stdin(Stdio::piped())
@@ -127,7 +138,7 @@ impl LspClient {
         self.alive.store(false, Ordering::SeqCst);
 
         // Spawn new process
-        let mut child = Command::new(&self.spawn_cmd)
+        let mut child = hidden_cmd(&self.spawn_cmd)
             .args(&self.spawn_args)
             .current_dir(&self.root)
             .stdin(Stdio::piped())

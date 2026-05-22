@@ -24,6 +24,17 @@ use skill_service::{Skill, SkillMatch, SkillService};
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
+
+fn hidden_cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut cmd = Command::new(program.as_ref());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
 use std::sync::{Arc, Mutex};
 use tokio::sync::{oneshot, RwLock};
 use tauri::{State, Window, AppHandle};
@@ -606,17 +617,16 @@ pub struct CommandOutput {
 #[tauri::command]
 fn run_command(command: String, cwd: Option<String>) -> Result<CommandOutput, String> {
     let (cmd, args) = if cfg!(windows) {
-        ("cmd", vec!["/C".to_string(), command])
+        ("powershell", vec!["-NoProfile".to_string(), "-NonInteractive".to_string(), "-Command".to_string(), command])
     } else {
         ("sh", vec!["-c".to_string(), command])
     };
 
-    let mut process = Command::new(cmd);
+    let mut process = hidden_cmd(cmd);
     if let Some(dir) = cwd {
         process.current_dir(dir);
     }
-    process.arg(&args[0]);
-    for arg in &args[1..] {
+    for arg in &args {
         process.arg(arg);
     }
 
@@ -830,12 +840,12 @@ fn git_stash_pop(repo_path: String) -> Result<CommandOutput, String> {
 fn run_git_command(repo_path: &str, args: &str) -> Result<CommandOutput, String> {
     let escaped_path = std::path::Path::new(repo_path).display().to_string();
     let (cmd, shell_args) = if cfg!(windows) {
-        ("cmd", vec!["/C".to_string(), format!("git -C \"{}\" {}", escaped_path, args)])
+        ("powershell", vec!["-NoProfile".to_string(), "-NonInteractive".to_string(), "-Command".to_string(), format!("git -C \"{}\" {}", escaped_path, args)])
     } else {
         ("sh", vec!["-c".to_string(), format!("git -C \"{}\" {}", repo_path, args)])
     };
 
-    let output = Command::new(cmd)
+    let output = hidden_cmd(cmd)
         .args(&shell_args[1..])
         .output()
         .map_err(|e| format!("Failed to run git command: {}", e))?;
@@ -1004,16 +1014,19 @@ pub struct EnvInfo {
 }
 
 fn run_simple_cmd(cmd: &str) -> Result<String, String> {
-    let (shell, arg) = if cfg!(windows) {
-        ("cmd", "/C")
+    let output = if cfg!(windows) {
+        hidden_cmd("powershell")
+            .arg("-NoProfile")
+            .arg("-NonInteractive")
+            .arg("-Command")
+            .arg(cmd)
+            .output()
     } else {
-        ("sh", "-c")
-    };
-    let output = Command::new(shell)
-        .arg(arg)
-        .arg(cmd)
-        .output()
-        .map_err(|e| e.to_string())?;
+        hidden_cmd("sh")
+            .arg("-c")
+            .arg(cmd)
+            .output()
+    }.map_err(|e| e.to_string())?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
@@ -1147,12 +1160,12 @@ pub struct FileWriteResult {
 #[tauri::command]
 fn spawn_process(command: String, cwd: Option<String>) -> Result<i32, String> {
     let (cmd, args) = if cfg!(windows) {
-        ("cmd", vec!["/C".to_string(), "start".to_string(), "/B".to_string(), command])
+        ("powershell", vec!["-NoProfile".to_string(), "-NonInteractive".to_string(), "-Command".to_string(), command])
     } else {
         ("sh", vec!["-c".to_string(), format!("{} &", command)])
     };
 
-    let mut process = Command::new(cmd);
+    let mut process = hidden_cmd(cmd);
     if let Some(dir) = cwd {
         process.current_dir(dir);
     }
@@ -1169,14 +1182,14 @@ fn spawn_process(command: String, cwd: Option<String>) -> Result<i32, String> {
 fn kill_process(pid: i32) -> Result<(), String> {
     #[cfg(windows)]
     {
-        Command::new("taskkill")
+        hidden_cmd("taskkill")
             .args(["/F", "/PID", &pid.to_string()])
             .output()
             .map_err(|e| e.to_string())?;
     }
     #[cfg(not(windows))]
     {
-        Command::new("kill")
+        hidden_cmd("kill")
             .arg(&["-9".to_string(), pid.to_string()])
             .output()
             .map_err(|e| e.to_string())?;
@@ -1270,12 +1283,12 @@ fn apply_patch(repo_path: String, patch_content: String) -> Result<CommandOutput
     let escaped_repo = std::path::Path::new(&repo_path).display().to_string();
     let escaped_patch = std::path::Path::new(&patch_file).display().to_string();
     let (cmd, args) = if cfg!(windows) {
-        ("cmd", vec!["/C".to_string(), format!("git -C \"{}\" apply --3way \"{}\"", escaped_repo, escaped_patch)])
+        ("powershell", vec!["-NoProfile".to_string(), "-NonInteractive".to_string(), "-Command".to_string(), format!("git -C \"{}\" apply --3way \"{}\"", escaped_repo, escaped_patch)])
     } else {
         ("sh", vec!["-c".to_string(), format!("git -C \"{}\" apply --3way \"{}\"", repo_path, patch_file.to_string_lossy())])
     };
 
-    let output = Command::new(cmd)
+    let output = hidden_cmd(cmd)
         .args(&args[1..])
         .output()
         .map_err(|e| format!("Failed to apply patch: {}", e))?;
@@ -1292,18 +1305,23 @@ fn apply_patch(repo_path: String, patch_content: String) -> Result<CommandOutput
 fn create_patch(repo_path: String, target: Option<String>, output_path: Option<String>) -> Result<String, String> {
     let t = target.unwrap_or_else(|| "HEAD".to_string());
     let escaped_repo = std::path::Path::new(&repo_path).display().to_string();
-    let (_cmd, shell_arg) = if cfg!(windows) {
-        ("cmd", format!("git -C \"{}\" {} diff {}", escaped_repo, t, if output_path.is_some() { format!("> \"{}\"", std::path::Path::new(output_path.as_ref().unwrap()).display()) } else { String::new() }))
+    let git_cmd = if let Some(ref op) = output_path {
+        let escaped_out = std::path::Path::new(op).display().to_string();
+        format!("git -C \"{}\" diff {} {} > \"{}\"", escaped_repo, t, t, escaped_out)
     } else {
-        ("sh", format!("git -C \"{}\" diff {} {}", repo_path, t, if output_path.is_some() { format!("> \"{}\"", output_path.as_ref().unwrap()) } else { String::new() }))
+        format!("git -C \"{}\" diff {} {}", escaped_repo, t, t)
     };
-
-    let (shell, arg) = if cfg!(windows) { ("cmd", "/C") } else { ("sh", "-c") };
-    let output = Command::new(shell)
-        .arg(arg)
-        .arg(&shell_arg)
-        .output()
-        .map_err(|e| e.to_string())?;
+    let output = if cfg!(windows) {
+        hidden_cmd("powershell")
+            .arg("-NoProfile").arg("-NonInteractive").arg("-Command")
+            .arg(&git_cmd)
+            .output()
+    } else {
+        hidden_cmd("sh")
+            .arg("-c")
+            .arg(&git_cmd)
+            .output()
+    }.map_err(|e| e.to_string())?;
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -1318,10 +1336,10 @@ fn create_patch(repo_path: String, target: Option<String>, output_path: Option<S
 fn run_tests(repo_path: String, test_framework: String) -> Result<TestResult, String> {
     let (cmd, args) = if cfg!(windows) {
         match test_framework.as_str() {
-            "jest" => ("cmd", vec!["/C".to_string(), "npm test -- --coverage=false --json".to_string()]),
-            "pytest" => ("cmd", vec!["/C".to_string(), "python -m pytest --tb=short -q".to_string()]),
-            "cargo" => ("cmd", vec!["/C".to_string(), "cargo test -- --nocapture".to_string()]),
-            "npm" => ("cmd", vec!["/C".to_string(), "npm test -- --coverage=false".to_string()]),
+            "jest" => ("powershell", vec!["-NoProfile".to_string(), "-NonInteractive".to_string(), "-Command".to_string(), "npm test -- --coverage=false --json".to_string()]),
+            "pytest" => ("powershell", vec!["-NoProfile".to_string(), "-NonInteractive".to_string(), "-Command".to_string(), "python -m pytest --tb=short -q".to_string()]),
+            "cargo" => ("powershell", vec!["-NoProfile".to_string(), "-NonInteractive".to_string(), "-Command".to_string(), "cargo test -- --nocapture".to_string()]),
+            "npm" => ("powershell", vec!["-NoProfile".to_string(), "-NonInteractive".to_string(), "-Command".to_string(), "npm test -- --coverage=false".to_string()]),
             _ => return Err(format!("Unknown test framework: {}", test_framework)),
         }
     } else {
@@ -1334,7 +1352,7 @@ fn run_tests(repo_path: String, test_framework: String) -> Result<TestResult, St
         }
     };
 
-    let mut process = Command::new(cmd);
+    let mut process = hidden_cmd(cmd);
     if test_framework == "pytest" || test_framework == "cargo" {
         process.current_dir(&repo_path);
     }

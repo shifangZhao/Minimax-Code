@@ -9,6 +9,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+
+fn hidden_cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut cmd = Command::new(program.as_ref());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
@@ -110,7 +121,7 @@ impl StdioTransport {
         let cmd_name = &command[0];
         let cmd_args: Vec<&str> = command[1..].iter().map(|s| s.as_str()).collect();
 
-        let mut cmd = Command::new(cmd_name);
+        let mut cmd = hidden_cmd(cmd_name);
         cmd.args(&cmd_args)
             .current_dir(cwd)
             .stdin(Stdio::piped())

@@ -14,10 +14,23 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{Mutex, RwLock};
+
+/// Build a Command that runs without a visible console window on Windows.
+fn hidden_cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut cmd = Command::new(program.as_ref());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
 
 use crate::context_compressor::{compress_context, estimate_tokens};
 use crate::lsp_manager::LspManager;
@@ -1594,7 +1607,7 @@ async fn tool_read_files(params: &serde_json::Value) -> String {
 async fn tool_git_status(params: &serde_json::Value) -> String {
     let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     tokio::task::spawn_blocking(move || {
-        match std::process::Command::new("git")
+        match hidden_cmd("git")
             .args(["-C", &path, "status", "--porcelain"])
             .output()
         {
@@ -1617,7 +1630,7 @@ async fn tool_git_log(params: &serde_json::Value) -> String {
     let count = params["count"].as_i64().unwrap_or(20) as usize;
     let path = path.to_string();
     tokio::task::spawn_blocking(move || {
-        match std::process::Command::new("git")
+        match hidden_cmd("git")
             .args(["-C", &path, "log", "--oneline", &format!("-{}", count)])
             .output()
         {
@@ -1635,7 +1648,7 @@ async fn tool_git_diff(params: &serde_json::Value) -> String {
     let path = path.to_string();
     let target = target.to_string();
     tokio::task::spawn_blocking(move || {
-        match std::process::Command::new("git")
+        match hidden_cmd("git")
             .args(["-C", &path, "diff", &target])
             .output()
         {
@@ -1653,7 +1666,7 @@ async fn tool_git_commit(params: &serde_json::Value) -> String {
     let path = path.to_string();
     let message = message.to_string();
     tokio::task::spawn_blocking(move || {
-        match std::process::Command::new("git")
+        match hidden_cmd("git")
             .args(["-C", &path, "commit", "-m", &message])
             .output()
         {
@@ -1675,7 +1688,7 @@ async fn tool_git_branch(params: &serde_json::Value) -> String {
     let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     let path = path.to_string();
     tokio::task::spawn_blocking(move || {
-        match std::process::Command::new("git")
+        match hidden_cmd("git")
             .args(["-C", &path, "branch", "-v"])
             .output()
         {
@@ -1693,7 +1706,7 @@ async fn tool_git_checkout(params: &serde_json::Value) -> String {
     let path = path.to_string();
     let branch = branch.to_string();
     tokio::task::spawn_blocking(move || {
-        match std::process::Command::new("git")
+        match hidden_cmd("git")
             .args(["-C", &path, "checkout", &branch])
             .output()
         {
@@ -1715,7 +1728,7 @@ async fn tool_git_stash(params: &serde_json::Value) -> String {
     let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     let path = path.to_string();
     tokio::task::spawn_blocking(move || {
-        match std::process::Command::new("git")
+        match hidden_cmd("git")
             .args(["-C", &path, "stash", "push", "-m", "auto-stash"])
             .output()
         {
@@ -1737,7 +1750,7 @@ async fn tool_git_stash_pop(params: &serde_json::Value) -> String {
     let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     let path = path.to_string();
     tokio::task::spawn_blocking(move || {
-        match std::process::Command::new("git")
+        match hidden_cmd("git")
             .args(["-C", &path, "stash", "pop"])
             .output()
         {
@@ -1797,11 +1810,11 @@ async fn tool_run_command(params: &serde_json::Value) -> String {
     let cwd = params["path"].as_str().map(|s| normalize_file_path(s));
     tokio::task::spawn_blocking(move || {
         let mut cmd = if cfg!(windows) {
-            let mut c = std::process::Command::new("cmd");
-            c.args(["/C", &command]);
+            let mut c = hidden_cmd("powershell");
+            c.args(["-NoProfile", "-NonInteractive", "-Command", &command]);
             c
         } else {
-            let mut c = std::process::Command::new("sh");
+            let mut c = hidden_cmd("sh");
             c.args(["-c", &command]);
             c
         };
@@ -2483,11 +2496,11 @@ async fn tool_run_background(params: &serde_json::Value) -> String {
     let err_file_clone = err_file.clone();
 
     let mut cmd = if cfg!(windows) {
-        let mut c = std::process::Command::new("cmd");
+        let mut c = hidden_cmd("cmd");
         c.args(["/C", command]);
         c
     } else {
-        let mut c = std::process::Command::new("sh");
+        let mut c = hidden_cmd("sh");
         c.args(["-c", command]);
         c
     };
@@ -2579,13 +2592,13 @@ async fn tool_job_output(params: &serde_json::Value) -> String {
 
         // Check if process is still running
         let status = if cfg!(windows) {
-            std::process::Command::new("tasklist")
+            hidden_cmd("tasklist")
                 .args(["/FI", &format!("PID eq {}", pid)])
                 .output()
                 .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
                 .unwrap_or(false)
         } else {
-            std::process::Command::new("ps")
+            hidden_cmd("ps")
                 .args(["-p", &pid.to_string()])
                 .output()
                 .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
@@ -2604,7 +2617,7 @@ async fn tool_job_output(params: &serde_json::Value) -> String {
     }
     // Legacy: try to get process info via tasklist/ps
     if cfg!(windows) {
-        let output = std::process::Command::new("tasklist")
+        let output = hidden_cmd("tasklist")
             .args(["/FI", &format!("PID eq {}", pid)])
             .output();
         match output {
@@ -2619,7 +2632,7 @@ async fn tool_job_output(params: &serde_json::Value) -> String {
             Err(_) => format!("Process {} status unknown.", pid),
         }
     } else {
-        let output = std::process::Command::new("ps")
+        let output = hidden_cmd("ps")
             .args(["-p", &pid.to_string(), "-o", "pid,stat,command"])
             .output();
         match output {
@@ -2638,7 +2651,7 @@ async fn tool_job_output(params: &serde_json::Value) -> String {
 
 async fn tool_list_jobs(_params: &serde_json::Value) -> String {
     if cfg!(windows) {
-        match std::process::Command::new("tasklist")
+        match hidden_cmd("tasklist")
             .args(["/FO", "CSV", "/NH"])
             .output()
         {
@@ -2653,7 +2666,7 @@ async fn tool_list_jobs(_params: &serde_json::Value) -> String {
             Err(e) => format!("Error: {}", e),
         }
     } else {
-        match std::process::Command::new("ps").args(["-eo", "pid,comm,stat"]).output() {
+        match hidden_cmd("ps").args(["-eo", "pid,comm,stat"]).output() {
             Ok(o) => {
                 let text = String::from_utf8_lossy(&o.stdout).to_string();
                 if text.trim().is_empty() {
@@ -2680,7 +2693,7 @@ async fn tool_run_tests(params: &serde_json::Value) -> String {
             "npm" => ("npm", vec!["test", "--", "--coverage=false"]),
             _ => return format!("Unknown test framework: {}", framework),
         };
-        let mut process = std::process::Command::new(cmd);
+        let mut process = hidden_cmd(cmd);
         if framework == "pytest" || framework == "cargo" {
             process.current_dir(&path);
         }
@@ -2705,11 +2718,11 @@ async fn tool_spawn_process(params: &serde_json::Value) -> String {
     let cwd = cwd.map(|s| s.to_string());
     tokio::task::spawn_blocking(move || {
         let mut cmd = if cfg!(windows) {
-            let mut c = std::process::Command::new("cmd");
+            let mut c = hidden_cmd("cmd");
             c.args(["/C", "start", "/B", &command]);
             c
         } else {
-            let mut c = std::process::Command::new("sh");
+            let mut c = hidden_cmd("sh");
             c.args(["-c", &format!("{} &", command)]);
             c
         };
@@ -2729,11 +2742,11 @@ async fn tool_kill_process(params: &serde_json::Value) -> String {
     let pid = params["pid"].as_i64().unwrap_or(0) as u32;
     tokio::task::spawn_blocking(move || {
         let output = if cfg!(windows) {
-            std::process::Command::new("taskkill")
+            hidden_cmd("taskkill")
                 .args(["/F", "/PID", &pid.to_string()])
                 .output()
         } else {
-            std::process::Command::new("kill")
+            hidden_cmd("kill")
                 .args(["-9", &pid.to_string()])
                 .output()
         };
@@ -3185,7 +3198,7 @@ fn get_env_info_sync(repo_path: &str) -> String {
         info.push("Project: Python".to_string());
     }
 
-    let output = std::process::Command::new("git")
+    let output = hidden_cmd("git")
         .args(["-C", repo_path, "status", "--porcelain"])
         .output();
     if let Ok(o) = output {
