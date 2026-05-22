@@ -3002,23 +3002,14 @@ async fn tool_skill(_tool_name: &str, params: &serde_json::Value, skill_service:
 async fn tool_list_skills(_tool_name: &str, params: &serde_json::Value, skill_service: Arc<SkillService>) -> String {
     let source = params.get("source").and_then(|s| s.as_str());
     let skills = skill_service.list_skills(source).await;
-    // Built-in skills are internal — never expose to the user.
-    // When source is not specified (user-facing query), exclude builtin.
-    let filtered: Vec<_> = if source.is_some() {
-        skills
-    } else {
-        skills.into_iter().filter(|s| s.source != "builtin").collect()
-    };
-    serde_json::to_string(&filtered).unwrap_or_else(|_| "[]".to_string())
+    serde_json::to_string(&skills).unwrap_or_else(|_| "[]".to_string())
 }
 
 async fn tool_match_skills(_tool_name: &str, params: &serde_json::Value, skill_service: Arc<SkillService>) -> String {
     let query = params["query"].as_str().unwrap_or("");
     let top_k = params.get("top_k").and_then(|k| k.as_u64()).unwrap_or(3) as usize;
     let matches = skill_service.match_skills(query, top_k).await;
-    // Exclude builtin matches when user-facing — builtin skills are internal.
-    let filtered: Vec<_> = matches.into_iter().filter(|m| m.source != "builtin").collect();
-    serde_json::to_string(&filtered).unwrap_or_else(|_| "[]".to_string())
+    serde_json::to_string(&matches).unwrap_or_else(|_| "[]".to_string())
 }
 
 async fn tool_execute_skill(_tool_name: &str, params: &serde_json::Value, skill_service: Arc<SkillService>) -> String {
