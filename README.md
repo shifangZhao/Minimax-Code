@@ -1,12 +1,15 @@
 # MiNiMaX Code
 
-AI 驱动的桌面端代码编辑器，基于 [Tauri 2](https://tauri.app/) + Vue 3 + TypeScript 构建，使用 [MiniMax API](https://www.minimaxi.com/) 提供多智能体协作编程体验。
+AI 驱动的桌面端代码编辑器，基于 [Tauri 2](https://tauri.app/) + Vue 3 + TypeScript 构建，原生支持 MiniMax 和 Anthropic 兼容 API（Claude、DeepSeek 等），提供多智能体协作编程体验。
 
 ## 功能特性
 
 - **双模式** — Ace 模式（独立全栈 Agent）和 Team 模式（多智能体协作），一键切换
 - **多智能体协作** — Front、Plan、Work、Review、Explore 五种 Agent 视图，各司其职
-- **流式对话** — 实时流式 AI 对话，支持 Markdown 渲染和代码高亮
+- **多提供商** — 原生支持 MiniMax API，同时兼容 Anthropic Messages API（Claude Opus/Sonnet/Haiku、DeepSeek 等），可保存多套配置快速切换
+- **Prompt 缓存** — MiniMax KV Cache 实现多轮对话前缀缓存，缓存命中率极高，大幅降低延迟和成本
+- **上下文管理** — 实时 Token 用量指示条，自动压缩 + 手动 `/compact` 命令，控制上下文窗口
+- **流式对话** — 实时流式 AI 对话，支持 Markdown 渲染和代码高亮，思考过程展示
 - **MCP 协议** — 内置 Model Context Protocol 客户端，可接入本地/远程 MCP Server 扩展能力
 - **LSP 集成** — Language Server Protocol 支持，提供代码智能补全和诊断
 - **代码图谱** — 项目结构分析和依赖关系可视化
