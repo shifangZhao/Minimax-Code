@@ -48,6 +48,12 @@
         </div>
       </div>
     </div>
+    <div v-if="tokenUsage.usage_pct > 0" class="context-usage">
+      <div class="context-bar">
+        <div class="context-fill" :class="usageColor" :style="{ width: Math.min(tokenUsage.usage_pct, 100) + '%' }"></div>
+      </div>
+      <span class="context-label">{{ formatTokens(tokenUsage.estimated_tokens) }} / {{ formatTokens(tokenUsage.context_window) }}</span>
+    </div>
     <div class="messages" ref="messagesEl">
       <div
         v-for="(msg, i) in displayMessages"
@@ -151,6 +157,22 @@
         <button class="preview-remove" @click="removeAttachment(idx)" title="移除">✕</button>
       </div>
     </div>
+    <div v-if="showCommands && (agentType === 'front' || agentType === 'ace')" class="cmd-popup">
+      <div class="cmd-header">
+        <span class="cmd-title">命令</span>
+        <button class="cmd-close" @click="showCommands = false">×</button>
+      </div>
+      <div
+        v-for="cmd in filteredCommands"
+        :key="cmd.name"
+        class="cmd-item"
+        @click="insertCommand(cmd.name)"
+      >
+        <span class="cmd-name">{{ cmd.name }}</span>
+        <span class="cmd-desc">{{ cmd.desc }}</span>
+      </div>
+      <div v-if="filteredCommands.length === 0" class="cmd-empty">无匹配命令</div>
+    </div>
     <div class="input-area" v-if="agentType === 'front' || agentType === 'ace'">
       <textarea
         ref="inputEl"
@@ -165,7 +187,7 @@
           <button class="toolbar-btn" @click="onAttachment" title="添加附件">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
           </button>
-          <button class="toolbar-btn" @click="onSlashCommand" title="命令">
+          <button class="toolbar-btn" @click="showCommands = !showCommands; manualCommands = showCommands" title="命令">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="17" y1="2" x2="7" y2="22"/></svg>
           </button>
         </div>
@@ -181,6 +203,7 @@
 import { ref, computed, watch, onMounted, onActivated, onDeactivated, nextTick } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
+import { db } from '../services/db'
 import { useAgentConversation } from '../composables/useAgentConversation'
 import { useGlobalStreaming } from '../composables/useGlobalStreaming'
 import { usePermissions } from '../composables/usePermissions'
@@ -218,6 +241,8 @@ const {
   cancelRewind,
   showClearConfirm,
   clearConversation,
+  tokenUsage,
+  loadMessages,
 } = useAgentConversation(props.agentType)
 
 const { globalStreamingStates } = useGlobalStreaming()
@@ -228,6 +253,42 @@ const { bookmarks, showBookmarkPanel, showSaveInput, bookmarkName, loadBookmarks
 const messagesEl = ref<HTMLElement>()
 const inputEl = ref<HTMLTextAreaElement>()
 const inputText = ref('')
+const showCommands = ref(false)
+const manualCommands = ref(false)  // true when user clicked / button
+
+const commands = [
+  { name: '/compact', desc: '手动压缩上下文，减少 token 占用' },
+]
+
+const cmdQuery = computed(() => {
+  const t = inputText.value.trimStart()
+  if (t.startsWith('/')) return t.slice(1)
+  return ''
+})
+
+const filteredCommands = computed(() => {
+  if (!cmdQuery.value) return commands
+  const q = cmdQuery.value.toLowerCase()
+  return commands.filter(c => c.name.toLowerCase().includes(q) || c.desc.toLowerCase().includes(q))
+})
+
+// Show popup when typing / as first char, or when button toggled
+watch(inputText, (val) => {
+  if (manualCommands.value) return  // manual toggle, don't interfere
+  const t = val.trimStart()
+  if (t.startsWith('/')) {
+    showCommands.value = true
+  } else {
+    showCommands.value = false
+  }
+})
+
+function insertCommand(name: string) {
+  inputText.value = name + ' '
+  showCommands.value = false
+  manualCommands.value = false
+  inputEl.value?.focus()
+}
 const thinkingExpanded = ref<Record<number, boolean>>({})
 // Per-agent scroll position cache (survives KeepAlive tab switches)
 const scrollCache = new Map<string, number>()
@@ -323,6 +384,18 @@ const displayMessages = computed(() => {
 function formatContent(text: string): string {
   return renderMarkdown(text) || ''
 }
+
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M'
+  if (n >= 1_000) return (n / 1_000).toFixed(0) + 'K'
+  return n.toString()
+}
+
+const usageColor = computed(() => {
+  if (tokenUsage.value.usage_pct >= 90) return 'danger'
+  if (tokenUsage.value.usage_pct >= 80) return 'warning'
+  return ''
+})
 
 interface AttInfo { name: string; path: string; kind: string }
 
@@ -483,13 +556,28 @@ function onSendKey(e: KeyboardEvent) {
   }
 }
 
-function onSlashCommand() {
-  inputText.value = inputText.value ? inputText.value + '\n' : '/'
-  inputEl.value?.focus()
-}
-
 async function onSend() {
   const text = inputText.value.trim()
+
+  // Slash commands
+  if (text === '/compact' && sessionId.value) {
+    inputText.value = ''
+    try {
+      const result = await db.compactSession(sessionId.value)
+      messages.value.push({
+        id: Date.now(), session_id: sessionId.value!, role: 'user' as const,
+        content: `/compact — ${result.before} → ${result.after} tokens (${result.messages} msgs)`,
+        created_at: new Date().toISOString(),
+      } as any)
+      await loadMessages()
+    } catch (e) {
+      console.error('Compact failed:', e)
+    }
+    return
+  }
+
+  showCommands.value = false
+  manualCommands.value = false
   if ((!text && attachedFiles.value.length === 0) || loading.value) return
   inputText.value = ''
 
@@ -688,6 +776,45 @@ onDeactivated(() => {
   font-size: 14px;
   font-weight: 500;
   color: var(--text-primary);
+}
+
+.context-usage {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.context-bar {
+  flex: 1;
+  height: 4px;
+  background: var(--bg-tertiary);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.context-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  transition: width 0.3s;
+}
+
+.context-fill.warning {
+  background: #f0a020;
+}
+
+.context-fill.danger {
+  background: #e81123;
+}
+
+.context-label {
+  font-size: 10px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .messages {
@@ -1155,6 +1282,87 @@ onDeactivated(() => {
 .preview-remove:hover {
   background: var(--bg-primary);
   color: var(--text-primary);
+}
+
+.cmd-popup {
+  margin: 0 12px 4px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  overflow: hidden;
+  box-shadow: 0 -4px 12px rgba(0,0,0,0.1);
+}
+
+.cmd-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.cmd-title {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.cmd-close {
+  width: 18px;
+  height: 18px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 14px;
+  cursor: pointer;
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cmd-close:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.cmd-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.cmd-item:hover {
+  background: var(--bg-tertiary);
+}
+
+.cmd-item + .cmd-item {
+  border-top: 1px solid var(--border-color);
+}
+
+.cmd-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  font-family: 'Consolas', monospace;
+  white-space: nowrap;
+}
+
+.cmd-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.cmd-empty {
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-align: center;
 }
 
 .input-area {

@@ -31,7 +31,7 @@ export interface AssistantMessage {
 }
 
 interface RustStreamEvent {
-  type: 'content_block_delta' | 'tool_start' | 'tool_end' | 'done' | 'error' | 'cache_usage'
+  type: 'content_block_delta' | 'tool_start' | 'tool_end' | 'done' | 'error' | 'cache_usage' | 'token_usage'
   content?: string
   thinking?: string
   tool?: string
@@ -41,6 +41,15 @@ interface RustStreamEvent {
   cache_hit_tokens?: number
   cache_miss_tokens?: number
   cache_hit_ratio?: number
+  estimated_tokens?: number
+  context_window?: number
+  usage_pct?: number
+}
+
+export interface TokenUsage {
+  estimated_tokens: number
+  context_window: number
+  usage_pct: number
 }
 
 export function useAgentConversation(agentType: string) {
@@ -50,6 +59,7 @@ export function useAgentConversation(agentType: string) {
   const currentGroupChatId = ref<number | null>(null)
   const pendingAsk = ref<any>(null)
   const toolEvents = ref<ToolEvent[]>([])
+  const tokenUsage = ref<TokenUsage>({ estimated_tokens: 0, context_window: 200000, usage_pct: 0 })
 
   // Per-session stream listeners for multi-group-chat support
   const streamListeners = new Map<number, UnlistenFn>()
@@ -331,6 +341,13 @@ export function useAgentConversation(agentType: string) {
             `[cache] session=${finalSessionId} hit=${ev.cache_hit_tokens} miss=${ev.cache_miss_tokens} ratio=${((ev.cache_hit_ratio || 0) * 100).toFixed(1)}%`
           )
           break
+        case 'token_usage':
+          tokenUsage.value = {
+            estimated_tokens: ev.estimated_tokens || 0,
+            context_window: ev.context_window || 200000,
+            usage_pct: ev.usage_pct || 0
+          }
+          break
         case 'error':
           hasError = true
           fullText += `\n\nError: ${ev.content}`
@@ -512,6 +529,7 @@ export function useAgentConversation(agentType: string) {
     clearAsk,
     clearToolEvents,
     switchGroupChat,
+    tokenUsage,
     retryMessage,
     showRewindConfirm,
     rewindToMessage,

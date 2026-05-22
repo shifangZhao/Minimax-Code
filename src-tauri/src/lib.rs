@@ -1478,6 +1478,99 @@ async fn agent_chat_stream(
     Ok(())
 }
 
+#[tauri::command]
+fn compact_session(state: State<'_, AppState>, session_id: i64) -> Result<String, String> {
+    use crate::context_compressor::compress_context;
+    use crate::context_compressor::estimate_tokens;
+
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+
+    // Load agent type and context window
+    let (agent_type, context_window): (String, usize) = {
+        let at: String = conn.query_row(
+            "SELECT agent_type FROM agent_session WHERE id = ?1",
+            rusqlite::params![session_id],
+            |row| row.get(0),
+        ).map_err(|e| format!("Session not found: {}", e))?;
+        // Read context window from config
+        let provider: String = conn.query_row(
+            "SELECT provider FROM app_config", [], |row| row.get(0)
+        ).unwrap_or_else(|_| "minimax".to_string());
+        let cw: i64 = match provider.as_str() {
+            "custom" => conn.query_row("SELECT custom_context_window FROM app_config", [], |row| row.get(0)).unwrap_or(200000),
+            _ => conn.query_row("SELECT context_window FROM app_config", [], |row| row.get(0)).unwrap_or(204800),
+        };
+        (at, cw.max(0) as usize)
+    };
+
+    // Load and reconstruct messages in API format
+    let mut stmt = conn.prepare(
+        "SELECT role, content, tool_calls, thinking, raw_json FROM chat_message WHERE session_id = ?1 ORDER BY created_at ASC"
+    ).map_err(|e| e.to_string())?;
+
+    #[derive(Debug)]
+    struct RawMsg { role: String, content: String, tool_calls: Option<String>, thinking: Option<String>, raw_json: Option<String> }
+
+    let rows: Vec<RawMsg> = stmt.query_map(rusqlite::params![session_id], |row| Ok(RawMsg {
+        role: row.get(0)?, content: row.get(1)?, tool_calls: row.get(2)?, thinking: row.get(3)?, raw_json: row.get(4)?,
+    })).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
+
+    drop(stmt);
+
+    let token_before = estimate_tokens(&rows.iter().map(|m| {
+        let content_val = match m.raw_json {
+            Some(ref raw) => serde_json::from_str(raw).unwrap_or(serde_json::json!(m.content)),
+            None => serde_json::json!(m.content),
+        };
+        serde_json::json!({"role": m.role, "content": content_val})
+    }).collect::<Vec<_>>());
+
+    // Reconstruct as Vec<Value> for compress_context
+    let mut api_messages: Vec<serde_json::Value> = rows.iter().map(|m| {
+        let content_val = match m.raw_json {
+            Some(ref raw) => serde_json::from_str(raw).unwrap_or(serde_json::json!(m.content)),
+            None => serde_json::json!(m.content),
+        };
+        serde_json::json!({"role": m.role, "content": content_val})
+    }).collect();
+
+    compress_context(&agent_type, &mut api_messages, context_window);
+
+    let token_after = estimate_tokens(&api_messages);
+
+    // Delete old messages and re-save compressed ones
+    conn.execute("DELETE FROM chat_message WHERE session_id = ?1", rusqlite::params![session_id])
+        .map_err(|e| e.to_string())?;
+
+    for msg in &api_messages {
+        let role = msg["role"].as_str().unwrap_or("user");
+        let content_val = &msg["content"];
+        // Extract display text
+        let display_text: String = if let Some(s) = content_val.as_str() {
+            s.to_string()
+        } else if let Some(arr) = content_val.as_array() {
+            arr.iter()
+                .filter(|b| b["type"] == "text")
+                .map(|b| b["text"].as_str().unwrap_or(""))
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            String::new()
+        };
+        let raw_json = serde_json::to_string(content_val).unwrap_or_default();
+        conn.execute(
+            "INSERT INTO chat_message (session_id, role, content, tool_calls, thinking, raw_json) VALUES (?1, ?2, ?3, NULL, NULL, ?4)",
+            rusqlite::params![session_id, role, display_text, raw_json],
+        ).map_err(|e| e.to_string())?;
+    }
+
+    Ok(serde_json::to_string(&serde_json::json!({
+        "before": token_before,
+        "after": token_after,
+        "messages": api_messages.len(),
+    })).unwrap_or_default())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 #[tauri::command]
 async fn get_permission_mode(state: State<'_, AppState>) -> Result<String, String> {
@@ -2167,6 +2260,7 @@ pub fn run() {
             get_messages,
             delete_message,
             clear_session_history,
+            compact_session,
             set_minimax_api_key,
             get_minimax_api_key,
             set_workspace,

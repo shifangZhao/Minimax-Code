@@ -11,7 +11,7 @@ const COMPRESS_THRESHOLD: f64 = 0.8;
 // Token estimation using character-class weighting.
 // CJK characters are token-dense (~1.5 chars/token). ASCII text is sparse (~4 chars/token).
 // JSON structural characters are individually significant and counted at 1:1.
-fn estimate_tokens(messages: &[Value]) -> usize {
+pub fn estimate_tokens(messages: &[Value]) -> usize {
     let mut cjk = 0usize;
     let mut ascii_alpha = 0usize;
     let mut json_structural = 0usize;

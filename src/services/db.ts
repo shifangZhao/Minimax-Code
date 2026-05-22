@@ -84,6 +84,11 @@ export const db = {
     return invoke('rewind_conversation', { sessionId, messageId })
   },
 
+  async compactSession(sessionId: number): Promise<{ before: number; after: number; messages: number }> {
+    const result: string = await invoke('compact_session', { sessionId })
+    return JSON.parse(result)
+  },
+
   // Bookmarks
   async saveBookmark(sessionId: number, name: string, workspace: string): Promise<any> {
     return invoke('save_bookmark', { sessionId, name, workspace })

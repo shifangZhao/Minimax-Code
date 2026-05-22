@@ -18,7 +18,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::{Mutex, RwLock};
 
 use crate::code_graph::CodeGraph;
-use crate::context_compressor::compress_context;
+use crate::context_compressor::{compress_context, estimate_tokens};
 use crate::lsp_manager::LspManager;
 use crate::lsp_types::format_diagnostics;
 use crate::mcp_service::McpService;
@@ -56,6 +56,8 @@ pub enum StreamEvent {
     Error { content: String },
     #[serde(rename = "cache_usage")]
     CacheUsage { cache_hit_tokens: u64, cache_miss_tokens: u64, cache_hit_ratio: f64 },
+    #[serde(rename = "token_usage")]
+    TokenUsage { estimated_tokens: usize, context_window: usize, usage_pct: f64 },
 }
 
 // ========== Agent Service ==========
@@ -379,8 +381,17 @@ impl AgentService {
 
         // Main loop: continue until stop_reason is not "tool_use"
         loop {
-            // Compress context when approaching token limit (80% of 128K)
+            // Compress context when approaching token limit (80% of context window)
             compress_context(agent_type, &mut api_messages, self.context_window);
+
+            // Emit token usage for context window display
+            let est = estimate_tokens(&api_messages);
+            let usage_pct = (est as f64 / self.context_window as f64) * 100.0;
+            let _ = app.emit(&session_key, StreamEvent::TokenUsage {
+                estimated_tokens: est,
+                context_window: self.context_window,
+                usage_pct,
+            });
 
             let request_body = json!({
                 "model": self.model,
