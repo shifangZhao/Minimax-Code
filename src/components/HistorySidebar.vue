@@ -1,12 +1,12 @@
 <template>
   <div class="history-sidebar">
     <div class="sidebar-header">
-      <span class="sidebar-title">📋 群聊</span>
-      <button class="add-btn" @click.stop="createGroupChat" title="新建群聊">+</button>
+      <span class="sidebar-title">{{ currentMode === 'ace' ? '📋 会话' : '📋 群聊' }}</span>
+      <button class="add-btn" @click.stop="createGroupChat" :title="currentMode === 'ace' ? '新建会话' : '新建群聊'">+</button>
     </div>
     <div class="sidebar-content">
       <div v-if="loading" class="loading">加载中...</div>
-      <div v-else-if="groupChats.length === 0" class="empty">暂无群聊</div>
+      <div v-else-if="groupChats.length === 0" class="empty">{{ currentMode === 'ace' ? '暂无会话' : '暂无群聊' }}</div>
       <div v-else class="chat-list">
         <div
           v-for="chat in groupChats"

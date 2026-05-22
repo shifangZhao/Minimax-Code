@@ -57,6 +57,7 @@ pub fn compress_context(agent_type: &str, messages: &mut Vec<Value>) {
     }
 
     let keep_recent = match agent_type {
+        "ace" => 10,
         "front" => 8,
         "plan" => 4,
         "work" => 3,
@@ -362,6 +363,52 @@ fn build_summary(agent_type: &str, messages: &[Value]) -> String {
                 summary.push_str("### 探索发现\n");
                 for t in assistant_texts.iter().rev().take(3) {
                     summary.push_str(&format!("- {}\n", t));
+                }
+                summary.push('\n');
+            }
+        }
+        "ace" => {
+            // Ace: all-in-one — need full context across all dimensions
+            if !user_requests.is_empty() {
+                summary.push_str("### 用户请求\n");
+                for r in &user_requests {
+                    summary.push_str(&format!("- {}\n", r));
+                }
+                summary.push('\n');
+            }
+            if !assistant_texts.is_empty() {
+                summary.push_str("### 关键操作\n");
+                for t in assistant_texts.iter().rev().take(5) {
+                    summary.push_str(&format!("- {}\n", t));
+                }
+                summary.push('\n');
+            }
+            if !files_touched.is_empty() {
+                summary.push_str("### 涉及文件\n");
+                let mut seen = std::collections::HashSet::new();
+                for f in &files_touched {
+                    if seen.insert(f) { summary.push_str(&format!("- {}\n", f)); }
+                }
+                summary.push('\n');
+            }
+            if !commands_run.is_empty() {
+                summary.push_str("### 执行命令\n");
+                for c in &commands_run {
+                    summary.push_str(&format!("- {}\n", c));
+                }
+                summary.push('\n');
+            }
+            if !git_actions.is_empty() {
+                summary.push_str("### Git\n");
+                for g in &git_actions {
+                    summary.push_str(&format!("- {}\n", g));
+                }
+                summary.push('\n');
+            }
+            if !graph_ops.is_empty() {
+                summary.push_str("### 代码分析\n");
+                for g in &graph_ops {
+                    summary.push_str(&format!("- {}\n", g));
                 }
                 summary.push('\n');
             }

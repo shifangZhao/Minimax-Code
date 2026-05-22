@@ -57,8 +57,9 @@
         <div class="avatar">{{ msg.role === 'user' ? 'U' : 'A' }}</div>
         <div class="content">
           <div v-if="msg.thinking && msg.role === 'assistant'" class="thinking-block">
-            <div class="thinking-toggle" @click="toggleThinking(i)">
-              思考过程 {{ isThinkingExpanded(i) ? '▾' : '▸' }}
+            <div class="thinking-toggle" :class="{ collapsed: !isThinkingExpanded(i) }" @click="toggleThinking(i)">
+              <span class="toggle-arrow"></span>
+              思考过程
             </div>
             <div v-if="isThinkingExpanded(i)" class="thinking-text" v-html="formatContent(msg.thinking)"></div>
           </div>
@@ -903,10 +904,31 @@ onDeactivated(() => {
   color: var(--text-secondary);
   cursor: pointer;
   user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.toggle-arrow {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid var(--text-secondary);
+  border-bottom: 1.5px solid var(--text-secondary);
+  transform: rotate(-45deg);
+  transition: transform 0.2s;
+}
+
+.thinking-toggle.collapsed .toggle-arrow {
+  transform: rotate(45deg);
 }
 
 .thinking-toggle:hover {
-  opacity: 0.7;
+  color: var(--text-primary);
+}
+
+.thinking-toggle:hover .toggle-arrow {
+  border-color: var(--text-primary);
 }
 
 .thinking-text {
@@ -916,6 +938,42 @@ onDeactivated(() => {
   line-height: 1.5;
   word-break: break-word;
   user-select: text;
+}
+
+.thinking-text :deep(p) {
+  margin: 6px 0;
+}
+
+.thinking-text :deep(ul),
+.thinking-text :deep(ol) {
+  margin: 6px 0;
+  padding-left: 20px;
+}
+
+.thinking-text :deep(li) {
+  margin: 2px 0;
+}
+
+.thinking-text :deep(pre) {
+  background: var(--bg-primary);
+  border-radius: 4px;
+  padding: 8px 12px;
+  margin: 6px 0;
+  overflow-x: auto;
+  font-size: 11px;
+}
+
+.thinking-text :deep(code) {
+  font-family: 'Consolas', 'Courier New', monospace;
+  font-size: 11px;
+  background: var(--bg-primary);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.thinking-text :deep(pre code) {
+  background: none;
+  padding: 0;
 }
 
 .tool-events {

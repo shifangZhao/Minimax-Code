@@ -4,6 +4,7 @@ AI 驱动的桌面端代码编辑器，基于 [Tauri 2](https://tauri.app/) + Vu
 
 ## 功能特性
 
+- **双模式** — Ace 模式（独立全栈 Agent）和 Team 模式（多智能体协作），一键切换
 - **多智能体协作** — Front、Plan、Work、Review、Explore 五种 Agent 视图，各司其职
 - **流式对话** — 实时流式 AI 对话，支持 Markdown 渲染和代码高亮
 - **MCP 协议** — 内置 Model Context Protocol 客户端，可接入本地/远程 MCP Server 扩展能力
@@ -16,6 +17,8 @@ AI 驱动的桌面端代码编辑器，基于 [Tauri 2](https://tauri.app/) + Vu
 - **Web 搜索 & 图片理解** — 内置网络搜索和 VLM 视觉理解能力
 - **本地持久化** — SQLite 存储对话历史、会话管理和 API Key
 - **权限管理** — 三种权限模式（Normal / Guarded / Full），精细控制工具调用
+- **撤销 & 回退** — 文件编辑自动保存快照，支持撤销操作和对话历史回退
+- **快照管理** — 保存/恢复项目状态快照，随时回到之前的代码状态
 - **无边框窗口** — 自定义标题栏，原生窗口控制
 
 ## 技术栈
@@ -59,12 +62,14 @@ npm run tauri build
 
 1. 启动后在设置面板填入 MiniMax API Key
 2. 设置工作目录（Workspace），Agent 将在此目录下进行文件操作
-3. 通过顶部 Tab 切换不同 Agent 视图：
-   - **Front** — 前端开发
-   - **Plan** — 技术方案规划
-   - **Work** — 通用编码执行
-   - **Review** — 代码审查
-   - **Explore** — 代码库探索
+3. 通过 ModeSwitcher 切换工作模式：
+   - **Ace** — 独立全栈 Agent，拥有所有工具，端到端完成任务，无需委派
+   - **Team** — 通过顶部 Tab 切换不同 Agent 视图协作：
+     - **Front** — 理解需求、协调团队、汇报结果
+     - **Plan** — 技术方案规划
+     - **Work** — 编码执行
+     - **Review** — 代码审查
+     - **Explore** — 代码库探索
 4. 左侧面板可管理多个群聊会话和对话历史
 
 ## 项目结构
