@@ -104,7 +104,6 @@ fn build_summary(agent_type: &str, messages: &[Value]) -> String {
     let mut git_actions: Vec<String> = Vec::new();
     let mut tool_uses: Vec<String> = Vec::new();
     let mut assistant_texts: Vec<String> = Vec::new();
-    let mut graph_ops: Vec<String> = Vec::new();
 
     for msg in messages {
         let role = msg["role"].as_str().unwrap_or("");
@@ -174,16 +173,6 @@ fn build_summary(agent_type: &str, messages: &[Value]) -> String {
                                             .unwrap_or("");
                                         git_actions.push(format!("{}: {}", name, truncate(desc, 150)));
                                     }
-                                    "build_code_graph" | "code_graph_sync"
-                                    | "code_graph_search" | "code_graph_explore"
-                                    | "code_graph_callers" | "code_graph_callees"
-                                    | "code_graph_file" | "code_graph_stats" => {
-                                        let query = input["query"].as_str()
-                                            .or_else(|| input["file_path"].as_str())
-                                            .or_else(|| input["changed_files"].as_str())
-                                            .unwrap_or("");
-                                        graph_ops.push(format!("{}: {}", name, truncate(query, 150)));
-                                    }
                                     _ => {}
                                 }
                             }
@@ -216,13 +205,6 @@ fn build_summary(agent_type: &str, messages: &[Value]) -> String {
                 summary.push('\n');
             }
             // What was discovered about the project
-            if !graph_ops.is_empty() {
-                summary.push_str("### 项目分析\n");
-                for g in &graph_ops {
-                    summary.push_str(&format!("- {}\n", g));
-                }
-                summary.push('\n');
-            }
             // Key outcomes and decisions
             if !assistant_texts.is_empty() {
                 summary.push_str("### 关键结果\n");
@@ -256,13 +238,6 @@ fn build_summary(agent_type: &str, messages: &[Value]) -> String {
                 summary.push_str("### 需求\n");
                 for r in &user_requests {
                     summary.push_str(&format!("- {}\n", r));
-                }
-                summary.push('\n');
-            }
-            if !graph_ops.is_empty() {
-                summary.push_str("### 项目分析\n");
-                for g in &graph_ops {
-                    summary.push_str(&format!("- {}\n", g));
                 }
                 summary.push('\n');
             }
@@ -344,13 +319,6 @@ fn build_summary(agent_type: &str, messages: &[Value]) -> String {
             }
         }
         "explore" => {
-            if !graph_ops.is_empty() {
-                summary.push_str("### 图谱操作\n");
-                for g in &graph_ops {
-                    summary.push_str(&format!("- {}\n", g));
-                }
-                summary.push('\n');
-            }
             if !files_touched.is_empty() {
                 summary.push_str("### 已分析文件\n");
                 for f in &files_touched {
@@ -400,13 +368,6 @@ fn build_summary(agent_type: &str, messages: &[Value]) -> String {
             if !git_actions.is_empty() {
                 summary.push_str("### Git\n");
                 for g in &git_actions {
-                    summary.push_str(&format!("- {}\n", g));
-                }
-                summary.push('\n');
-            }
-            if !graph_ops.is_empty() {
-                summary.push_str("### 代码分析\n");
-                for g in &graph_ops {
                     summary.push_str(&format!("- {}\n", g));
                 }
                 summary.push('\n');

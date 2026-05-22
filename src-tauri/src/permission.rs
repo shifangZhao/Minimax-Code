@@ -323,8 +323,6 @@ fn is_read_only_tool(tool: &str) -> bool {
         "read_file" | "read_files" | "list_dir" | "directory_tree" | "get_file_info"
             | "search_in_dir" | "search_files" | "glob"
             | "git_status" | "git_log" | "git_diff" | "git_branch"
-            | "code_graph_search" | "code_graph_callers" | "code_graph_callees"
-            | "code_graph_explore" | "code_graph_file" | "code_graph_stats"
             | "web_search" | "web_fetch" | "understand_image"
             | "read_knowledge" | "list_skills" | "match_skills"
             | "job_output" | "list_jobs" | "get_env_info"
