@@ -61,6 +61,9 @@ export function useAgentConversation(agentType: string) {
   const toolEvents = ref<ToolEvent[]>([])
   const tokenUsage = ref<TokenUsage>({ estimated_tokens: 0, context_window: 200000, usage_pct: 0 })
 
+  // Per-session token usage cache
+  const sessionTokenUsage = new Map<number, TokenUsage>()
+
   // Per-session stream listeners for multi-group-chat support
   const streamListeners = new Map<number, UnlistenFn>()
   // Per-session loading state
@@ -119,6 +122,7 @@ export function useAgentConversation(agentType: string) {
       currentGroupChatId.value = groupChatId
       sessionId.value = null
       messages.value = []
+      tokenUsage.value = { estimated_tokens: 0, context_window: 200000, usage_pct: 0 }
       return
     }
 
@@ -137,7 +141,13 @@ export function useAgentConversation(agentType: string) {
   }
 
   async function loadMessages() {
-    if (!sessionId.value) return
+    if (!sessionId.value) {
+      tokenUsage.value = { estimated_tokens: 0, context_window: 200000, usage_pct: 0 }
+      return
+    }
+    // Restore cached token usage for this session, or reset
+    const cached = sessionTokenUsage.get(sessionId.value)
+    tokenUsage.value = cached ?? { estimated_tokens: 0, context_window: 200000, usage_pct: 0 }
     const msgs = await db.getMessages(sessionId.value)
     messages.value = msgs
   }
@@ -342,11 +352,13 @@ export function useAgentConversation(agentType: string) {
           )
           break
         case 'token_usage':
-          tokenUsage.value = {
+          const tu = {
             estimated_tokens: ev.estimated_tokens || 0,
             context_window: ev.context_window || 200000,
             usage_pct: ev.usage_pct || 0
           }
+          tokenUsage.value = tu
+          sessionTokenUsage.set(finalSessionId, tu)
           break
         case 'error':
           hasError = true
@@ -510,6 +522,8 @@ export function useAgentConversation(agentType: string) {
       await db.clearSessionHistory(sessionId.value)
       messages.value = []
       toolEvents.value = []
+      tokenUsage.value = { estimated_tokens: 0, context_window: 200000, usage_pct: 0 }
+      sessionTokenUsage.delete(sessionId.value)
       showClearConfirm.value = false
     } catch (e) {
       console.error('Clear failed:', e)

@@ -110,8 +110,8 @@
           <div v-if="currentStreaming.toolCallCount > 0" class="tool-counter">
             已使用 {{ currentStreaming.toolCallCount }} 个工具
           </div>
-          <div class="thinking-text" v-if="pacedThinking">{{ pacedThinking }}</div>
-          <pre class="streaming-text" v-if="pacedText">{{ pacedText }}</pre>
+          <div class="thinking-text" v-if="currentStreaming.thinking">{{ currentStreaming.thinking }}</div>
+          <pre class="streaming-text" v-if="currentStreaming.text && !currentStreaming.done">{{ currentStreaming.text }}</pre>
         </div>
       </div>
     </div>
@@ -207,7 +207,6 @@ import { db } from '../services/db'
 import { useAgentConversation } from '../composables/useAgentConversation'
 import { useGlobalStreaming } from '../composables/useGlobalStreaming'
 import { usePermissions } from '../composables/usePermissions'
-import { usePacedText } from '../composables/usePacedText'
 import { renderMarkdown } from '../composables/useMarkdown'
 import AskDialog from '../components/AskDialog.vue'
 import ToastBar from '../components/ToastBar.vue'
@@ -328,15 +327,6 @@ const currentStreaming = computed(() => {
   return state
 })
 
-// Paced text for smooth typewriter streaming effect
-const { displayedText: pacedText } = usePacedText(
-  () => currentStreaming.value.text,
-  () => currentStreaming.value.done,
-)
-const { displayedText: pacedThinking } = usePacedText(
-  () => currentStreaming.value.thinking,
-  () => currentStreaming.value.done,
-)
 
 const showLoading = computed(() => {
   const cs = currentStreaming.value
@@ -717,9 +707,10 @@ watch(() => props.groupChatId, async (newId) => {
   }
 }, { immediate: true })
 
-watch([pacedText, pacedThinking], () => {
-  scrollToBottom()
-})
+watch(
+  () => [currentStreaming.value.text, currentStreaming.value.thinking],
+  () => { scrollToBottom() }
+)
 
 
 watch(currentGroupChatId, (newId) => {

@@ -6,6 +6,7 @@
 // - Message history management
 // - Interleaved Thinking support
 
+use base64::Engine as _;
 use futures_util::StreamExt;
 use futures_util::future::join_all;
 use reqwest::Client;
@@ -151,11 +152,111 @@ fn mark_last_message_for_cache(msgs: &mut Vec<serde_json::Value>) {
 /// Save original file content before modification for undo support.
 fn save_file_snapshot(db: &Arc<StdMutex<Connection>>, session_id: i64, file_path: &str) {
     if let Ok(conn) = db.lock() {
-        let original = std::fs::read_to_string(file_path).ok();
+        // Keep only the earliest (original) snapshot per file for correct rewind
+        let exists: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM file_snapshot WHERE session_id = ?1 AND file_path = ?2",
+            rusqlite::params![session_id, file_path],
+            |row| row.get(0),
+        ).unwrap_or(false);
+        if exists {
+            return;
+        }
+
+        let original = match std::fs::read(file_path) {
+            Ok(bytes) => {
+                match String::from_utf8(bytes.clone()) {
+                    Ok(s) if is_printable_text(&s) => Some(s),
+                    _ => Some(format!("hex:{}", hex_encode(&bytes))),
+                }
+            }
+            Err(_) => None, // file doesn't exist yet
+        };
         let _ = conn.execute(
             "INSERT INTO file_snapshot (session_id, file_path, original_content) VALUES (?1, ?2, ?3)",
             rusqlite::params![session_id, file_path, original],
         );
+    }
+}
+
+fn is_printable_text(s: &str) -> bool {
+    for ch in s.chars() {
+        if ch.is_control() && ch != '\n' && ch != '\r' && ch != '\t' {
+            return false;
+        }
+    }
+    true
+}
+
+pub(crate) fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+pub(crate) fn hex_decode(hex: &str) -> Vec<u8> {
+    (0..hex.len())
+        .step_by(2)
+        .filter_map(|i| u8::from_str_radix(&hex[i..i+2], 16).ok())
+        .collect()
+}
+
+/// Collect all file paths in a directory tree (non-recursive symlink safe, depth-limited).
+fn collect_dir_files(dir: &std::path::Path, out: &mut Vec<String>) {
+    use std::fs;
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                // Limit depth to avoid huge snapshots (max 4 levels)
+                if path.components().count() <= dir.components().count() + 4 {
+                    collect_dir_files(&path, out);
+                }
+            } else if path.is_file() {
+                if let Some(s) = path.to_str() {
+                    out.push(s.to_string());
+                }
+            }
+        }
+    }
+}
+
+/// Snapshot all text files in a workspace before a destructive command.
+/// Limited to 200 files and 10MB total to avoid performance issues.
+fn snapshot_workspace_files(db: &Arc<StdMutex<Connection>>, session_id: i64, cwd: &str) {
+    let mut files: Vec<String> = Vec::new();
+    collect_dir_files(std::path::Path::new(cwd), &mut files);
+    let mut total: usize = 0;
+    const MAX_FILES: usize = 200;
+    const MAX_BYTES: usize = 10_000_000;
+    for f in files.iter().take(MAX_FILES) {
+        if let Ok(meta) = std::fs::metadata(f) {
+            total += meta.len() as usize;
+            if total > MAX_BYTES { break; }
+        }
+        save_file_snapshot(db, session_id, f);
+    }
+}
+
+/// Write snapshot content to a file path, decoding hex if needed.
+/// Returns true on success.
+pub(crate) fn restore_snapshot_file(path: &str, content: Option<&str>) -> bool {
+    match content {
+        None => {
+            // File didn't exist before — remove it
+            let p = std::path::Path::new(path);
+            if p.is_dir() {
+                let _ = std::fs::remove_dir_all(path);
+            } else if p.exists() {
+                let _ = std::fs::remove_file(path);
+            }
+            true
+        }
+        Some(c) => {
+            if let Some(hex) = c.strip_prefix("hex:") {
+                let bytes = hex_decode(hex);
+                std::fs::write(path, &bytes).is_ok()
+            } else {
+                std::fs::write(path, c).is_ok()
+            }
+        }
     }
 }
 
@@ -267,13 +368,19 @@ impl AgentService {
         };
         let system_prompt = json!([system_block]);
 
-        let mut tools = get_agent_tools(agent_type);
+        let mut tools: Vec<serde_json::Value> = get_agent_tools(agent_type)
+            .into_iter()
+            .filter(|t| {
+                // Custom providers don't have MiniMax search API — agent uses MCP web_search instead
+                self.provider != "custom" || t["name"].as_str() != Some("web_search")
+            })
+            .collect();
 
         // Append MCP tools from all connected servers (names prefixed as server_tool)
         {
             let mcp = mcp_service.read().await;
             let mcp_tools = mcp.get_all_tools().await;
-            let builtin_count = get_agent_tools(agent_type).len();
+            let builtin_count = tools.len();
             for t in &mcp_tools {
                 tools.push(make_tool(&t.name, &t.description, t.input_schema.clone()));
             }
@@ -442,6 +549,9 @@ impl AgentService {
                 session_key.clone(),
                 session_id,
                 api_key.clone(),
+                self.api_url.clone(),
+                self.model.clone(),
+                self.provider.clone(),
                 skill_service.clone(),
                 mcp_service.clone(),
                 self.db.clone(),
@@ -535,6 +645,9 @@ async fn process_sse_stream(
     session_key: String,
     session_id: i64,
     api_key: String,
+    api_url: String,
+    model: String,
+    provider: String,
     skill_service: Arc<SkillService>,
     mcp_service: Arc<RwLock<McpService>>,
     db: Arc<StdMutex<Connection>>,
@@ -747,6 +860,9 @@ async fn process_sse_stream(
                 let tool_name = tool_name.clone();
                 let final_input = final_input.clone();
                 let api_key = api_key.clone();
+                let api_url = api_url.clone();
+                let model = model.clone();
+                let provider = provider.clone();
                 let skill_service = skill_service.clone();
                 let mcp_service = mcp_service.clone();
                 let db = db.clone();
@@ -759,7 +875,8 @@ async fn process_sse_stream(
                 tokio::spawn(async move {
                     let result = execute_tool(
                         &tool_name, &final_input, sid,
-                        api_key, skill_service, mcp_service,
+                        api_key, api_url, model, provider,
+                        skill_service, mcp_service,
                         db, code_graph, lsp_manager, permission_service, pending_asks, app,
                     ).await;
                     (i, tool_name, result)
@@ -881,6 +998,9 @@ async fn execute_tool(
     input: &str,
     session_id: i64,
     api_key: String,
+    api_url: String,
+    model: String,
+    provider: String,
     skill_service: Arc<SkillService>,
     mcp_service: Arc<RwLock<McpService>>,
     db: Arc<StdMutex<Connection>>,
@@ -977,6 +1097,38 @@ async fn execute_tool(
                 save_file_snapshot(&db, session_id, &normalize_file_path(p));
             }
         }
+        "create_dir" => {
+            // Snapshot the directory itself (NULL = didn't exist, undo will delete it)
+            if let Some(p) = params["path"].as_str() {
+                save_file_snapshot(&db, session_id, &normalize_file_path(p));
+            }
+        }
+        "remove_path" => {
+            if let Some(p) = params["path"].as_str() {
+                let np = normalize_file_path(p);
+                let path = std::path::Path::new(&np);
+                if path.is_dir() {
+                    // Snapshot all files in the directory tree before deletion
+                    if std::fs::read_dir(path).is_ok() {
+                        let mut files: Vec<String> = Vec::new();
+                        collect_dir_files(path, &mut files);
+                        for f in &files {
+                            save_file_snapshot(&db, session_id, f);
+                        }
+                    }
+                }
+                // Snapshot the path itself (file or dir)
+                save_file_snapshot(&db, session_id, &np);
+            }
+        }
+        "run_command" | "run_tests" | "run_background" => {
+            // Snapshot workspace files before command execution
+            if let Some(ref cwd) = params["cwd"].as_str().map(|s| s.to_string())
+                .or_else(|| params["path"].as_str().map(|s| s.to_string()))
+            {
+                snapshot_workspace_files(&db, session_id, cwd);
+            }
+        }
         _ => {}
     }
 
@@ -1018,8 +1170,8 @@ async fn execute_tool(
         "run_tests" => tool_run_tests(&params).await,
         "spawn_process" => tool_spawn_process(&params).await,
         "kill_process" => tool_kill_process(&params).await,
-        "web_search" => tool_web_search(params.clone(), api_key.clone()).await,
-        "understand_image" => tool_understand_image(params.clone(), api_key.clone()).await,
+        "web_search" => tool_web_search(params.clone(), api_key.clone(), api_url.clone(), provider.clone()).await,
+        "understand_image" => tool_understand_image(params.clone(), api_key.clone(), api_url.clone(), model.clone(), provider.clone()).await,
         "skill" => tool_skill(tool_name, &params, skill_service.clone()).await,
         "list_skills" => tool_list_skills(tool_name, &params, skill_service.clone()).await,
         "match_skills" => tool_match_skills(tool_name, &params, skill_service.clone()).await,
@@ -2526,15 +2678,100 @@ async fn tool_kill_process(params: &serde_json::Value) -> String {
     .unwrap_or_else(|_| "Task cancelled".to_string())
 }
 
-async fn tool_web_search(params: serde_json::Value, api_key: String) -> String {
+/// Vision analysis using Anthropic Messages API for custom providers.
+async fn vision_anthropic(prompt: &str, image_url: &str, api_key: &str, api_url: &str, model: &str) -> String {
+    let (mime, base64_data) = match resolve_image_base64(image_url) {
+        Ok((m, b)) => (m, b),
+        Err(e) => return format!(r#"{{"success": false, "error": "Failed to load image: {}"}}"#, e),
+    };
+
+    let request_body = serde_json::json!({
+        "model": model,
+        "max_tokens": 2048,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": mime,
+                        "data": base64_data
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": prompt
+                }
+            ]
+        }]
+    });
+
+    let client = reqwest::Client::new();
+    let messages_path = format!("{}/v1/messages", api_url.trim_end_matches('/'));
+    match client.post(&messages_path)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("Content-Type", "application/json")
+        .json(&request_body)
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            match resp.json::<serde_json::Value>().await {
+                Ok(data) => {
+                    let text = data["content"].as_array()
+                        .and_then(|arr| arr.iter().find(|b| b["type"] == "text"))
+                        .and_then(|b| b["text"].as_str())
+                        .unwrap_or("");
+                    serde_json::to_string(&serde_json::json!({
+                        "success": true,
+                        "content": text
+                    })).unwrap_or_default()
+                }
+                Err(e) => format!(r#"{{"success": false, "error": "{}"}}"#, e),
+            }
+        }
+        Err(e) => format!(r#"{{"success": false, "error": "{}"}}"#, e),
+    }
+}
+
+fn resolve_image_base64(image_url: &str) -> Result<(String, String), String> {
+    let data = if image_url.starts_with("http://") || image_url.starts_with("https://") {
+        reqwest::blocking::get(image_url)
+            .map_err(|e| e.to_string())?
+            .bytes()
+            .map_err(|e| e.to_string())?
+            .to_vec()
+    } else {
+        std::fs::read(image_url).map_err(|e| format!("Cannot read {}: {}", image_url, e))?
+    };
+    let mime = if data.len() >= 3 && &data[0..3] == b"\xFF\xD8\xFF" { "image/jpeg" }
+        else if data.len() >= 4 && &data[0..4] == b"\x89PNG" { "image/png" }
+        else if data.len() >= 4 && &data[0..4] == b"RIFF" { "image/webp" }
+        else { "image/png" };
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+    Ok((mime.to_string(), b64))
+}
+
+async fn tool_web_search(params: serde_json::Value, api_key: String, api_url: String, provider: String) -> String {
     let query = params["query"].as_str().unwrap_or("").to_string();
     if query.is_empty() {
         return r#"{"success": false, "error": "query is required"}"#.to_string();
     }
 
+    // Custom providers don't have web_search registered (agent uses MCP tool instead).
+    // If we reach here with a custom provider, something went wrong — guide agent to MCP.
+    if provider == "custom" {
+        return r#"{"success": false, "error": "Web search is not available for this provider. Connect an MCP search tool to enable it."}"#.to_string();
+    }
+
+    // MiniMax provider: use MiniMax's built-in search API
+    let search_url = format!("{}/v1/coding_plan/search", api_url);
     tokio::task::spawn_blocking(move || {
         let client = reqwest::blocking::Client::new();
-        let resp = client.post(format!("{}/v1/coding_plan/search", DEFAULT_API_URL))
+        let resp = client.post(&search_url)
             .header("Content-Type", "application/json")
             .header("Authorization", format!("Bearer {}", api_key))
             .json(&serde_json::json!({ "q": query }))
@@ -2580,7 +2817,7 @@ async fn tool_web_search(params: serde_json::Value, api_key: String) -> String {
     .unwrap_or_else(|_| r#"{"success": false, "error": "Task cancelled"}"#.to_string())
 }
 
-async fn tool_understand_image(params: serde_json::Value, api_key: String) -> String {
+async fn tool_understand_image(params: serde_json::Value, api_key: String, api_url: String, model: String, provider: String) -> String {
     let prompt = params["prompt"].as_str().unwrap_or("").to_string();
     let image_url = params["image_url"].as_str().unwrap_or("").to_string();
 
@@ -2588,6 +2825,11 @@ async fn tool_understand_image(params: serde_json::Value, api_key: String) -> St
         return r#"{"success": false, "error": "prompt and image_url are required"}"#.to_string();
     }
 
+    if provider == "custom" {
+        return vision_anthropic(&prompt, &image_url, &api_key, &api_url, &model).await;
+    }
+
+    // MiniMax provider: use MiniMax vision API
     tokio::task::spawn_blocking(move || {
         let image_data = resolve_image(&image_url);
 

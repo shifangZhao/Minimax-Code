@@ -1,4 +1,5 @@
 mod agent_service;
+use agent_service::restore_snapshot_file;
 mod code_graph;
 mod context_compressor;
 mod lsp_client;
@@ -1509,10 +1510,10 @@ fn compact_session(state: State<'_, AppState>, session_id: i64) -> Result<String
     ).map_err(|e| e.to_string())?;
 
     #[derive(Debug)]
-    struct RawMsg { role: String, content: String, tool_calls: Option<String>, thinking: Option<String>, raw_json: Option<String> }
+    struct RawMsg { role: String, content: String, _tool_calls: Option<String>, _thinking: Option<String>, raw_json: Option<String> }
 
     let rows: Vec<RawMsg> = stmt.query_map(rusqlite::params![session_id], |row| Ok(RawMsg {
-        role: row.get(0)?, content: row.get(1)?, tool_calls: row.get(2)?, thinking: row.get(3)?, raw_json: row.get(4)?,
+        role: row.get(0)?, content: row.get(1)?, _tool_calls: row.get(2)?, _thinking: row.get(3)?, raw_json: row.get(4)?,
     })).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
 
     drop(stmt);
@@ -1794,15 +1795,7 @@ fn undo_last_edit(state: State<AppState>, session_id: i64) -> Result<FileSnapsho
         })
     ).map_err(|_| "No edits to undo".to_string())?;
 
-    if let Some(ref content) = row.original_content {
-        std::fs::write(&row.file_path, content)
-            .map_err(|e| format!("Failed to restore: {}", e))?;
-    } else {
-        if std::path::Path::new(&row.file_path).exists() {
-            std::fs::remove_file(&row.file_path)
-                .map_err(|e| format!("Failed to remove: {}", e))?;
-        }
-    }
+    restore_snapshot_file(&row.file_path, row.original_content.as_deref());
     conn.execute("DELETE FROM file_snapshot WHERE id = ?1", [row.id])
         .map_err(|e| e.to_string())?;
     // Refresh LSP diagnostics for the restored file
@@ -1839,11 +1832,7 @@ fn undo_edit_by_id(state: State<AppState>, snapshot_id: i64) -> Result<(), Strin
         |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
     ).map_err(|_| "Snapshot not found".to_string())?;
 
-    if let Some(ref content) = row.1 {
-        std::fs::write(&row.0, content).map_err(|e| format!("Failed to restore: {}", e))?;
-    } else if std::path::Path::new(&row.0).exists() {
-        std::fs::remove_file(&row.0).map_err(|e| format!("Failed to remove: {}", e))?;
-    }
+    restore_snapshot_file(&row.0, row.1.as_deref());
     conn.execute("DELETE FROM file_snapshot WHERE id = ?1", [snapshot_id])
         .map_err(|e| e.to_string())?;
     // Refresh LSP diagnostics for the restored file
@@ -1885,14 +1874,10 @@ fn rewind_conversation(state: State<AppState>, session_id: i64, message_id: i64)
     for (file_path, original_content) in &snapshots {
         if restored.contains(file_path) { continue; }
         restored.insert(file_path.clone());
-        if let Some(ref content) = original_content {
-            if let Some(parent) = std::path::Path::new(file_path).parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::write(file_path, content);
-        } else if std::path::Path::new(file_path).exists() {
-            let _ = std::fs::remove_file(file_path);
+        if let Some(parent) = std::path::Path::new(file_path).parent() {
+            let _ = std::fs::create_dir_all(parent);
         }
+        restore_snapshot_file(file_path, original_content.as_deref());
     }
 
     // 3. Clean up all snapshots for this session
@@ -1991,14 +1976,12 @@ fn restore_bookmark(state: State<AppState>, bookmark_id: i64, workspace: String)
     for f in &files {
         let file_path = f["file_path"].as_str().unwrap_or("");
         let abs = std::path::Path::new(&workspace).join(file_path);
-        if let Some(content) = f["content"].as_str() {
-            if let Some(parent) = abs.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-            }
-            std::fs::write(&abs, content).map_err(|e| format!("Failed to restore {}: {}", file_path, e))?;
-        } else if abs.exists() {
-            std::fs::remove_file(&abs).map_err(|e| format!("Failed to remove {}: {}", file_path, e))?;
+        if let Some(parent) = abs.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
+        let abs_str = abs.to_str().unwrap_or("");
+        let content = f["content"].as_str();
+        restore_snapshot_file(abs_str, content);
     }
     Ok(())
 }
