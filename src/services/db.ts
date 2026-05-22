@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 export interface GroupChat {
   id: number
   name: string
+  mode: string
   created_at: string
 }
 
@@ -26,12 +27,12 @@ export interface ChatMessage {
 }
 
 export const db = {
-  async createGroupChat(name: string): Promise<number> {
-    return invoke('create_group_chat', { name })
+  async createGroupChat(name: string, mode: string): Promise<number> {
+    return invoke('create_group_chat', { name, mode })
   },
 
-  async getGroupChats(): Promise<GroupChat[]> {
-    return invoke('get_group_chats')
+  async getGroupChats(mode?: string): Promise<GroupChat[]> {
+    return invoke('get_group_chats', { mode: mode || null })
   },
 
   async deleteGroupChat(id: number): Promise<void> {

@@ -5,7 +5,8 @@
     <div class="main-area">
       <HistorySidebar ref="historySidebarRef" @selectGroupChat="onSelectGroupChat" />
       <div class="right-panel">
-        <TabBar />
+        <ModeSwitcher />
+        <TabBar v-if="$route.path !== '/ace'" />
         <main class="content">
           <router-view v-slot="{ Component, route }">
             <KeepAlive>
@@ -35,6 +36,7 @@ import TitleBar from './components/TitleBar.vue'
 import ProjectPathInput from './components/ProjectPathInput.vue'
 import HistorySidebar from './components/HistorySidebar.vue'
 import TabBar from './components/TabBar.vue'
+import ModeSwitcher from './components/ModeSwitcher.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
 
 const showSettings = ref(false)

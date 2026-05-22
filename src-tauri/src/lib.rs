@@ -42,6 +42,7 @@ struct AppState {
 pub struct GroupChat {
     pub id: i64,
     pub name: String,
+    pub mode: String,
     pub created_at: String,
 }
 
@@ -119,28 +120,45 @@ fn is_maximized(window: Window) -> bool {
 // ========== Group Chat Commands ==========
 
 #[tauri::command]
-fn create_group_chat(state: State<AppState>, name: String) -> Result<i64, String> {
+fn create_group_chat(state: State<AppState>, name: String, mode: String) -> Result<i64, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    conn.execute("INSERT INTO group_chat (name) VALUES (?1)", [&name])
+    conn.execute("INSERT INTO group_chat (name, mode) VALUES (?1, ?2)", rusqlite::params![&name, mode])
         .map_err(|e| e.to_string())?;
     Ok(conn.last_insert_rowid())
 }
 
 #[tauri::command]
-fn get_group_chats(state: State<AppState>) -> Result<Vec<GroupChat>, String> {
+fn get_group_chats(state: State<AppState>, mode: Option<String>) -> Result<Vec<GroupChat>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    let mut stmt = conn.prepare(
-        "SELECT id, name, created_at FROM group_chat ORDER BY created_at DESC"
-    ).map_err(|e| e.to_string())?;
-    let chats = stmt.query_map([], |row| {
-        Ok(GroupChat {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            created_at: row.get(2)?,
-        })
-    }).map_err(|e| e.to_string())?
-    .collect::<Result<Vec<_>, _>>()
-    .map_err(|e| e.to_string())?;
+    let query = if mode.is_some() {
+        "SELECT id, name, mode, created_at FROM group_chat WHERE mode = ?1 ORDER BY created_at DESC"
+    } else {
+        "SELECT id, name, mode, created_at FROM group_chat ORDER BY created_at DESC"
+    };
+    let mut stmt = conn.prepare(query).map_err(|e| e.to_string())?;
+    let chats = if let Some(ref m) = mode {
+        stmt.query_map([m], |row| {
+            Ok(GroupChat {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                mode: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        }).map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?
+    } else {
+        stmt.query_map([], |row| {
+            Ok(GroupChat {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                mode: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        }).map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?
+    };
     Ok(chats)
 }
 
@@ -1747,10 +1765,22 @@ pub fn run() {
         "CREATE TABLE IF NOT EXISTS group_chat (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'team',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )",
         [],
     ).expect("Failed to create group_chat table");
+
+    // Migration: add mode column for existing group_chat tables
+    let has_mode: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('group_chat') WHERE name='mode'",
+        [],
+        |row| row.get::<_, i32>(0)
+    ).unwrap_or(0) > 0;
+    if !has_mode {
+        conn.execute("ALTER TABLE group_chat ADD COLUMN mode TEXT NOT NULL DEFAULT 'team'", [])
+            .expect("Failed to add mode column to group_chat");
+    }
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS agent_session (

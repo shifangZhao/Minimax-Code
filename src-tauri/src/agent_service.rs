@@ -24,7 +24,7 @@ use crate::lsp_types::format_diagnostics;
 use crate::mcp_service::McpService;
 use crate::permission::{PermissionService, PermissionAction, PermissionRequest};
 use crate::skill_service::SkillService;
-use crate::system_prompts::*;
+use crate::system_prompts::{ACE_SYSTEM, EXPLORE_SYSTEM, FRONT_SYSTEM, PLAN_SYSTEM, REVIEW_SYSTEM, WORK_SYSTEM};
 use crate::{API_BASE_URL, SEARCH_TIMEOUT_SECS, VLM_TIMEOUT_SECS};
 
 // ========== Types ==========
@@ -233,6 +233,7 @@ impl AgentService {
             "work" => WORK_SYSTEM,
             "review" => REVIEW_SYSTEM,
             "explore" => EXPLORE_SYSTEM,
+            "ace" => ACE_SYSTEM,
             _ => FRONT_SYSTEM,
         };
 
@@ -3522,6 +3523,28 @@ fn get_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
             tools.push(make_tool(kw.0, kw.1, kw.2.clone()));
             add_tools(&mut tools, comm_tools);
             add_tools(&mut tools, skill_tools);
+            for (name, desc, schema) in code_graph_read_tools() {
+                tools.push(make_tool(name, desc, schema));
+            }
+        }
+        "ace" => {
+            // Ace: all tools from all agents, minus send_to_agent
+            add_tools(&mut tools, read_only_files);
+            add_tools(&mut tools, search_tools);
+            add_tools(&mut tools, write_tools);
+            add_tools(&mut tools, git_read);
+            add_tools(&mut tools, _git_write);       // git_commit, branch, checkout, stash, stash_pop
+            add_tools(&mut tools, command_tools);
+            tools.push(make_tool(lint.0, lint.1, lint.2.clone()));
+            add_tools(&mut tools, web_tools);
+            add_tools(&mut tools, env_tools);
+            add_tools(&mut tools, knowledge_read);
+            tools.push(make_tool(kw.0, kw.1, kw.2.clone()));
+            tools.push(make_tool(ask_tool.0, ask_tool.1, ask_tool.2.clone()));  // ask_choice
+            add_tools(&mut tools, skill_tools);
+            for (name, desc, schema) in code_graph_explore_tools() {
+                tools.push(make_tool(name, desc, schema));
+            }
             for (name, desc, schema) in code_graph_read_tools() {
                 tools.push(make_tool(name, desc, schema));
             }

@@ -169,9 +169,10 @@ export function useAgentConversation(agentType: string) {
 
     // Handle temporary chat - create real chat in DB when first message is sent
     if (!currentGroupChatId.value || currentGroupChatId.value < 0) {
-      const chatName = content.slice(0, 10).replace(/[^一-龥a-zA-Z0-9]/g, '') || '新群聊'
-      console.log('[sendMessage] Creating new group chat:', chatName)
-      const realId = await db.createGroupChat(chatName)
+      const mode = agentType === 'ace' ? 'ace' : 'team'
+      const chatName = content.slice(0, 10).replace(/[^一-龥a-zA-Z0-9]/g, '') || (mode === 'ace' ? 'Ace 对话' : '新群聊')
+      console.log('[sendMessage] Creating new group chat:', chatName, 'mode:', mode)
+      const realId = await db.createGroupChat(chatName, mode)
       currentGroupChatId.value = realId
       console.log('[sendMessage] Group chat created:', realId)
     }

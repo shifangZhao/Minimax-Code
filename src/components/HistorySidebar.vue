@@ -36,13 +36,18 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, nextTick, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
 import { db } from '../services/db'
+
+const route = useRoute()
+const currentMode = computed(() => route.path.startsWith('/ace') ? 'ace' : 'team')
 
 interface GroupChat {
   id: number
   name: string
+  mode: string
   created_at: string
   temporary?: boolean
 }
@@ -64,7 +69,7 @@ const confirmDeleteId = ref<number | null>(null)
 const loadGroupChats = async () => {
   loading.value = true
   try {
-    const chats = await invoke<GroupChat[]>('get_group_chats')
+    const chats = await db.getGroupChats(currentMode.value)
     groupChats.value = chats
 
     // Auto-select first chat if none selected
@@ -78,11 +83,19 @@ const loadGroupChats = async () => {
   }
 }
 
+// Reload chats when mode switches
+watch(currentMode, () => {
+  activeChatId.value = null
+  loadGroupChats()
+  emit('selectGroupChat', null as any)
+})
+
 const createGroupChat = () => {
   // Create a temporary chat locally, will be persisted to DB only when user sends first message
   const tempChat: GroupChat = {
     id: nextTemporaryId.value--,
-    name: '新群聊',
+    name: currentMode.value === 'ace' ? 'Ace 对话' : '新群聊',
+    mode: currentMode.value,
     created_at: new Date().toISOString(),
     temporary: true,
   }
