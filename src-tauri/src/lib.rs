@@ -1418,7 +1418,7 @@ async fn agent_chat_stream(
         .map_err(|e| format!("Failed to parse messages: {}", e))?;
 
     // Get API credentials from database based on provider
-    let (api_key, api_url, messages_path, model, context_window) = {
+    let (api_key, api_url, messages_path, model, context_window, provider) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let provider: String = conn.query_row(
             "SELECT provider FROM app_config", [], |row| row.get(0)
@@ -1438,7 +1438,7 @@ async fn agent_chat_stream(
                 let cw: i64 = conn.query_row(
                     "SELECT custom_context_window FROM app_config", [], |row| row.get(0)
                 ).unwrap_or(200000);
-                (key, url, "/v1/messages".to_string(), m, cw.max(0) as usize)
+                (key, url, "/v1/messages".to_string(), m, cw.max(0) as usize, provider)
             }
             _ => {
                 // minimax (default)
@@ -1454,7 +1454,7 @@ async fn agent_chat_stream(
                 let cw: i64 = conn
                     .query_row("SELECT context_window FROM app_config", [], |row| row.get(0))
                     .unwrap_or(204800);
-                (key.unwrap_or_default(), url, "/anthropic/v1/messages".to_string(), m, cw.max(0) as usize)
+                (key.unwrap_or_default(), url, "/anthropic/v1/messages".to_string(), m, cw.max(0) as usize, provider)
             }
         }
     };
@@ -1465,7 +1465,7 @@ async fn agent_chat_stream(
     }
 
     // Create agent service
-    let service = AgentService::new(api_key, api_url, messages_path, model, context_window, state.skill_service.clone(), state.mcp_service.clone(), state.db.clone(), state.code_graph.clone(), state.lsp_manager.clone(), state.permission_service.clone(), state.pending_asks.clone());
+    let service = AgentService::new(api_key, api_url, messages_path, model, context_window, provider, state.skill_service.clone(), state.mcp_service.clone(), state.db.clone(), state.code_graph.clone(), state.lsp_manager.clone(), state.permission_service.clone(), state.pending_asks.clone());
     eprintln!("[agent_chat_stream] AgentService created, spawning stream_chat");
 
     // Start streaming - spawn and await

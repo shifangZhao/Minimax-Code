@@ -152,19 +152,27 @@
       </div>
     </div>
     <div class="input-area" v-if="agentType === 'front' || agentType === 'ace'">
-      <button class="attach-btn" @click="onAttachment" title="添加附件">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
-      </button>
-      <input
-        type="text"
+      <textarea
+        ref="inputEl"
         v-model="inputText"
         :placeholder="inputPlaceholder"
-        @keyup.enter="onSend"
+        @keydown.enter.exact="onSendKey"
         @paste="onPaste"
-      />
-      <button class="send-btn" @click="onSend" :disabled="loading" title="发送">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-      </button>
+        rows="1"
+      ></textarea>
+      <div class="input-toolbar">
+        <div class="toolbar-left">
+          <button class="toolbar-btn" @click="onAttachment" title="添加附件">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+          </button>
+          <button class="toolbar-btn" @click="onSlashCommand" title="命令">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="17" y1="2" x2="7" y2="22"/></svg>
+          </button>
+        </div>
+        <button class="send-btn" @click="onSend" :disabled="loading" title="发送">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+        </button>
+      </div>
     </div>
   </div>
 </template>
@@ -218,6 +226,7 @@ const { recentEdits, lastUndone, showUndoToast, loadEdits, undoLast } = useUndoH
 const { bookmarks, showBookmarkPanel, showSaveInput, bookmarkName, loadBookmarks, saveBookmark, restoreBookmark, deleteBookmark } = useBookmarks()
 
 const messagesEl = ref<HTMLElement>()
+const inputEl = ref<HTMLTextAreaElement>()
 const inputText = ref('')
 const thinkingExpanded = ref<Record<number, boolean>>({})
 // Per-agent scroll position cache (survives KeepAlive tab switches)
@@ -465,6 +474,18 @@ async function onPaste(e: ClipboardEvent) {
 
 function removeAttachment(idx: number) {
   attachedFiles.value = attachedFiles.value.filter((_, i) => i !== idx)
+}
+
+function onSendKey(e: KeyboardEvent) {
+  if (!e.shiftKey) {
+    e.preventDefault()
+    onSend()
+  }
+}
+
+function onSlashCommand() {
+  inputText.value = inputText.value ? inputText.value + '\n' : '/'
+  inputEl.value?.focus()
 }
 
 async function onSend() {
@@ -920,9 +941,9 @@ onDeactivated(() => {
   color: var(--text-secondary);
   cursor: pointer;
   user-select: none;
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 6px;
 }
 
 .toggle-arrow {
@@ -1138,55 +1159,52 @@ onDeactivated(() => {
 
 .input-area {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
   padding: 10px 12px;
   background-color: var(--bg-secondary);
   border-top: 1px solid var(--border-color);
 }
 
-.attach-btn {
-  width: 36px;
-  height: 36px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: color 0.15s, background 0.15s;
-}
-
-.attach-btn:hover {
-  color: var(--text-primary);
-  background: var(--bg-tertiary);
-}
-
-.input-area input {
-  flex: 1;
-  height: 36px;
-  padding: 0 12px;
+.input-area textarea {
+  width: 100%;
+  min-height: 56px;
+  max-height: 200px;
+  padding: 10px 12px;
   background-color: var(--bg-input);
   border: 1px solid var(--border-color);
-  border-radius: 4px;
+  border-radius: 6px;
   color: var(--text-primary);
   font-size: 14px;
+  font-family: inherit;
+  line-height: 1.5;
   outline: none;
+  resize: none;
+  box-sizing: border-box;
 }
 
-.input-area input:focus {
+.input-area textarea:focus {
   border-color: var(--accent);
 }
 
-.input-area input::placeholder {
+.input-area textarea::placeholder {
   color: var(--text-secondary);
 }
 
-.send-btn {
-  width: 36px;
-  height: 36px;
+.input-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 4px 0;
+}
+
+.toolbar-left {
+  display: flex;
+  gap: 4px;
+}
+
+.toolbar-btn {
+  width: 32px;
+  height: 32px;
   border: none;
   border-radius: 6px;
   background: transparent;
@@ -1198,9 +1216,27 @@ onDeactivated(() => {
   transition: color 0.15s, background 0.15s;
 }
 
-.send-btn:hover:not(:disabled) {
-  color: var(--accent);
+.toolbar-btn:hover {
+  color: var(--text-primary);
   background: var(--bg-tertiary);
+}
+
+.send-btn {
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 6px;
+  background: var(--accent);
+  color: white;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity 0.15s;
+}
+
+.send-btn:hover:not(:disabled) {
+  opacity: 0.85;
 }
 
 .send-btn:disabled {

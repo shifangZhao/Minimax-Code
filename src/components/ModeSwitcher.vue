@@ -19,7 +19,9 @@ const router = useRouter()
 const route = useRoute()
 
 const mode = computed(() => {
-  return route.path.startsWith('/ace') ? 'ace' : 'team'
+  // Treat root path as ace since default redirect goes to /ace
+  if (route.path === '/' || route.path.startsWith('/ace')) return 'ace'
+  return 'team'
 })
 
 function switchTo(m: 'ace' | 'team') {

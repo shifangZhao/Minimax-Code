@@ -162,6 +162,7 @@ pub struct AgentService {
     messages_path: String,
     model: String,
     context_window: usize,
+    provider: String,
     api_key: Arc<Mutex<String>>,
     skill_service: Arc<SkillService>,
     mcp_service: Arc<RwLock<McpService>>,
@@ -179,6 +180,7 @@ impl Clone for AgentService {
             messages_path: self.messages_path.clone(),
             model: self.model.clone(),
             context_window: self.context_window,
+            provider: self.provider.clone(),
             api_key: self.api_key.clone(),
             skill_service: self.skill_service.clone(),
             mcp_service: self.mcp_service.clone(),
@@ -192,12 +194,13 @@ impl Clone for AgentService {
 }
 
 impl AgentService {
-    pub fn new(api_key: String, api_url: String, messages_path: String, model: String, context_window: usize, skill_service: Arc<SkillService>, mcp_service: Arc<RwLock<McpService>>, db: Arc<StdMutex<Connection>>, code_graph: Arc<StdMutex<CodeGraph>>, lsp_manager: Arc<StdMutex<Option<LspManager>>>, permission_service: Arc<StdMutex<PermissionService>>, pending_asks: PendingAsks) -> Self {
+    pub fn new(api_key: String, api_url: String, messages_path: String, model: String, context_window: usize, provider: String, skill_service: Arc<SkillService>, mcp_service: Arc<RwLock<McpService>>, db: Arc<StdMutex<Connection>>, code_graph: Arc<StdMutex<CodeGraph>>, lsp_manager: Arc<StdMutex<Option<LspManager>>>, permission_service: Arc<StdMutex<PermissionService>>, pending_asks: PendingAsks) -> Self {
         Self {
             api_url,
             messages_path,
             model,
             context_window,
+            provider,
             api_key: Arc::new(Mutex::new(api_key)),
             skill_service,
             mcp_service,
@@ -253,13 +256,14 @@ impl AgentService {
             None => base_system.to_string(),
         };
 
-        // System prompt as top-level `system` field (Anthropic format) with cache_control.
-        // MiniMax cache hierarchy: tools → system → messages
-        let system_prompt = json!([{
-            "type": "text",
-            "text": system_text,
-            "cache_control": {"type": "ephemeral"}
-        }]);
+        // System prompt as top-level `system` field (Anthropic format).
+        // cache_control only for MiniMax (KV cache). Custom providers may reject it.
+        let system_block = if self.provider == "custom" {
+            json!({"type": "text", "text": system_text})
+        } else {
+            json!({"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}})
+        };
+        let system_prompt = json!([system_block]);
 
         let mut tools = get_agent_tools(agent_type);
 
@@ -279,7 +283,8 @@ impl AgentService {
 
         // Mark last tool with cache_control to cache all tool definitions.
         // Per MiniMax docs: cache_control on the last tool caches ALL preceding tools.
-        if !tools.is_empty() {
+        // Skip for custom providers that may reject cache_control.
+        if self.provider != "custom" && !tools.is_empty() {
             let last_idx = tools.len() - 1;
             if let Some(obj) = tools[last_idx].as_object_mut() {
                 obj.insert("cache_control".to_string(), json!({"type": "ephemeral"}));
@@ -367,7 +372,10 @@ impl AgentService {
         // Mark last message's last content block with cache_control for incremental
         // multi-turn caching. Per MiniMax docs, this caches the entire conversation prefix.
         // Only done once before the loop — subsequent loop iterations benefit from prefix cache.
-        mark_last_message_for_cache(&mut api_messages);
+        // Skip for custom providers that may reject cache_control.
+        if self.provider != "custom" {
+            mark_last_message_for_cache(&mut api_messages);
+        }
 
         // Main loop: continue until stop_reason is not "tool_use"
         loop {
@@ -409,6 +417,8 @@ impl AgentService {
             if !response.status().is_success() {
                 let status = response.status();
                 let err_text = response.text().await.unwrap_or_default();
+                eprintln!("[stream_chat] API error {}: {}", status, err_text);
+                eprintln!("[stream_chat] URL: {}{}", self.api_url, self.messages_path);
                 let ev = StreamEvent::Error { content: format!("API error {}: {}", status, err_text) };
                 let _ = app.emit(&session_key, ev);
                 return;
@@ -459,7 +469,7 @@ impl AgentService {
 
             // stop_reason was "tool_use"
             // 1) Add assistant message (thinking + text + tool_use blocks) to api_messages
-            // CRITICAL: must include ALL content blocks to preserve Interleaved Thinking chain
+            // CRITICAL: must include ALL content blocks to preserve Interleaved Thinking chain.
             if !assistant_thinking.is_empty() || !assistant_text.is_empty() || !tool_uses.is_empty() {
                 let mut assistant_content = Vec::new();
                 if !assistant_thinking.is_empty() {
@@ -787,10 +797,23 @@ fn handle_sse_event(
     match event_type {
         "content_block_start" => {
             let block = &event["content_block"];
-            if block["type"] == "tool_use" {
-                *current_tool_id = block["id"].as_str().map(|s| s.to_string());
-                *current_tool_name = block["name"].as_str().map(|s| s.to_string());
-                current_tool_input.clear();
+            let block_type = block["type"].as_str().unwrap_or("");
+            match block_type {
+                "tool_use" => {
+                    *current_tool_id = block["id"].as_str().map(|s| s.to_string());
+                    *current_tool_name = block["name"].as_str().map(|s| s.to_string());
+                    current_tool_input.clear();
+                }
+                "thinking" => {
+                    // Some providers (DeepSeek) send full thinking in content_block_start
+                    if let Some(thinking) = block["thinking"].as_str() {
+                        if !thinking.is_empty() {
+                            eprintln!("[sse] thinking block_start: {} chars", thinking.len());
+                            assistant_thinking.push_str(thinking);
+                        }
+                    }
+                }
+                _ => {}
             }
             None
         }
@@ -804,9 +827,10 @@ fn handle_sse_event(
                 }
             }
 
-            // Accumulate thinking
+            // Accumulate thinking (streaming delta)
             if let Some(thinking) = delta["thinking"].as_str() {
                 if !thinking.is_empty() {
+                    eprintln!("[sse] thinking delta: {} chars", thinking.len());
                     assistant_thinking.push_str(thinking);
                 }
             }
@@ -1148,7 +1172,7 @@ async fn tool_send_to_agent(
             let pa = pending_asks.clone();
 
             // Read workspace from DB so target agent knows the project directory
-            let (workspace, api_url, messages_path, model, context_window) = {
+            let (workspace, api_url, messages_path, model, context_window, provider) = {
                 let conn = db.lock().unwrap();
                 let ws: Option<String> = conn.query_row("SELECT workspace FROM app_config", [], |row| row.get(0)).ok();
                 let provider: String = conn.query_row("SELECT provider FROM app_config", [], |row| row.get(0))
@@ -1158,7 +1182,7 @@ async fn tool_send_to_agent(
                         let url: String = conn.query_row("SELECT custom_api_url FROM app_config", [], |row| row.get(0)).unwrap_or_default();
                         let m: String = conn.query_row("SELECT custom_model FROM app_config", [], |row| row.get(0)).unwrap_or_default();
                         let cw: i64 = conn.query_row("SELECT custom_context_window FROM app_config", [], |row| row.get(0)).unwrap_or(200000);
-                        (ws, url, "/v1/messages".to_string(), m, cw.max(0) as usize)
+                        (ws, url, "/v1/messages".to_string(), m, cw.max(0) as usize, provider)
                     }
                     _ => {
                         let url: String = conn.query_row("SELECT api_url FROM app_config", [], |row| row.get(0))
@@ -1166,14 +1190,14 @@ async fn tool_send_to_agent(
                         let m: String = conn.query_row("SELECT model FROM app_config", [], |row| row.get(0))
                             .unwrap_or_else(|_| "MiniMax-M2.7".to_string());
                         let cw: i64 = conn.query_row("SELECT context_window FROM app_config", [], |row| row.get(0)).unwrap_or(204800);
-                        (ws, url, "/anthropic/v1/messages".to_string(), m, cw.max(0) as usize)
+                        (ws, url, "/anthropic/v1/messages".to_string(), m, cw.max(0) as usize, provider)
                     }
                 }
             };
 
             std::thread::spawn(move || {
                 handle.block_on(async move {
-                    let agent = AgentService::new(api_key, api_url, messages_path, model, context_window, skill_service, mcp_service, db, code_graph, lm, pm, pa);
+                    let agent = AgentService::new(api_key, api_url, messages_path, model, context_window, provider, skill_service, mcp_service, db, code_graph, lm, pm, pa);
                     agent.stream_chat(&agent_type, history, None, workspace, app, target_session_id).await;
                 });
             });

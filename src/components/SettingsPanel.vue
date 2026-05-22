@@ -5,7 +5,7 @@
         <h2>设置</h2>
         <button class="close-btn" @click="close">✕</button>
       </div>
-      <div class="panel-content">
+      <div class="panel-content" v-if="loaded">
         <!-- Provider Tabs -->
         <div class="provider-tabs">
           <button :class="['provider-tab', { active: provider === 'minimax' }]" @click="provider = 'minimax'">MiniMax</button>
@@ -98,7 +98,7 @@
       </div>
       <div class="panel-footer">
         <button class="save-btn" @click="saveAll" :disabled="saving">
-          {{ saving ? '保存中...' : '保存' }}
+          {{ saving ? '保存中...' : '保存并使用' }}
         </button>
       </div>
     </div>
@@ -112,6 +112,7 @@ import { invoke } from '@tauri-apps/api/core'
 const props = defineProps<{ visible: boolean }>()
 const emit = defineEmits<{ (e: 'close'): void }>()
 
+const loaded = ref(false)
 const provider = ref('minimax')
 const minimaxApiKey = ref('')
 const model = ref('MiniMax-M2.7')
@@ -173,7 +174,11 @@ async function removeConfig(id: number) {
 }
 
 watch(() => props.visible, async (val) => {
-  if (val) await loadSettings()
+  if (val) {
+    loaded.value = false
+    await loadSettings()
+    loaded.value = true
+  }
 })
 
 const loadSettings = async () => {
