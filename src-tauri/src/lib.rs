@@ -9,7 +9,7 @@ mod permission;
 mod skill_service;
 mod system_prompts;
 
-pub(crate) const API_BASE_URL: &str = "https://api.minimaxi.com";
+pub(crate) const DEFAULT_API_URL: &str = "https://api.minimaxi.com";
 pub(crate) const SEARCH_TIMEOUT_SECS: u64 = 30;
 pub(crate) const VLM_TIMEOUT_SECS: u64 = 60;
 pub(crate) const MCP_HTTP_TIMEOUT_SECS: u64 = 30;
@@ -347,6 +347,146 @@ fn get_model(state: State<AppState>) -> Result<String, String> {
     Ok(result)
 }
 
+#[tauri::command]
+fn set_api_url(state: State<AppState>, api_url: String) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let url = api_url.trim_end_matches('/').to_string();
+    conn.execute(
+        "INSERT INTO app_config (id, api_url) VALUES (1, ?1)
+         ON CONFLICT(id) DO UPDATE SET api_url = ?1",
+        [&url],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn get_api_url(state: State<AppState>) -> Result<String, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let result: String = conn.query_row(
+        "SELECT api_url FROM app_config",
+        [],
+        |row| row.get(0)
+    ).unwrap_or_else(|_| DEFAULT_API_URL.to_string());
+    Ok(result)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ProviderConfig {
+    pub provider: String,
+    pub minimax_api_key: String,
+    pub model: String,
+    pub api_url: String,
+    pub context_window: usize,
+    pub custom_api_url: String,
+    pub custom_api_key: String,
+    pub custom_model: String,
+    pub custom_context_window: usize,
+}
+
+#[tauri::command]
+fn get_provider_config(state: State<AppState>) -> Result<ProviderConfig, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let config = conn.query_row(
+        "SELECT provider, model, api_url, context_window, custom_api_url, custom_api_key, custom_model, custom_context_window FROM app_config",
+        [],
+        |row| Ok(ProviderConfig {
+            provider: row.get(0)?,
+            minimax_api_key: String::new(),
+            model: row.get(1)?,
+            api_url: row.get(2)?,
+            context_window: row.get::<_, i64>(3)?.max(0) as usize,
+            custom_api_url: row.get(4)?,
+            custom_api_key: row.get(5)?,
+            custom_model: row.get(6)?,
+            custom_context_window: row.get::<_, i64>(7)?.max(0) as usize,
+        })
+    ).unwrap_or_else(|_| ProviderConfig {
+        provider: "minimax".to_string(),
+        minimax_api_key: String::new(),
+        model: "MiniMax-M2.7".to_string(),
+        api_url: "https://api.minimaxi.com".to_string(),
+        context_window: 204800,
+        custom_api_url: String::new(),
+        custom_api_key: String::new(),
+        custom_model: String::new(),
+        custom_context_window: 200000,
+    });
+
+    // Also load minimax API key
+    let minimax_key = conn.query_row(
+        "SELECT api_key FROM minimax_api_key", [], |row| row.get(0)
+    ).unwrap_or_default();
+
+    Ok(ProviderConfig { minimax_api_key: minimax_key, ..config })
+}
+
+#[tauri::command]
+fn set_provider_config(state: State<AppState>, config: ProviderConfig) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO app_config (id, provider, model, api_url, context_window, custom_api_url, custom_api_key, custom_model, custom_context_window)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(id) DO UPDATE SET provider=?1, model=?2, api_url=?3, context_window=?4, custom_api_url=?5, custom_api_key=?6, custom_model=?7, custom_context_window=?8",
+        rusqlite::params![config.provider, config.model, config.api_url, config.context_window as i64,
+            config.custom_api_url, config.custom_api_key, config.custom_model, config.custom_context_window as i64],
+    ).map_err(|e| e.to_string())?;
+    // Also save minimax API key separately
+    if !config.minimax_api_key.is_empty() {
+        conn.execute("DELETE FROM minimax_api_key", []).map_err(|e| e.to_string())?;
+        conn.execute("INSERT INTO minimax_api_key (api_key) VALUES (?1)", [&config.minimax_api_key])
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+// ========== Custom Model Configs ==========
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomModelConfig {
+    pub id: i64,
+    pub name: String,
+    pub api_url: String,
+    pub api_key: String,
+    pub model: String,
+    pub context_window: usize,
+    pub created_at: String,
+}
+
+#[tauri::command]
+fn list_custom_configs(state: State<AppState>) -> Result<Vec<CustomModelConfig>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(
+        "SELECT id, name, api_url, api_key, model, context_window, created_at FROM custom_model_config ORDER BY created_at DESC"
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], |row| {
+        Ok(CustomModelConfig {
+            id: row.get(0)?, name: row.get(1)?, api_url: row.get(2)?,
+            api_key: row.get(3)?, model: row.get(4)?,
+            context_window: row.get::<_, i64>(5)?.max(0) as usize,
+            created_at: row.get(6)?,
+        })
+    }).map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_custom_config(state: State<AppState>, name: String, api_url: String, api_key: String, model: String, context_window: usize) -> Result<i64, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO custom_model_config (name, api_url, api_key, model, context_window) VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![name, api_url.trim_end_matches('/'), api_key, model, context_window as i64],
+    ).map_err(|e| e.to_string())?;
+    Ok(conn.last_insert_rowid())
+}
+
+#[tauri::command]
+fn delete_custom_config(state: State<AppState>, id: i64) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM custom_model_config WHERE id = ?1", [id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 // ========== File System Commands ==========
 
 #[tauri::command]
@@ -472,7 +612,7 @@ async fn web_search(query: String, state: State<'_, AppState>) -> Result<SearchR
     };
 
     let client = reqwest::Client::new();
-    let resp = client.post(format!("{}/v1/coding_plan/search", API_BASE_URL))
+    let resp = client.post(format!("{}/v1/coding_plan/search", DEFAULT_API_URL))
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .json(&serde_json::json!({ "q": query }))
@@ -541,7 +681,7 @@ async fn understand_image(prompt: String, image_url: String, state: State<'_, Ap
     };
 
     let client = reqwest::Client::new();
-    let resp = client.post(format!("{}/v1/coding_plan/vlm", API_BASE_URL))
+    let resp = client.post(format!("{}/v1/coding_plan/vlm", DEFAULT_API_URL))
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .json(&serde_json::json!({
@@ -1277,23 +1417,55 @@ async fn agent_chat_stream(
     let messages: Vec<Message> = serde_json::from_str(&messages)
         .map_err(|e| format!("Failed to parse messages: {}", e))?;
 
-    // Get API key from database
-    let api_key = {
+    // Get API credentials from database based on provider
+    let (api_key, api_url, messages_path, model, context_window) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        let key: Option<String> = conn
-            .query_row("SELECT api_key FROM minimax_api_key", [], |row| row.get(0))
-            .ok();
-        key.unwrap_or_default()
+        let provider: String = conn.query_row(
+            "SELECT provider FROM app_config", [], |row| row.get(0)
+        ).unwrap_or_else(|_| "minimax".to_string());
+
+        match provider.as_str() {
+            "custom" => {
+                let key: String = conn.query_row(
+                    "SELECT custom_api_key FROM app_config", [], |row| row.get(0)
+                ).unwrap_or_default();
+                let url: String = conn.query_row(
+                    "SELECT custom_api_url FROM app_config", [], |row| row.get(0)
+                ).unwrap_or_default();
+                let m: String = conn.query_row(
+                    "SELECT custom_model FROM app_config", [], |row| row.get(0)
+                ).unwrap_or_default();
+                let cw: i64 = conn.query_row(
+                    "SELECT custom_context_window FROM app_config", [], |row| row.get(0)
+                ).unwrap_or(200000);
+                (key, url, "/v1/messages".to_string(), m, cw.max(0) as usize)
+            }
+            _ => {
+                // minimax (default)
+                let key: Option<String> = conn
+                    .query_row("SELECT api_key FROM minimax_api_key", [], |row| row.get(0))
+                    .ok();
+                let url: String = conn
+                    .query_row("SELECT api_url FROM app_config", [], |row| row.get(0))
+                    .unwrap_or_else(|_| DEFAULT_API_URL.to_string());
+                let m: String = conn
+                    .query_row("SELECT model FROM app_config", [], |row| row.get(0))
+                    .unwrap_or_else(|_| "MiniMax-M2.7".to_string());
+                let cw: i64 = conn
+                    .query_row("SELECT context_window FROM app_config", [], |row| row.get(0))
+                    .unwrap_or(204800);
+                (key.unwrap_or_default(), url, "/anthropic/v1/messages".to_string(), m, cw.max(0) as usize)
+            }
+        }
     };
 
-    eprintln!("[agent_chat_stream] API key length: {}", api_key.len());
+    eprintln!("[agent_chat_stream] API: {}, model: {}, key len: {}", api_url, model, api_key.len());
     if api_key.is_empty() {
-        eprintln!("[agent_chat_stream] API key is empty!");
         return Err("API key not configured".to_string());
     }
 
     // Create agent service
-    let service = AgentService::new(api_key, state.skill_service.clone(), state.mcp_service.clone(), state.db.clone(), state.code_graph.clone(), state.lsp_manager.clone(), state.permission_service.clone(), state.pending_asks.clone());
+    let service = AgentService::new(api_key, api_url, messages_path, model, context_window, state.skill_service.clone(), state.mcp_service.clone(), state.db.clone(), state.code_graph.clone(), state.lsp_manager.clone(), state.permission_service.clone(), state.pending_asks.clone());
     eprintln!("[agent_chat_stream] AgentService created, spawning stream_chat");
 
     // Start streaming - spawn and await
@@ -1888,17 +2060,52 @@ pub fn run() {
     ).expect("Failed to create minimax_api_key table");
 
     conn.execute(
+        "CREATE TABLE IF NOT EXISTS custom_model_config (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            api_url TEXT NOT NULL,
+            api_key TEXT NOT NULL,
+            model TEXT NOT NULL,
+            context_window INTEGER NOT NULL DEFAULT 200000,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )",
+        [],
+    ).expect("Failed to create custom_model_config table");
+
+    // Migration: add context_window column for existing custom_model_config tables
+    let has_cw: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('custom_model_config') WHERE name='context_window'",
+        [],
+        |row| row.get::<_, i32>(0)
+    ).unwrap_or(0) > 0;
+    if !has_cw {
+        let _ = conn.execute("ALTER TABLE custom_model_config ADD COLUMN context_window INTEGER NOT NULL DEFAULT 200000", []);
+    }
+
+    conn.execute(
         "CREATE TABLE IF NOT EXISTS app_config (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             workspace TEXT NOT NULL DEFAULT '',
             model TEXT NOT NULL DEFAULT 'MiniMax-M2.7',
-            permission_mode TEXT NOT NULL DEFAULT 'normal'
+            api_url TEXT NOT NULL DEFAULT 'https://api.minimaxi.com',
+            permission_mode TEXT NOT NULL DEFAULT 'normal',
+            provider TEXT NOT NULL DEFAULT 'minimax',
+            custom_api_url TEXT NOT NULL DEFAULT '',
+            custom_api_key TEXT NOT NULL DEFAULT '',
+            custom_model TEXT NOT NULL DEFAULT ''
         )",
         [],
     ).expect("Failed to create app_config table");
 
-    // Migration: add column if upgrading from older schema
+    // Migration: add columns if upgrading from older schema
     let _ = conn.execute("ALTER TABLE app_config ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'normal'", []);
+    let _ = conn.execute("ALTER TABLE app_config ADD COLUMN api_url TEXT NOT NULL DEFAULT 'https://api.minimaxi.com'", []);
+    let _ = conn.execute("ALTER TABLE app_config ADD COLUMN provider TEXT NOT NULL DEFAULT 'minimax'", []);
+    let _ = conn.execute("ALTER TABLE app_config ADD COLUMN custom_api_url TEXT NOT NULL DEFAULT ''", []);
+    let _ = conn.execute("ALTER TABLE app_config ADD COLUMN custom_api_key TEXT NOT NULL DEFAULT ''", []);
+    let _ = conn.execute("ALTER TABLE app_config ADD COLUMN custom_model TEXT NOT NULL DEFAULT ''", []);
+    let _ = conn.execute("ALTER TABLE app_config ADD COLUMN context_window INTEGER NOT NULL DEFAULT 204800", []);
+    let _ = conn.execute("ALTER TABLE app_config ADD COLUMN custom_context_window INTEGER NOT NULL DEFAULT 200000", []);
 
     // Load permission mode from DB
     let perm_mode: String = conn
@@ -1972,6 +2179,13 @@ pub fn run() {
             respond_ask,
             set_model,
             get_model,
+            set_api_url,
+            get_api_url,
+            get_provider_config,
+            set_provider_config,
+            list_custom_configs,
+            save_custom_config,
+            delete_custom_config,
             agent_chat_stream,
             read_file,
             write_file,

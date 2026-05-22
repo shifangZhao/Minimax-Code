@@ -1,13 +1,11 @@
 // Context Compressor — per-agent compression of api_messages when approaching token limit
 //
-// When api_messages reaches 80% of the 128K context window, the middle messages
+// When api_messages reaches 80% of the configured context window, the middle messages
 // are compressed into a structured summary. The summary replaces the compressed
 // messages directly in the api_messages array.
 
 use serde_json::Value;
 
-// MiniMax M2.7 context window: 204K tokens
-const MAX_CONTEXT_TOKENS: usize = 204 * 1024;
 const COMPRESS_THRESHOLD: f64 = 0.8;
 
 // Token estimation using character-class weighting.
@@ -49,9 +47,10 @@ fn estimate_tokens(messages: &[Value]) -> usize {
 /// Always keeps the first message (oldest history) and the last N messages.
 /// Middle messages are replaced with a single summary user message.
 /// Note: system prompt is sent as top-level `system` field, not in messages.
-pub fn compress_context(agent_type: &str, messages: &mut Vec<Value>) {
+/// `context_window` is the model's max context in tokens (e.g. 204000 for MiniMax, 200000 for Claude).
+pub fn compress_context(agent_type: &str, messages: &mut Vec<Value>, context_window: usize) {
     let tokens = estimate_tokens(messages);
-    let threshold = (MAX_CONTEXT_TOKENS as f64 * COMPRESS_THRESHOLD) as usize;
+    let threshold = (context_window as f64 * COMPRESS_THRESHOLD) as usize;
     if tokens < threshold {
         return;
     }
@@ -88,8 +87,8 @@ pub fn compress_context(agent_type: &str, messages: &mut Vec<Value>) {
 
     let new_tokens = estimate_tokens(messages);
     eprintln!(
-        "[compress] {}: {} → {} tokens (threshold: {})",
-        agent_type, tokens, new_tokens, threshold
+        "[compress] {}: {} → {} tokens (ctx: {}, threshold: {})",
+        agent_type, tokens, new_tokens, context_window, threshold
     );
 }
 

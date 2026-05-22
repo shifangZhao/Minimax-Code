@@ -6,19 +6,85 @@
         <button class="close-btn" @click="close">✕</button>
       </div>
       <div class="panel-content">
-        <div class="form-group">
-          <label>Minimax API Key</label>
-          <div class="input-wrapper">
-            <input
-              :type="showKey ? 'text' : 'password'"
-              v-model="apiKey"
-              placeholder="输入 API Key..."
-            />
-            <button class="toggle-btn" @click="showKey = !showKey">
-              {{ showKey ? '👁' : '👁‍🗨' }}
-            </button>
+        <!-- Provider Tabs -->
+        <div class="provider-tabs">
+          <button :class="['provider-tab', { active: provider === 'minimax' }]" @click="provider = 'minimax'">MiniMax</button>
+          <button :class="['provider-tab', { active: provider === 'custom' }]" @click="provider = 'custom'">自定义 Anthropic</button>
+        </div>
+
+        <!-- MiniMax Panel -->
+        <div v-if="provider === 'minimax'" class="provider-panel">
+          <div class="form-group">
+            <label>API Key</label>
+            <div class="input-wrapper">
+              <input :type="showKey ? 'text' : 'password'" v-model="minimaxApiKey" placeholder="输入 MiniMax API Key..." />
+              <button class="toggle-btn" @click="showKey = !showKey">{{ showKey ? '👁' : '👁‍🗨' }}</button>
+            </div>
           </div>
-          <p class="hint">用于连接 MiniMax AI 服务</p>
+          <div class="form-group">
+            <label>模型</label>
+            <select v-model="model" class="model-select">
+              <option value="MiniMax-M2.7">MiniMax-M2.7 (204,800)</option>
+              <option value="MiniMax-M2.7-highspeed">MiniMax-M2.7-highspeed (204,800)</option>
+              <option value="MiniMax-M2.5">MiniMax-M2.5 (204,800)</option>
+              <option value="MiniMax-M2.5-highspeed">MiniMax-M2.5-highspeed (204,800)</option>
+              <option value="MiniMax-M2.1">MiniMax-M2.1 (204,800)</option>
+              <option value="MiniMax-M2.1-highspeed">MiniMax-M2.1-highspeed (204,800)</option>
+              <option value="MiniMax-M2">MiniMax-M2 (204,800)</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Custom Anthropic Panel -->
+        <div v-if="provider === 'custom'" class="provider-panel">
+          <!-- Saved configs list -->
+          <div v-if="customConfigs.length > 0" class="config-list">
+            <div
+              v-for="cfg in customConfigs" :key="cfg.id"
+              class="config-item"
+              :class="{ active: activeConfigId === cfg.id }"
+              @click="selectConfig(cfg)"
+            >
+              <div class="config-info">
+                <span class="config-name">{{ cfg.name }}</span>
+                <span class="config-model">{{ cfg.model }} · {{ formatCtx(cfg.context_window) }}</span>
+              </div>
+              <button class="config-del" @click.stop="removeConfig(cfg.id)" title="删除">×</button>
+            </div>
+          </div>
+
+          <!-- Save current as config -->
+          <div class="config-save-row">
+            <input
+              v-model="newConfigName"
+              class="config-name-input"
+              placeholder="配置名称，如 Claude Opus"
+            />
+            <button class="config-save-btn" @click="addConfig" :disabled="!newConfigName.trim()">+ 保存当前配置</button>
+          </div>
+
+          <div class="form-group">
+            <label>API 地址</label>
+            <input type="text" v-model="customApiUrl" placeholder="https://api.anthropic.com" />
+            <p class="hint">支持任何 Anthropic Messages API 兼容的服务</p>
+          </div>
+          <div class="form-group">
+            <label>API Key</label>
+            <div class="input-wrapper">
+              <input :type="showCustomKey ? 'text' : 'password'" v-model="customApiKey" placeholder="sk-ant-..." />
+              <button class="toggle-btn" @click="showCustomKey = !showCustomKey">{{ showCustomKey ? '👁' : '👁‍🗨' }}</button>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>模型名称</label>
+            <input type="text" v-model="customModel" placeholder="claude-sonnet-4-6" />
+            <p class="hint">输入完整模型 ID，如 claude-opus-4-7、claude-sonnet-4-6</p>
+          </div>
+          <div class="form-group">
+            <label>上下文窗口 (tokens)</label>
+            <input type="number" v-model.number="customContextWindow" step="1000" min="8000" max="1000000" />
+            <p class="hint">须与模型真实上下文窗口一致，超出部分不会生效</p>
+          </div>
         </div>
 
         <div class="form-group">
@@ -27,20 +93,6 @@
             <option value="full">Full — 全部自动放行</option>
             <option value="normal">Normal — 安全命令自动，危险确认</option>
             <option value="guarded">Guarded — 修改操作都需确认</option>
-          </select>
-          <p class="hint">Full 最省心，Guarded 最安全。敏感路径（.env, 密钥文件）始终拦截</p>
-        </div>
-
-        <div class="form-group">
-          <label>模型选择</label>
-          <select v-model="selectedModel" class="model-select">
-            <option value="MiniMax-M2.7">MiniMax-M2.7 (204,800) - 开启模型的自我迭代</option>
-            <option value="MiniMax-M2.7-highspeed">MiniMax-M2.7-highspeed (204,800) - M2.7 极速版</option>
-            <option value="MiniMax-M2.5">MiniMax-M2.5 (204,800) - 顶尖性能与极致性价比</option>
-            <option value="MiniMax-M2.5-highspeed">MiniMax-M2.5-highspeed (204,800) - M2.5 极速版</option>
-            <option value="MiniMax-M2.1">MiniMax-M2.1 (204,800) - 强大多语言编程能力</option>
-            <option value="MiniMax-M2.1-highspeed">MiniMax-M2.1-highspeed (204,800) - M2.1 极速版</option>
-            <option value="MiniMax-M2">MiniMax-M2 (204,800) - 专为高效编码与 Agent 工作流而生</option>
           </select>
         </div>
       </div>
@@ -57,36 +109,89 @@
 import { ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 
-const props = defineProps<{
-  visible: boolean
-}>()
+const props = defineProps<{ visible: boolean }>()
+const emit = defineEmits<{ (e: 'close'): void }>()
 
-const emit = defineEmits<{
-  (e: 'close'): void
-}>()
-
-const apiKey = ref('')
-const selectedModel = ref('MiniMax-M2.7')
+const provider = ref('minimax')
+const minimaxApiKey = ref('')
+const model = ref('MiniMax-M2.7')
+const customApiUrl = ref('')
+const customApiKey = ref('')
+const customModel = ref('')
+const contextWindow = ref(204800)
+const customContextWindow = ref(200000)
 const permMode = ref('normal')
 const saving = ref(false)
 const showKey = ref(false)
+const showCustomKey = ref(false)
+
+// Custom configs list
+interface CustomConfig { id: number; name: string; api_url: string; api_key: string; model: string; context_window: number }
+const customConfigs = ref<CustomConfig[]>([])
+const newConfigName = ref('')
+const activeConfigId = ref<number | null>(null)
+
+async function loadCustomConfigs() {
+  try {
+    customConfigs.value = await invoke<CustomConfig[]>('list_custom_configs')
+  } catch { customConfigs.value = [] }
+}
+
+async function addConfig() {
+  const name = newConfigName.value.trim()
+  if (!name || !customApiUrl.value.trim() || !customModel.value.trim()) return
+  try {
+    await invoke('save_custom_config', {
+      name, apiUrl: customApiUrl.value, apiKey: customApiKey.value, model: customModel.value, contextWindow: customContextWindow.value
+    })
+    newConfigName.value = ''
+    await loadCustomConfigs()
+  } catch (e) { console.error('Failed to save config:', e) }
+}
+
+function selectConfig(cfg: CustomConfig) {
+  customApiUrl.value = cfg.api_url
+  customApiKey.value = cfg.api_key
+  customModel.value = cfg.model
+  customContextWindow.value = cfg.context_window || 200000
+  activeConfigId.value = cfg.id
+}
+
+function formatCtx(tokens: number): string {
+  if (!tokens) return ''
+  if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(1)}M`
+  if (tokens >= 1000) return `${(tokens / 1000).toFixed(0)}K`
+  return `${tokens}`
+}
+
+async function removeConfig(id: number) {
+  try {
+    await invoke('delete_custom_config', { id })
+    if (activeConfigId.value === id) activeConfigId.value = null
+    await loadCustomConfigs()
+  } catch (e) { console.error('Failed to delete config:', e) }
+}
 
 watch(() => props.visible, async (val) => {
-  if (val) {
-    await loadSettings()
-  }
+  if (val) await loadSettings()
 })
 
 const loadSettings = async () => {
   try {
-    const key = await invoke<string | null>('get_minimax_api_key')
-    apiKey.value = key || ''
-
-    const model = await invoke<string>('get_model')
-    selectedModel.value = model || 'MiniMax-M2.7'
+    const config = await invoke<any>('get_provider_config')
+    provider.value = config.provider || 'minimax'
+    minimaxApiKey.value = config.minimax_api_key || ''
+    model.value = config.model || 'MiniMax-M2.7'
+    customApiUrl.value = config.custom_api_url || ''
+    customApiKey.value = config.custom_api_key || ''
+    customModel.value = config.custom_model || ''
+    contextWindow.value = config.context_window || 204800
+    customContextWindow.value = config.custom_context_window || 200000
 
     const mode = await invoke<string>('get_permission_mode')
     permMode.value = JSON.parse(mode) || 'normal'
+
+    await loadCustomConfigs()
   } catch (e) {
     console.error('Failed to load settings:', e)
   }
@@ -95,10 +200,19 @@ const loadSettings = async () => {
 const saveAll = async () => {
   saving.value = true
   try {
-    if (apiKey.value.trim()) {
-      await invoke('set_minimax_api_key', { apiKey: apiKey.value })
-    }
-    await invoke('set_model', { model: selectedModel.value })
+    await invoke('set_provider_config', {
+      config: {
+        provider: provider.value,
+        minimax_api_key: minimaxApiKey.value,
+        model: model.value,
+        api_url: 'https://api.minimaxi.com',
+        context_window: contextWindow.value,
+        custom_api_url: customApiUrl.value.trim(),
+        custom_api_key: customApiKey.value.trim(),
+        custom_model: customModel.value.trim(),
+        custom_context_window: customContextWindow.value,
+      }
+    })
     await invoke('set_permission_mode', { mode: permMode.value })
     close()
   } catch (e) {
@@ -108,185 +222,113 @@ const saveAll = async () => {
   }
 }
 
-const close = () => {
-  emit('close')
-}
+const close = () => emit('close')
 </script>
 
 <style scoped>
 .settings-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background-color: rgba(0, 0, 0, 0.5);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
+  position: fixed; inset: 0; z-index: 100;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.5);
 }
-
 .settings-panel {
-  width: 500px;
-  background-color: var(--bg-secondary);
-  border-radius: 8px;
-  border: 1px solid var(--border-color);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  width: 440px; max-height: 85vh; overflow-y: auto;
+  background: var(--bg-secondary); border: 1px solid var(--border-color);
+  border-radius: 12px;
 }
-
 .panel-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 16px 20px;
-  border-bottom: 1px solid var(--border-color);
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 20px; border-bottom: 1px solid var(--border-color);
 }
-
-.panel-header h2 {
-  margin: 0;
-  font-size: 16px;
-  color: var(--text-primary);
-}
-
+.panel-header h2 { font-size: 16px; color: var(--text-primary); margin: 0; }
 .close-btn {
-  width: 28px;
-  height: 28px;
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 14px;
-  cursor: pointer;
-  border-radius: 4px;
+  width: 28px; height: 28px; border: none; background: transparent;
+  color: var(--text-secondary); font-size: 16px; cursor: pointer; border-radius: 4px;
 }
+.close-btn:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+.panel-content { padding: 16px 20px; }
 
-.close-btn:hover {
-  background-color: var(--bg-tertiary);
-  color: var(--text-primary);
+.provider-tabs {
+  display: flex; gap: 0; margin-bottom: 16px;
+  background: var(--bg-tertiary); border-radius: 6px; padding: 2px;
 }
-
-.panel-content {
-  padding: 20px;
+.provider-tab {
+  flex: 1; padding: 8px 0; border: none; background: transparent;
+  color: var(--text-secondary); font-size: 13px; cursor: pointer; border-radius: 5px;
+  transition: all 0.15s;
 }
+.provider-tab.active { background: var(--accent); color: white; font-weight: 600; }
+.provider-panel { margin-bottom: 12px; }
 
-.form-group {
-  margin-bottom: 20px;
+.config-list {
+  max-height: 140px; overflow-y: auto;
+  margin-bottom: 12px;
+  border: 1px solid var(--border-color); border-radius: 6px;
 }
-
-.form-group:last-child {
-  margin-bottom: 0;
+.config-item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 10px; cursor: pointer;
+  border-bottom: 1px solid var(--border-color);
+  transition: background 0.1s;
 }
-
-.form-group label {
-  display: block;
-  margin-bottom: 8px;
-  font-size: 13px;
-  color: var(--text-primary);
+.config-item:last-child { border-bottom: none; }
+.config-item:hover { background: var(--bg-tertiary); }
+.config-item.active {
+  background: rgba(0, 47, 167, 0.12);
+  border-left: 2px solid var(--accent);
 }
-
-.input-wrapper {
-  position: relative;
+.config-info { display: flex; flex-direction: column; gap: 1px; overflow: hidden; }
+.config-name { font-size: 12px; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.config-model { font-size: 11px; color: var(--text-secondary); }
+.config-del {
+  width: 22px; height: 22px; border: none; background: transparent;
+  color: var(--text-secondary); font-size: 14px; cursor: pointer; border-radius: 4px;
+  flex-shrink: 0;
 }
+.config-del:hover { background: var(--bg-input); color: #e81123; }
 
-.input-wrapper input {
-  width: 100%;
-  height: 36px;
-  padding: 0 40px 0 12px;
-  background-color: var(--bg-input);
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  color: var(--text-primary);
-  font-size: 14px;
-  -webkit-text-security: none;
+.config-save-row {
+  display: flex; gap: 6px; margin-bottom: 14px;
 }
-
-.input-wrapper input::-webkit-credentials-auto-fill-button {
-  display: none !important;
+.config-name-input {
+  flex: 1; height: 32px; padding: 0 8px;
+  background: var(--bg-input); border: 1px solid var(--border-color);
+  border-radius: 4px; color: var(--text-primary); font-size: 12px; outline: none;
+  box-sizing: border-box;
 }
-
-.input-wrapper input::-webkit-caps-lock-indicator {
-  display: none !important;
+.config-name-input:focus { border-color: var(--accent); }
+.config-save-btn {
+  padding: 5px 12px; border: 1px solid var(--accent); background: transparent;
+  color: var(--accent); border-radius: 4px; font-size: 12px; cursor: pointer; white-space: nowrap;
 }
+.config-save-btn:hover { background: var(--accent); color: white; }
+.config-save-btn:disabled { opacity: 0.4; cursor: default; }
 
-.input-wrapper input:focus {
-  outline: none;
-  border-color: var(--accent);
+.form-group { margin-bottom: 14px; }
+.form-group label { display: block; font-size: 13px; font-weight: 500; color: var(--text-primary); margin-bottom: 5px; }
+.form-group input, .form-group select {
+  width: 100%; height: 36px; padding: 0 10px;
+  background: var(--bg-input); border: 1px solid var(--border-color);
+  border-radius: 4px; color: var(--text-primary); font-size: 13px; outline: none;
+  box-sizing: border-box;
 }
-
+.form-group input:focus, .form-group select:focus { border-color: var(--accent); }
+.input-wrapper { display: flex; gap: 4px; }
+.input-wrapper input { flex: 1; }
 .toggle-btn {
-  position: absolute;
-  right: 8px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 28px;
-  height: 28px;
-  border: none;
-  background: transparent;
-  font-size: 16px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 4px;
+  width: 40px; border: 1px solid var(--border-color); background: var(--bg-tertiary);
+  color: var(--text-secondary); border-radius: 4px; cursor: pointer; font-size: 14px;
 }
-
-.toggle-btn:hover {
-  background-color: var(--bg-tertiary);
-}
-
-.model-select {
-  width: 100%;
-  height: 36px;
-  padding: 0 12px;
-  background-color: var(--bg-input);
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  color: var(--text-primary);
-  font-size: 14px;
-  cursor: pointer;
-}
-
-.model-select:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-
-.model-select option {
-  background-color: var(--bg-secondary);
-  color: var(--text-primary);
-}
+.toggle-btn:hover { background: var(--bg-input); }
+.hint { font-size: 11px; color: var(--text-secondary); margin: 3px 0 0; }
 
 .panel-footer {
-  display: flex;
-  justify-content: flex-end;
-  padding: 16px 20px;
-  border-top: 1px solid var(--border-color);
+  padding: 12px 20px; border-top: 1px solid var(--border-color);
+  display: flex; justify-content: flex-end;
 }
-
 .save-btn {
-  width: 80px;
-  height: 36px;
-  border: none;
-  background-color: var(--accent);
-  color: white;
-  border-radius: 4px;
-  font-size: 14px;
-  cursor: pointer;
-  transition: background-color 0.15s;
+  padding: 8px 24px; border: none; background: var(--accent);
+  color: white; border-radius: 4px; font-size: 13px; cursor: pointer;
 }
-
-.save-btn:hover:not(:disabled) {
-  background-color: var(--accent-hover);
-}
-
-.save-btn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.hint {
-  margin-top: 6px;
-  font-size: 12px;
-  color: var(--text-secondary);
-}
+.save-btn:hover { opacity: 0.9; }
 </style>

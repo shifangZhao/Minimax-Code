@@ -25,7 +25,7 @@ use crate::mcp_service::McpService;
 use crate::permission::{PermissionService, PermissionAction, PermissionRequest};
 use crate::skill_service::SkillService;
 use crate::system_prompts::{ACE_SYSTEM, EXPLORE_SYSTEM, FRONT_SYSTEM, PLAN_SYSTEM, REVIEW_SYSTEM, WORK_SYSTEM};
-use crate::{API_BASE_URL, SEARCH_TIMEOUT_SECS, VLM_TIMEOUT_SECS};
+use crate::{DEFAULT_API_URL, SEARCH_TIMEOUT_SECS, VLM_TIMEOUT_SECS};
 
 // ========== Types ==========
 
@@ -159,6 +159,9 @@ fn save_file_snapshot(db: &Arc<StdMutex<Connection>>, session_id: i64, file_path
 
 pub struct AgentService {
     api_url: String,
+    messages_path: String,
+    model: String,
+    context_window: usize,
     api_key: Arc<Mutex<String>>,
     skill_service: Arc<SkillService>,
     mcp_service: Arc<RwLock<McpService>>,
@@ -173,6 +176,9 @@ impl Clone for AgentService {
     fn clone(&self) -> Self {
         Self {
             api_url: self.api_url.clone(),
+            messages_path: self.messages_path.clone(),
+            model: self.model.clone(),
+            context_window: self.context_window,
             api_key: self.api_key.clone(),
             skill_service: self.skill_service.clone(),
             mcp_service: self.mcp_service.clone(),
@@ -186,9 +192,12 @@ impl Clone for AgentService {
 }
 
 impl AgentService {
-    pub fn new(api_key: String, skill_service: Arc<SkillService>, mcp_service: Arc<RwLock<McpService>>, db: Arc<StdMutex<Connection>>, code_graph: Arc<StdMutex<CodeGraph>>, lsp_manager: Arc<StdMutex<Option<LspManager>>>, permission_service: Arc<StdMutex<PermissionService>>, pending_asks: PendingAsks) -> Self {
+    pub fn new(api_key: String, api_url: String, messages_path: String, model: String, context_window: usize, skill_service: Arc<SkillService>, mcp_service: Arc<RwLock<McpService>>, db: Arc<StdMutex<Connection>>, code_graph: Arc<StdMutex<CodeGraph>>, lsp_manager: Arc<StdMutex<Option<LspManager>>>, permission_service: Arc<StdMutex<PermissionService>>, pending_asks: PendingAsks) -> Self {
         Self {
-            api_url: API_BASE_URL.to_string(),
+            api_url,
+            messages_path,
+            model,
+            context_window,
             api_key: Arc::new(Mutex::new(api_key)),
             skill_service,
             mcp_service,
@@ -330,6 +339,13 @@ impl AgentService {
             }));
         }
 
+        // Model info as dynamic message — keeps system prompt immutable for cache.
+        // Placed before skill context so the stable model_name prefix can be cached.
+        api_messages.push(json!({
+            "role": "user",
+            "content": format!("当前模型: {}", self.model)
+        }));
+
         // Proactive skill matching: append as a separate user message AFTER history.
         // This preserves the immutable system prefix — critical for cache hits.
         let matched_skills = skill_service.match_skills(&last_user_msg, 5).await;
@@ -356,10 +372,10 @@ impl AgentService {
         // Main loop: continue until stop_reason is not "tool_use"
         loop {
             // Compress context when approaching token limit (80% of 128K)
-            compress_context(agent_type, &mut api_messages);
+            compress_context(agent_type, &mut api_messages, self.context_window);
 
             let request_body = json!({
-                "model": "MiniMax-M2.7",
+                "model": self.model,
                 "system": system_prompt,
                 "messages": api_messages,
                 "max_tokens": 16384,
@@ -369,12 +385,12 @@ impl AgentService {
             });
             let request_body_str = serde_json::to_string(&request_body).unwrap();
 
-            eprintln!("[stream_chat] Sending request with {} messages", api_messages.len());
+            eprintln!("[stream_chat] Model: {}, Ctx: {}K, Messages: {}", self.model, self.context_window / 1000, api_messages.len());
 
             // Send request
             let client = Client::new();
             let response = match client
-                .post(format!("{}/anthropic/v1/messages", self.api_url))
+                .post(format!("{}{}", self.api_url, self.messages_path))
                 .header("Authorization", format!("Bearer {}", api_key))
                 .header("Content-Type", "application/json")
                 .body(request_body_str)
@@ -415,7 +431,7 @@ impl AgentService {
                 &mut api_messages,
             ).await;
 
-            eprintln!("[stream_chat] stop_reason: {:?}, thinking: {} chars, text: {} chars, tool_uses: {}",
+            eprintln!("[stream_chat] Model: {}, stop_reason: {:?}, thinking: {} chars, text: {} chars, tool_uses: {}", self.model,
                 stop_reason, assistant_thinking.len(), assistant_text.len(), tool_uses.len());
 
             // If stop_reason is not "tool_use", we're done
@@ -1132,14 +1148,32 @@ async fn tool_send_to_agent(
             let pa = pending_asks.clone();
 
             // Read workspace from DB so target agent knows the project directory
-            let workspace: Option<String> = {
+            let (workspace, api_url, messages_path, model, context_window) = {
                 let conn = db.lock().unwrap();
-                conn.query_row("SELECT workspace FROM app_config", [], |row| row.get(0)).ok()
+                let ws: Option<String> = conn.query_row("SELECT workspace FROM app_config", [], |row| row.get(0)).ok();
+                let provider: String = conn.query_row("SELECT provider FROM app_config", [], |row| row.get(0))
+                    .unwrap_or_else(|_| "minimax".to_string());
+                match provider.as_str() {
+                    "custom" => {
+                        let url: String = conn.query_row("SELECT custom_api_url FROM app_config", [], |row| row.get(0)).unwrap_or_default();
+                        let m: String = conn.query_row("SELECT custom_model FROM app_config", [], |row| row.get(0)).unwrap_or_default();
+                        let cw: i64 = conn.query_row("SELECT custom_context_window FROM app_config", [], |row| row.get(0)).unwrap_or(200000);
+                        (ws, url, "/v1/messages".to_string(), m, cw.max(0) as usize)
+                    }
+                    _ => {
+                        let url: String = conn.query_row("SELECT api_url FROM app_config", [], |row| row.get(0))
+                            .unwrap_or_else(|_| DEFAULT_API_URL.to_string());
+                        let m: String = conn.query_row("SELECT model FROM app_config", [], |row| row.get(0))
+                            .unwrap_or_else(|_| "MiniMax-M2.7".to_string());
+                        let cw: i64 = conn.query_row("SELECT context_window FROM app_config", [], |row| row.get(0)).unwrap_or(204800);
+                        (ws, url, "/anthropic/v1/messages".to_string(), m, cw.max(0) as usize)
+                    }
+                }
             };
 
             std::thread::spawn(move || {
                 handle.block_on(async move {
-                    let agent = AgentService::new(api_key, skill_service, mcp_service, db, code_graph, lm, pm, pa);
+                    let agent = AgentService::new(api_key, api_url, messages_path, model, context_window, skill_service, mcp_service, db, code_graph, lm, pm, pa);
                     agent.stream_chat(&agent_type, history, None, workspace, app, target_session_id).await;
                 });
             });
@@ -2465,7 +2499,7 @@ async fn tool_web_search(params: serde_json::Value, api_key: String) -> String {
 
     tokio::task::spawn_blocking(move || {
         let client = reqwest::blocking::Client::new();
-        let resp = client.post(format!("{}/v1/coding_plan/search", API_BASE_URL))
+        let resp = client.post(format!("{}/v1/coding_plan/search", DEFAULT_API_URL))
             .header("Content-Type", "application/json")
             .header("Authorization", format!("Bearer {}", api_key))
             .json(&serde_json::json!({ "q": query }))
@@ -2523,7 +2557,7 @@ async fn tool_understand_image(params: serde_json::Value, api_key: String) -> St
         let image_data = resolve_image(&image_url);
 
         let client = reqwest::blocking::Client::new();
-        let resp = client.post(format!("{}/v1/coding_plan/vlm", API_BASE_URL))
+        let resp = client.post(format!("{}/v1/coding_plan/vlm", DEFAULT_API_URL))
             .header("Content-Type", "application/json")
             .header("Authorization", format!("Bearer {}", api_key))
             .json(&serde_json::json!({

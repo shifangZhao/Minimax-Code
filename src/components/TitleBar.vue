@@ -1,6 +1,7 @@
 <template>
   <div class="title-bar" data-tauri-drag-region>
     <div class="title-left" data-tauri-drag-region>
+      <img src="../assets/icon.png" class="title-icon" alt="" />
       <span class="title">MinimaxCode</span>
     </div>
     <div class="window-controls">
@@ -70,6 +71,11 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.title-icon {
+  width: 20px;
+  height: 20px;
 }
 
 .title {

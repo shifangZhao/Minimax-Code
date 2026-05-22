@@ -58,29 +58,32 @@
         <div class="content">
           <div v-if="msg.thinking && msg.role === 'assistant'" class="thinking-block">
             <div class="thinking-toggle" :class="{ collapsed: !isThinkingExpanded(i) }" @click="toggleThinking(i)">
-              <span class="toggle-arrow"></span>
               思考过程
+              <span class="toggle-arrow"></span>
             </div>
             <div v-if="isThinkingExpanded(i)" class="thinking-text" v-html="formatContent(msg.thinking)"></div>
           </div>
           <div v-if="msg.role === 'user'" class="user-msg">
+            <div v-if="parsedAttachments(msg)" class="user-attachments">
+              <div v-for="(att, j) in parsedAttachments(msg)" :key="j" class="msg-att-wrap">
+                <template v-if="att.kind === 'image'">
+                  <img
+                    v-if="getImageSrc(att.path)"
+                    :src="getImageSrc(att.path)"
+                    class="msg-image"
+                    :alt="att.name"
+                    :title="att.name"
+                    @error="onImgError($event)"
+                  />
+                  <div v-else class="msg-img-placeholder">🖼 {{ att.name }}</div>
+                </template>
+                <div v-else class="msg-file-badge">📄 {{ att.name }}</div>
+              </div>
+            </div>
             <div class="text user-text">{{ msg.content }}</div>
             <div class="msg-hover-actions">
               <button class="hover-btn" title="重新生成" @click="retryMessage(i)">⟳</button>
               <button class="hover-btn" title="回退到此" @click="rewindToMessage(msg.id, msg.content)">↩</button>
-            </div>
-            <div v-if="parsedAttachments(msg)" class="user-attachments">
-              <div v-for="(att, j) in parsedAttachments(msg)" :key="j" class="msg-att-wrap">
-                <img
-                  v-if="getImageSrc(att.path)"
-                  :src="getImageSrc(att.path)"
-                  class="msg-image"
-                  :alt="att.name"
-                  :title="att.name"
-                  @error="onImgError($event)"
-                />
-                <div v-else class="msg-img-placeholder">🖼 {{ att.name }}</div>
-              </div>
             </div>
           </div>
           <div v-else class="text" v-html="formatContent(msg.content)"></div>
@@ -319,7 +322,7 @@ function parsedAttachments(msg: any): AttInfo[] | null {
   try {
     const arr = typeof msg.attachments === 'string' ? JSON.parse(msg.attachments) : msg.attachments
     if (!Array.isArray(arr) || arr.length === 0) return null
-    return arr.filter((a: AttInfo) => a.kind === 'image')
+    return arr
   } catch { return null }
 }
 
@@ -878,6 +881,19 @@ onDeactivated(() => {
   max-width: 200px;
 }
 
+.msg-file-badge {
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 6px 10px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+
 .time {
   font-size: 11px;
   color: var(--text-secondary);
@@ -906,7 +922,7 @@ onDeactivated(() => {
   user-select: none;
   display: flex;
   align-items: center;
-  gap: 4px;
+  justify-content: space-between;
 }
 
 .toggle-arrow {
@@ -1373,7 +1389,7 @@ onDeactivated(() => {
   gap: 2px;
   position: absolute;
   top: -6px;
-  right: 0;
+  left: -30px;
   opacity: 0;
   transition: opacity 0.15s;
 }
