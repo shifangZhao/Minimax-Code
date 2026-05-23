@@ -32,6 +32,42 @@ fn hidden_cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
     cmd
 }
 
+/// Run a command with a timeout. Kills the process if it exceeds the deadline.
+fn output_with_timeout(cmd: &mut Command, timeout_secs: u64) -> String {
+    use std::sync::mpsc;
+    let mut child = match cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return format!("Error spawning command: {}", e),
+    };
+    let pid = child.id();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = child.wait_with_output();
+        let _ = tx.send(result);
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(timeout_secs)) {
+        Ok(Ok(o)) => {
+            let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+            let exit = o.status.code().unwrap_or(-1);
+            format!("Exit: {}\n{}\n{}", exit, stdout, stderr)
+        }
+        Ok(Err(e)) => format!("Error waiting for command: {}", e),
+        Err(_) => {
+            // Kill the still-running process
+            #[cfg(windows)]
+            { let _ = std::process::Command::new("taskkill").args(["/F", "/T", "/PID", &pid.to_string()]).output(); }
+            #[cfg(not(windows))]
+            { let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).output(); }
+            format!("Command timed out after {}s (killed)", timeout_secs)
+        }
+    }
+}
+
 use crate::context_compressor::{compress_context, estimate_tokens};
 use crate::lsp_manager::LspManager;
 use crate::lsp_types::format_diagnostics;
@@ -526,8 +562,16 @@ impl AgentService {
         // so the UI shows one combined thinking block instead of one per turn.
         let mut accumulated_thinking = String::new();
 
+        // Stability guards
+        let max_steps: usize = std::env::var("MINIMAX_MAX_STEPS")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(30);
+        let context_guard_pct: f64 = std::env::var("MINIMAX_CONTEXT_GUARD")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(0.80);
+        let mut step = 0usize;
+
         // Main loop: continue until stop_reason is not "tool_use"
         loop {
+            step += 1;
             // Check cancel before each API round-trip
             if *cancel_rx.borrow() {
                 eprintln!("[stream_chat] Canceled at loop start for session {}", session_id);
@@ -546,6 +590,29 @@ impl AgentService {
                 context_window: self.context_window,
                 usage_pct,
             });
+
+            // Context guard: force exit if context is nearly full
+            if usage_pct >= context_guard_pct * 100.0 {
+                eprintln!("[context_guard] Context at {:.0}% — forcing exit", usage_pct);
+                emit(&app, &session_key, StreamEvent::Error {
+                    content: format!("上下文已满 ({:.0}%)，请开始新对话或压缩历史", usage_pct),
+                });
+                emit(&app, &session_key, StreamEvent::Done);
+                break;
+            }
+
+            // Max steps guard: force text-only on last step
+            if step >= max_steps {
+                eprintln!("[max_steps] Reached {} steps — forcing final turn", max_steps);
+                // Let this last API call go through; model should finish
+                if step > max_steps + 1 {
+                    emit(&app, &session_key, StreamEvent::Error {
+                        content: format!("已达到最大轮次 ({})，请优化任务或简化指令", max_steps),
+                    });
+                    emit(&app, &session_key, StreamEvent::Done);
+                    break;
+                }
+            }
 
             let request_body = json!({
                 "model": self.model,
@@ -927,23 +994,37 @@ async fn process_sse_stream(
         .map(|(tool_id, (tool_name, input))| (tool_id, tool_name, input))
         .collect();
 
-    // Storm breaker: track repeated identical tool calls within this turn
-    let mut storm_counter: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    // Storm breaker: sliding window of recent (tool, input) pairs.
+    // If the same call appears 3+ times in the window, suppress it.
+    // If ALL calls are suppressed, give one self-correction chance.
+    let storm_window: usize = std::env::var("MINIMAX_STORM_WINDOW")
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(6);
+    let storm_threshold: usize = std::env::var("MINIMAX_STORM_THRESHOLD")
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+    let mut storm_history: Vec<String> = Vec::with_capacity(storm_window);
+    let mut self_corrected = false;
 
-    // Execute tools with concurrent chunking (parallel-safe tools run together)
-    if stop_reason.as_deref() == Some("tool_use") {
-        // Filter out storm tools (same tool + same input > 2 times)
-        let storm_tool_uses: Vec<(String, String, String)> = tool_uses.iter().filter(|(_, name, input)| {
+    let tool_uses = if stop_reason.as_deref() == Some("tool_use") {
+        let storm_passed: Vec<(String, String, String)> = tool_uses.iter().filter(|(_, name, input)| {
             let key = format!("{}|{}", name, input);
-            let count = storm_counter.entry(key).or_insert(0);
-            *count += 1;
-            *count <= 2
+            let count = storm_history.iter().filter(|k| *k == &key).count() + 1;
+            storm_history.push(key.clone());
+            if storm_history.len() > storm_window { storm_history.remove(0); }
+            count < storm_threshold
         }).cloned().collect();
-        let blocked_count = tool_uses.len() - storm_tool_uses.len();
-        if blocked_count > 0 {
-            eprintln!("[storm_breaker] Blocked {} repeated tool calls", blocked_count);
+        let blocked = tool_uses.len() - storm_passed.len();
+        if storm_passed.is_empty() && !tool_uses.is_empty() && !self_corrected {
+            eprintln!("[storm_breaker] All {} calls suppressed — self-correction, retrying all", tool_uses.len());
+            self_corrected = true;
+            storm_history.clear();
+            tool_uses.clone()
+        } else {
+            if blocked > 0 { eprintln!("[storm_breaker] Blocked {} repeated tool calls", blocked); }
+            storm_passed
         }
-        let tool_uses = storm_tool_uses;
+    } else {
+        tool_uses
+    };
 
         let parallel_max = std::env::var("MINIMAX_PARALLEL_MAX")
             .ok()
@@ -1041,7 +1122,6 @@ async fn process_sse_stream(
                 }
             }
         }
-    }
 
     (stop_reason, assistant_text, assistant_thinking, tool_uses, tool_results)
 }
@@ -1342,7 +1422,35 @@ async fn execute_tool(
         });
     }
 
-    result
+    truncate_tool_result(result)
+}
+
+/// Truncate tool output to prevent context explosion.
+/// Caps at 50KB or 2000 lines, preserves head+tail, injects marker.
+fn truncate_tool_result(output: String) -> String {
+    const MAX_BYTES: usize = 50 * 1024;   // 50 KB
+    const MAX_LINES: usize = 2000;
+    const TAIL_FRACTION: f64 = 0.15;
+
+    let bytes = output.len();
+    let lines: Vec<&str> = output.lines().collect();
+    let line_count = lines.len();
+
+    if bytes <= MAX_BYTES && line_count <= MAX_LINES {
+        return output;
+    }
+
+    let head_lines = ((MAX_LINES as f64) * (1.0 - TAIL_FRACTION)) as usize;
+    let tail_lines = (MAX_LINES as f64 * TAIL_FRACTION) as usize;
+
+    let head: String = lines.iter().take(head_lines).copied().collect::<Vec<_>>().join("\n");
+    let tail: String = lines.iter().rev().take(tail_lines).rev().copied().collect::<Vec<_>>().join("\n");
+    let skipped = bytes.saturating_sub(head.len() + tail.len());
+
+    format!(
+        "{}\n[...truncated {} bytes / {} lines ...]\n{}",
+        head, skipped, line_count.saturating_sub(head_lines + tail_lines), tail
+    )
 }
 
 // ========== Agent Communication ==========
@@ -1876,6 +1984,7 @@ async fn tool_analyze_project_structure(params: &serde_json::Value) -> String {
 async fn tool_run_command(params: &serde_json::Value) -> String {
     let command = params["command"].as_str().unwrap_or("").to_string();
     let cwd = params["path"].as_str().map(|s| normalize_file_path(s));
+    let timeout_secs = params["timeout"].as_u64().unwrap_or(300);
     tokio::task::spawn_blocking(move || {
         let mut cmd = if cfg!(windows) {
             let mut c = hidden_cmd("powershell");
@@ -1889,15 +1998,7 @@ async fn tool_run_command(params: &serde_json::Value) -> String {
         if let Some(dir) = &cwd {
             cmd.current_dir(dir);
         }
-        match cmd.output() {
-            Ok(o) => {
-                let stdout = String::from_utf8_lossy(&o.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&o.stderr).to_string();
-                let exit = o.status.code().unwrap_or(-1);
-                format!("Exit: {}\n{}\n{}", exit, stdout, stderr)
-            }
-            Err(e) => format!("Error: {}", e),
-        }
+        output_with_timeout(&mut cmd, timeout_secs)
     })
     .await
     .unwrap_or_else(|_| "Task cancelled".to_string())
@@ -2766,14 +2867,7 @@ async fn tool_run_tests(params: &serde_json::Value) -> String {
             process.current_dir(&path);
         }
         process.args(&args);
-        match process.output() {
-            Ok(o) => {
-                let stdout = String::from_utf8_lossy(&o.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&o.stderr).to_string();
-                if stdout.is_empty() { stderr } else { stdout }
-            }
-            Err(e) => format!("Error: {}", e),
-        }
+        output_with_timeout(&mut process, 300)
     })
     .await
     .unwrap_or_else(|_| "Task cancelled".to_string())
