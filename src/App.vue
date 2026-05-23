@@ -31,6 +31,8 @@ import { ref, onMounted, onUnmounted } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { db } from './services/db'
+import { check } from '@tauri-apps/plugin-updater'
+import { relaunch } from '@tauri-apps/plugin-process'
 import { useGlobalStreaming } from './composables/useGlobalStreaming'
 import { usePermissions } from './composables/usePermissions'
 import TitleBar from './components/TitleBar.vue'
@@ -68,6 +70,17 @@ onMounted(async () => {
   permUnlisten = await listen<any>('permission_asked', (event) => {
     permRequests.value.push(event.payload)
   })
+
+  // Auto check for updates on startup
+  try {
+    const update = await check()
+    if (update) {
+      console.log('[updater] Update available:', update.version)
+      // TODO: show a toast/notification instead of alert
+    }
+  } catch (e) {
+    console.warn('[updater] Check failed:', e)
+  }
 
   agentInvokedUnlisten = await listen<any>('agent_invoked', async (event) => {
     const { target_agent, session_id } = event.payload

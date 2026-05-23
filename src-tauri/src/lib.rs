@@ -1585,7 +1585,7 @@ async fn agent_chat_stream(
 fn abort_stream(state: State<'_, AppState>, session_id: i64) -> Result<(), String> {
     let registry = state.cancel_registry.lock().map_err(|e| e.to_string())?;
     if let Some(flag) = registry.get(&session_id) {
-        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
         eprintln!("[abort_stream] Cancel flag set for session {}", session_id);
     }
     Ok(())
@@ -2380,6 +2380,8 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             minimize_window,
             maximize_window,

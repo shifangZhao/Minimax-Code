@@ -505,7 +505,7 @@ impl AgentService {
         // Main loop: continue until stop_reason is not "tool_use"
         loop {
             // Check cancel flag before each API round-trip
-            if cancel_flag.load(Ordering::SeqCst) {
+            if cancel_flag.load(Ordering::Relaxed) {
                 eprintln!("[stream_chat] Canceled at loop start for session {}", session_id);
                 let _ = app.emit(&session_key, StreamEvent::Aborted);
                 break;
@@ -589,7 +589,7 @@ impl AgentService {
                 stop_reason, assistant_thinking.len(), assistant_text.len(), tool_uses.len());
 
             // Check cancel flag after SSE process returns
-            if cancel_flag.load(Ordering::SeqCst) {
+            if cancel_flag.load(Ordering::Relaxed) {
                 eprintln!("[stream_chat] Canceled after SSE for session {}", session_id);
                 // Save partial content so it survives reload
                 if !assistant_thinking.is_empty() || !assistant_text.is_empty() {
@@ -722,25 +722,20 @@ async fn process_sse_stream(
 
     futures_util::pin_mut!(stream);
 
-    // Cancel check counter — avoid atomic load on every SSE event
-    let mut cancel_check_counter: u32 = 0;
-
     while let Some(item) = stream.next().await {
-        // Check cancel flag every ~50 SSE events (~50ms at typical rate)
-        cancel_check_counter += 1;
-        if cancel_check_counter % 50 == 0 {
-            if cancel_flag.load(Ordering::SeqCst) {
-                eprintln!("[process_sse_stream] Canceled mid-stream for session {}", session_id);
-                // Flush buffered text before returning
-                if !pending_text.is_empty() || !pending_thinking.is_empty() {
-                    let ev = StreamEvent::ContentBlockDelta {
-                        content: std::mem::take(&mut pending_text),
-                        thinking: std::mem::take(&mut pending_thinking),
-                    };
-                    let _ = app.emit(&session_key, ev);
-                }
-                return (None, assistant_text, assistant_thinking, Vec::new(), Vec::new());
+        // Check cancel every event — AtomicBool load is a single CPU instruction,
+        // far cheaper than the JSON parsing that follows.
+        if cancel_flag.load(Ordering::Relaxed) {
+            eprintln!("[process_sse_stream] Canceled mid-stream for session {}", session_id);
+            if !pending_text.is_empty() || !pending_thinking.is_empty() {
+                let ev = StreamEvent::ContentBlockDelta {
+                    content: std::mem::take(&mut pending_text),
+                    thinking: std::mem::take(&mut pending_thinking),
+                };
+                let _ = app.emit(&session_key, ev);
             }
+            // Drop the stream (and HTTP connection) by returning
+            return (None, assistant_text, assistant_thinking, Vec::new(), Vec::new());
         }
 
         match item {
@@ -886,7 +881,7 @@ async fn process_sse_stream(
             .unwrap_or(false);
 
         // Check cancel before tool dispatch
-        if cancel_flag.load(Ordering::SeqCst) {
+        if cancel_flag.load(Ordering::Relaxed) {
             eprintln!("[process_sse_stream] Canceled before tool dispatch for session {}", session_id);
             return (None, assistant_text, assistant_thinking, tool_uses, Vec::new());
         }
@@ -1300,7 +1295,7 @@ async fn tool_send_to_agent(
     }
 
     // Check parent cancel flag before spawning sub-agent
-    if cancel_flag.load(Ordering::SeqCst) {
+    if cancel_flag.load(Ordering::Relaxed) {
         return json!({"error": "Parent agent was aborted"}).to_string();
     }
 

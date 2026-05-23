@@ -33,5 +33,16 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/<your-username>/<your-repo>/releases/latest/download/latest.json"
+      ],
+      "pubkey": "PASTE_YOUR_PUBLIC_KEY_HERE",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

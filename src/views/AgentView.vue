@@ -349,15 +349,22 @@ const showLoading = computed(() => {
 function isInternalCacheMessage(msg: any): boolean {
   // Hide built-in skill reference messages (internal, not shown to user)
   if (msg.role === 'user' && msg.content?.startsWith('## 内置参考资料')) return true
-  // Check raw_json for tool_result blocks (internal tool execution messages)
+  // Check raw_json for internal API messages that should not be displayed
   if (msg.raw_json) {
     try {
       const blocks = JSON.parse(msg.raw_json)
       if (Array.isArray(blocks)) {
-        // Hide tool_result messages — they're internal API messages
-        if (blocks.some((b: any) => b.type === 'tool_result')) return true
-        // Hide intermediate assistant messages with tool_use blocks
-        if (blocks.some((b: any) => b.type === 'tool_use')) return true
+        // Hide user-role tool_result messages — internal API communication
+        if (msg.role === 'user' && blocks.some((b: any) => b.type === 'tool_result')) return true
+        // Hide assistant messages that are pure tool_use (no text or thinking) —
+        // the tool call is shown via toolEvents, and the final response has the full answer.
+        // But keep messages that have actual text/thinking content.
+        if (msg.role === 'assistant' && blocks.some((b: any) => b.type === 'tool_use')) {
+          const hasText = blocks.some((b: any) => b.type === 'text' && b.text?.trim())
+          const hasThinking = blocks.some((b: any) => b.type === 'thinking')
+          const hasOnlyThinking = !hasText && hasThinking
+          if (!hasText && !hasOnlyThinking) return true
+        }
       }
     } catch {}
   }
