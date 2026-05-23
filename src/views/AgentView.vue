@@ -1013,19 +1013,23 @@ onDeactivated(() => {
   color: var(--text-primary);
 }
 
-/* Soften highlight.js syntax colors */
-.text :deep(.hljs-keyword)  { color: #708; }
-.text :deep(.hljs-string)   { color: #a50; }
-.text :deep(.hljs-comment)  { color: #998; font-style: italic; }
-.text :deep(.hljs-number)   { color: #a50; }
-.text :deep(.hljs-literal)  { color: #a50; }
-.text :deep(.hljs-built_in) { color: #708; }
-.text :deep(.hljs-type)     { color: #708; }
-.text :deep(.hljs-function) { color: #36a; }
-.text :deep(.hljs-title)    { color: #36a; }
-.text :deep(.hljs-attr)     { color: #a50; }
-.text :deep(.hljs-params)   { color: var(--text-primary); }
-.text :deep(.hljs-meta)     { color: #998; }
+/* Muted highlight.js — low saturation, blends with dark bg */
+.text :deep(.hljs)            { color: #b0b0b0; }
+.text :deep(.hljs-keyword)    { color: #9b8ec4; }
+.text :deep(.hljs-string)     { color: #c4a882; }
+.text :deep(.hljs-comment)    { color: #6b6b6b; font-style: italic; }
+.text :deep(.hljs-number)     { color: #c4a882; }
+.text :deep(.hljs-literal)    { color: #c4a882; }
+.text :deep(.hljs-built_in)   { color: #9b8ec4; }
+.text :deep(.hljs-type)       { color: #9b8ec4; }
+.text :deep(.hljs-function)   { color: #82a8c4; }
+.text :deep(.hljs-title)      { color: #82a8c4; }
+.text :deep(.hljs-attr)       { color: #c4a882; }
+.text :deep(.hljs-params)     { color: #b0b0b0; }
+.text :deep(.hljs-meta)       { color: #6b6b6b; }
+.text :deep(.hljs-selector-*) { color: #9b8ec4; }
+.text :deep(.hljs-tag)        { color: #9b8ec4; }
+.text :deep(.hljs-name)       { color: #82a8c4; }
 
 .text :deep(a) {
   color: var(--accent);

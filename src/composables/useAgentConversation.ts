@@ -308,18 +308,6 @@ export function useAgentConversation(agentType: string) {
     let resolveStream: (() => void) | null = null
     const streamComplete = new Promise<void>(r => { resolveStream = r })
 
-    // rAF pacing: buffer rapid stream events and flush once per animation frame
-    let rAFPending = false
-    const flushRAF = () => {
-      rAFPending = false
-      updateStreamState(finalSessionId, {
-        text: fullText,
-        thinking: fullThinking,
-        done: false,
-        toolCallCount
-      })
-    }
-
     // Set up event listener for real-time streaming
     console.log('[sendMessage] Setting up event listener for:', `agent_stream_${finalSessionId}`)
     const unlisten = await listen<RustStreamEvent>(`agent_stream_${finalSessionId}`, (event) => {
@@ -330,10 +318,9 @@ export function useAgentConversation(agentType: string) {
           if (ev.content) fullText += ev.content
           if (ev.thinking) fullThinking += ev.thinking
           if (ev.content || ev.thinking) {
-            if (!rAFPending) {
-              rAFPending = true
-              requestAnimationFrame(flushRAF)
-            }
+            updateStreamState(finalSessionId, {
+              text: fullText, thinking: fullThinking, done: false, toolCallCount
+            })
           }
           break
         case 'tool_start':
@@ -345,7 +332,9 @@ export function useAgentConversation(agentType: string) {
             })
           }
           toolEvents.value.push({ type: 'tool_start', tool: ev.tool || '', tool_id: ev.tool_id || '', input: ev.input })
-          if (!rAFPending) { rAFPending = true; requestAnimationFrame(flushRAF) }
+          updateStreamState(finalSessionId, {
+            text: fullText, thinking: fullThinking, done: false, toolCallCount
+          })
           break
         case 'tool_end':
           toolEvents.value.push({
@@ -357,14 +346,12 @@ export function useAgentConversation(agentType: string) {
           break
         case 'done':
           resolveStream?.()
-          if (rAFPending) { rAFPending = false; flushRAF() }
           updateStreamState(finalSessionId, {
             text: fullText, thinking: fullThinking, done: false, toolCallCount
           })
           break
         case 'aborted':
           resolveStream?.()
-          if (rAFPending) { rAFPending = false; flushRAF() }
           updateStreamState(finalSessionId, {
             text: fullText, thinking: fullThinking, done: false, toolCallCount
           })
@@ -448,12 +435,15 @@ export function useAgentConversation(agentType: string) {
         assistantMsg.tool_calls = collectedToolCalls
       }
 
+      // Clear streaming display first so it doesn't overlap with DB messages
+      updateStreamState(finalSessionId, {
+        text: '', thinking: '', done: true, toolCallCount
+      })
+
       // Reload from DB to pick up backend-persisted messages.
       await loadMessages()
 
-      // Fallback: if backend didn't persist the assistant message (abort /
-      // timing gap), push what we have from the stream buffer so the user
-      // never loses the agent's output.
+      // Fallback: if backend didn't persist the assistant message, push stream buffer
       if (fullText || fullThinking) {
         const lastMsg = messages.value[messages.value.length - 1]
         const isAssistantSaved = lastMsg?.role === 'assistant' && lastMsg?.content
@@ -471,14 +461,6 @@ export function useAgentConversation(agentType: string) {
           } as ChatMessage)
         }
       }
-
-      // Now safe to clear stream — content is in messages list one way or another
-      updateStreamState(finalSessionId, {
-        text: '',
-        thinking: '',
-        done: true,
-        toolCallCount
-      })
 
       toolEvents.value = []
 

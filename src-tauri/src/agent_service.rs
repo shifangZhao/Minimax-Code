@@ -32,7 +32,8 @@ fn hidden_cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
     cmd
 }
 
-/// Run a command with a timeout. Kills the process if it exceeds the deadline.
+/// Run a command with a timeout. Graceful kill (SIGTERM equivalent), then force kill
+/// after a 2s grace period. Output is capped at 256KB to prevent OOM.
 fn output_with_timeout(cmd: &mut Command, timeout_secs: u64) -> String {
     use std::sync::mpsc;
     let mut child = match cmd
@@ -51,18 +52,33 @@ fn output_with_timeout(cmd: &mut Command, timeout_secs: u64) -> String {
     });
     match rx.recv_timeout(std::time::Duration::from_secs(timeout_secs)) {
         Ok(Ok(o)) => {
-            let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+            const MAX_BYTES: usize = 256 * 1024;
+            let stdout = if o.stdout.len() > MAX_BYTES {
+                let head = String::from_utf8_lossy(&o.stdout[..MAX_BYTES / 2]).to_string();
+                let tail = String::from_utf8_lossy(&o.stdout[o.stdout.len().saturating_sub(MAX_BYTES / 2)..]).to_string();
+                format!("{}{}", head, format!("\n[...{} bytes truncated...]\n{}", o.stdout.len() - MAX_BYTES, tail))
+            } else {
+                String::from_utf8_lossy(&o.stdout).to_string()
+            };
             let stderr = String::from_utf8_lossy(&o.stderr).to_string();
             let exit = o.status.code().unwrap_or(-1);
             format!("Exit: {}\n{}\n{}", exit, stdout, stderr)
         }
         Ok(Err(e)) => format!("Error waiting for command: {}", e),
         Err(_) => {
-            // Kill the still-running process
+            // Two-phase kill: graceful first, then force after 2s grace
             #[cfg(windows)]
-            { let _ = std::process::Command::new("taskkill").args(["/F", "/T", "/PID", &pid.to_string()]).output(); }
+            {
+                let _ = hidden_cmd("taskkill").args(["/PID", &pid.to_string()]).output();
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let _ = hidden_cmd("taskkill").args(["/F", "/T", "/PID", &pid.to_string()]).output();
+            }
             #[cfg(not(windows))]
-            { let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).output(); }
+            {
+                let _ = hidden_cmd("kill").args(["-15", &pid.to_string()]).output();
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let _ = hidden_cmd("kill").args(["-9", &pid.to_string()]).output();
+            }
             format!("Command timed out after {}s (killed)", timeout_secs)
         }
     }
@@ -1018,6 +1034,10 @@ async fn process_sse_stream(
             self_corrected = true;
             storm_history.clear();
             tool_uses.clone()
+        } else if storm_passed.is_empty() && self_corrected && !tool_uses.is_empty() {
+            eprintln!("[storm_breaker] Storm persists after self-correction — sending Done to stop loop");
+            emit(&app, &session_key, StreamEvent::Done);
+            return (Some("end_turn".to_string()), assistant_text, assistant_thinking, Vec::new(), Vec::new());
         } else {
             if blocked > 0 { eprintln!("[storm_breaker] Blocked {} repeated tool calls", blocked); }
             storm_passed
@@ -1987,8 +2007,8 @@ async fn tool_run_command(params: &serde_json::Value) -> String {
     let timeout_secs = params["timeout"].as_u64().unwrap_or(300);
     tokio::task::spawn_blocking(move || {
         let mut cmd = if cfg!(windows) {
-            let mut c = hidden_cmd("powershell");
-            c.args(["-NoProfile", "-NonInteractive", "-Command", &command]);
+            let mut c = hidden_cmd("cmd");
+            c.args(["/d", "/s", "/c", &command]);
             c
         } else {
             let mut c = hidden_cmd("sh");
