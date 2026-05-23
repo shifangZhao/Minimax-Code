@@ -14,7 +14,7 @@ pub(crate) const SEARCH_TIMEOUT_SECS: u64 = 30;
 pub(crate) const VLM_TIMEOUT_SECS: u64 = 60;
 pub(crate) const MCP_HTTP_TIMEOUT_SECS: u64 = 30;
 
-use agent_service::{AgentService, Message};
+use agent_service::{AgentService, Message, StreamEvent};
 use lsp_manager::LspManager;
 use mcp_service::{McpService, McpTool};
 use permission::{PermissionService, PermissionMode, PermissionAction};
@@ -23,8 +23,6 @@ use serde::{Deserialize, Serialize};
 use skill_service::{Skill, SkillMatch, SkillService};
 use std::collections::HashMap;
 use std::process::Command;
-use std::sync::atomic::AtomicBool;
-
 fn hidden_cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
     let mut cmd = Command::new(program.as_ref());
     #[cfg(windows)]
@@ -37,9 +35,10 @@ fn hidden_cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
 }
 use std::sync::{Arc, Mutex};
 use tokio::sync::{oneshot, RwLock};
-use tauri::{State, Window, AppHandle};
+use tauri::{State, Window, AppHandle, Emitter};
+use futures::FutureExt;
 
-type CancelRegistry = Arc<Mutex<HashMap<i64, Arc<AtomicBool>>>>;
+type CancelRegistry = Arc<Mutex<HashMap<i64, tokio::sync::watch::Sender<bool>>>>;
 
 struct AppState {
     db: Arc<Mutex<Connection>>,
@@ -1557,26 +1556,42 @@ async fn agent_chat_stream(
     let service = AgentService::new(api_key, api_url, messages_path, model, context_window, provider, state.skill_service.clone(), state.mcp_service.clone(), state.db.clone(), state.lsp_manager.clone(), state.permission_service.clone(), state.pending_asks.clone());
     eprintln!("[agent_chat_stream] AgentService created, spawning stream_chat");
 
-    // Register cancel token for this stream session
-    let cancel_flag = {
+    // Register cancel channel for this stream session.
+    // watch: abort_stream sends `true`, process_sse_stream races against it via tokio::select!.
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    {
         let mut registry = state.cancel_registry.lock().map_err(|e| e.to_string())?;
-        registry.remove(&session_id); // clean stale flag from previous stream
-        let flag = Arc::new(AtomicBool::new(false));
-        registry.insert(session_id, flag.clone());
-        flag
-    };
+        registry.remove(&session_id);
+        registry.insert(session_id, cancel_tx);
+    }
     let cancel_registry = state.cancel_registry.clone();
 
-    // Start streaming - spawn and await
-    let _ = tokio::spawn(async move {
-        service.stream_chat(&agent_type, messages, system, workspace, app_handle, session_id, cancel_flag).await;
-        // Clean up cancel flag when stream ends (normal or aborted)
+    // Spawn stream in background — cancel_rx enables immediate HTTP abort (no polling).
+    let panic_app = app_handle.clone();
+    let panic_key = format!("agent_stream_{}", session_id);
+    let _stream_task = tokio::spawn(async move {
+        let result = FutureExt::catch_unwind(
+            std::panic::AssertUnwindSafe(
+                service.stream_chat(&agent_type, messages, system, workspace, app_handle, session_id, cancel_rx)
+            )
+        ).await;
+
+        if let Err(e) = result {
+            let msg = if let Some(s) = e.downcast_ref::<String>() { s.clone() }
+                else if let Some(s) = e.downcast_ref::<&str>() { s.to_string() }
+                else { "Unknown internal error".to_string() };
+            eprintln!("[agent_chat_stream] PANIC in stream_chat: {}", msg);
+            let _ = panic_app.emit(&panic_key, StreamEvent::Error {
+                content: format!("内部服务错误: {}", msg),
+            });
+        }
+
         if let Ok(mut registry) = cancel_registry.lock() {
             registry.remove(&session_id);
         }
     });
 
-    eprintln!("[agent_chat_stream] stream_chat spawned");
+    eprintln!("[agent_chat_stream] stream_chat spawned for session {}", session_id);
 
     Ok(())
 }
@@ -1584,9 +1599,9 @@ async fn agent_chat_stream(
 #[tauri::command]
 fn abort_stream(state: State<'_, AppState>, session_id: i64) -> Result<(), String> {
     let registry = state.cancel_registry.lock().map_err(|e| e.to_string())?;
-    if let Some(flag) = registry.get(&session_id) {
-        flag.store(true, std::sync::atomic::Ordering::Relaxed);
-        eprintln!("[abort_stream] Cancel flag set for session {}", session_id);
+    if let Some(tx) = registry.get(&session_id) {
+        let _ = tx.send(true);
+        eprintln!("[abort_stream] Cancel signaled for session {}", session_id);
     }
     Ok(())
 }

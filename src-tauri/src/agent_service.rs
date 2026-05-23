@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::watch;
 use std::sync::{Arc, Mutex as StdMutex};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{Mutex, RwLock};
@@ -335,7 +335,7 @@ impl AgentService {
         workspace: Option<String>,
         app_handle: AppHandle,
         session_id: i64,
-        cancel_flag: Arc<AtomicBool>,
+        cancel_rx: watch::Receiver<bool>,
     ) {
         let api_key = self.api_key.lock().await.clone();
         let skill_service = self.skill_service.clone();
@@ -504,10 +504,10 @@ impl AgentService {
 
         // Main loop: continue until stop_reason is not "tool_use"
         loop {
-            // Check cancel flag before each API round-trip
-            if cancel_flag.load(Ordering::Relaxed) {
+            // Check cancel before each API round-trip
+            if *cancel_rx.borrow() {
                 eprintln!("[stream_chat] Canceled at loop start for session {}", session_id);
-                let _ = app.emit(&session_key, StreamEvent::Aborted);
+                emit(&app, &session_key, StreamEvent::Aborted);
                 break;
             }
 
@@ -517,7 +517,7 @@ impl AgentService {
             // Emit token usage for context window display
             let est = estimate_tokens(&api_messages);
             let usage_pct = (est as f64 / self.context_window as f64) * 100.0;
-            let _ = app.emit(&session_key, StreamEvent::TokenUsage {
+            emit(&app, &session_key, StreamEvent::TokenUsage {
                 estimated_tokens: est,
                 context_window: self.context_window,
                 usage_pct,
@@ -550,7 +550,7 @@ impl AgentService {
                 Err(e) => {
                     eprintln!("[stream_chat] Request failed: {}", e);
                     let ev = StreamEvent::Error { content: format!("Request failed: {}", e) };
-                    let _ = app.emit(&session_key, ev);
+                    emit(&app, &session_key, ev);
                     return;
                 }
             };
@@ -561,7 +561,7 @@ impl AgentService {
                 eprintln!("[stream_chat] API error {}: {}", status, err_text);
                 eprintln!("[stream_chat] URL: {}{}", self.api_url, self.messages_path);
                 let ev = StreamEvent::Error { content: format!("API error {}: {}", status, err_text) };
-                let _ = app.emit(&session_key, ev);
+                emit(&app, &session_key, ev);
                 return;
             }
 
@@ -582,16 +582,15 @@ impl AgentService {
                 permission_service.clone(),
                 pending_asks.clone(),
                 &mut api_messages,
-                cancel_flag.clone(),
+                cancel_rx.clone(),
             ).await;
 
             eprintln!("[stream_chat] Model: {}, stop_reason: {:?}, thinking: {} chars, text: {} chars, tool_uses: {}", self.model,
                 stop_reason, assistant_thinking.len(), assistant_text.len(), tool_uses.len());
 
-            // Check cancel flag after SSE process returns
-            if cancel_flag.load(Ordering::Relaxed) {
+            // Check cancel after SSE process returns
+            if *cancel_rx.borrow() {
                 eprintln!("[stream_chat] Canceled after SSE for session {}", session_id);
-                // Save partial content so it survives reload
                 if !assistant_thinking.is_empty() || !assistant_text.is_empty() {
                     let mut partial = Vec::new();
                     if !assistant_thinking.is_empty() {
@@ -603,7 +602,7 @@ impl AgentService {
                     let partial_msg = json!({"role": "assistant", "content": partial});
                     save_api_message(&self.db, session_id, &partial_msg);
                 }
-                let _ = app.emit(&session_key, StreamEvent::Aborted);
+                emit(&app, &session_key, StreamEvent::Aborted);
                 break;
             }
 
@@ -626,7 +625,7 @@ impl AgentService {
                     api_messages.push(final_msg);
                 }
                 let ev = StreamEvent::Done;
-                let _ = app.emit(&session_key, ev);
+                emit(&app, &session_key, ev);
                 break;
             }
 
@@ -678,6 +677,23 @@ impl AgentService {
 }
 
 // Process SSE stream from MiniMax API
+/// Emit a stream event with error logging (instead of silently discarding failures).
+fn emit(app: &AppHandle, key: &str, event: StreamEvent) {
+    if let Err(e) = app.emit(key, &event) {
+        let type_name = match &event {
+            StreamEvent::ContentBlockDelta { .. } => "content_block_delta",
+            StreamEvent::ToolStart { .. } => "tool_start",
+            StreamEvent::ToolEnd { .. } => "tool_end",
+            StreamEvent::Done => "done",
+            StreamEvent::Aborted => "aborted",
+            StreamEvent::Error { .. } => "error",
+            StreamEvent::CacheUsage { .. } => "cache_usage",
+            StreamEvent::TokenUsage { .. } => "token_usage",
+        };
+        eprintln!("[emit] FAILED key={} type={}: {:?}", key, type_name, e);
+    }
+}
+
 // Returns (stop_reason, assistant_text, assistant_thinking, tool_uses, tool_results)
 // tool_uses: Vec<(tool_id, tool_name, input_accumulated)>
 // tool_results: Vec<(tool_name, tool_id, result)>
@@ -697,7 +713,7 @@ async fn process_sse_stream(
     permission_service: Arc<StdMutex<PermissionService>>,
     pending_asks: PendingAsks,
     _api_messages: &mut Vec<serde_json::Value>,
-    cancel_flag: Arc<AtomicBool>,
+    mut cancel_rx: watch::Receiver<bool>,
 ) -> (Option<String>, String, String, Vec<(String, String, String)>, Vec<(String, String, String)>) {
     eprintln!("[process_sse_stream] Starting with session_key: {}", session_key);
     let mut current_tool_id: Option<String> = None;
@@ -722,24 +738,43 @@ async fn process_sse_stream(
 
     futures_util::pin_mut!(stream);
 
-    while let Some(item) = stream.next().await {
-        // Check cancel every event — AtomicBool load is a single CPU instruction,
-        // far cheaper than the JSON parsing that follows.
-        if cancel_flag.load(Ordering::Relaxed) {
+    // Race each stream.next() against the cancel watch channel.
+    // When abort_stream sends on the channel, we return immediately —
+    // the HTTP connection is dropped (TCP RST) instead of polling a flag.
+    loop {
+        // Fast-path: check before arming the select (non-blocking borrow)
+        if *cancel_rx.borrow() {
             eprintln!("[process_sse_stream] Canceled mid-stream for session {}", session_id);
             if !pending_text.is_empty() || !pending_thinking.is_empty() {
                 let ev = StreamEvent::ContentBlockDelta {
                     content: std::mem::take(&mut pending_text),
                     thinking: std::mem::take(&mut pending_thinking),
                 };
-                let _ = app.emit(&session_key, ev);
+                emit(&app, &session_key, ev);
             }
-            // Drop the stream (and HTTP connection) by returning
             return (None, assistant_text, assistant_thinking, Vec::new(), Vec::new());
         }
 
+        let item = tokio::select! {
+            _ = cancel_rx.changed() => {
+                if *cancel_rx.borrow() {
+                    eprintln!("[process_sse_stream] Canceled mid-stream for session {}", session_id);
+                    if !pending_text.is_empty() || !pending_thinking.is_empty() {
+                        let ev = StreamEvent::ContentBlockDelta {
+                            content: std::mem::take(&mut pending_text),
+                            thinking: std::mem::take(&mut pending_thinking),
+                        };
+                        emit(&app, &session_key, ev);
+                    }
+                    return (None, assistant_text, assistant_thinking, Vec::new(), Vec::new());
+                }
+                continue;
+            }
+            item = stream.next() => { item }
+        };
+
         match item {
-            Ok(bytes) => {
+            Some(Ok(bytes)) => {
                 if let Ok(text) = String::from_utf8(bytes.to_vec()) {
                     for line in text.lines() {
                         if let Some(data) = line.strip_prefix("data: ") {
@@ -759,8 +794,7 @@ async fn process_sse_stream(
                                     stop_reason = Some(reason);
                                 }
 
-                                // Capture cache usage from message_delta events.
-                                // MiniMax fields: cache_read (hit), cache_creation (write), input_tokens (post-breakpoint)
+                                // Capture cache usage from message_delta events
                                 if event["type"] == "message_delta" {
                                     if let Some(usage) = event["usage"].as_object() {
                                         let hit = usage.get("cache_read_input_tokens")
@@ -769,8 +803,6 @@ async fn process_sse_stream(
                                             .and_then(|v| v.as_u64()).unwrap_or(0);
                                         let input = usage.get("input_tokens")
                                             .and_then(|v| v.as_u64()).unwrap_or(0);
-                                        // cache_read = existing cache reused
-                                        // cache_creation + input_tokens = tokens not cached (just written + post-breakpoint)
                                         cache_hit_tokens += hit;
                                         cache_miss_tokens += create + input;
                                         eprintln!(
@@ -799,7 +831,7 @@ async fn process_sse_stream(
                                             content: std::mem::take(&mut pending_text),
                                             thinking: std::mem::take(&mut pending_thinking),
                                         };
-                                        let _ = app.emit(&session_key, ev);
+                                        emit(&app, &session_key, ev);
                                         last_emit = std::time::Instant::now();
                                     }
                                 }
@@ -808,19 +840,18 @@ async fn process_sse_stream(
                     }
                 }
             }
-            Err(e) => {
-                // Flush any remaining text before error
+            Some(Err(e)) => {
                 if !pending_text.is_empty() || !pending_thinking.is_empty() {
                     let ev = StreamEvent::ContentBlockDelta {
                         content: std::mem::take(&mut pending_text),
                         thinking: std::mem::take(&mut pending_thinking),
                     };
-                    let _ = app.emit(&session_key, ev);
+                    emit(&app, &session_key, ev);
                 }
-                let ev = StreamEvent::Error { content: format!("Stream error: {}", e) };
-                let _ = app.emit(&session_key, ev);
+                emit(&app, &session_key, StreamEvent::Error { content: format!("Stream error: {}", e) });
                 break;
             }
+            None => break,
         }
     }
 
@@ -830,14 +861,14 @@ async fn process_sse_stream(
             content: std::mem::take(&mut pending_text),
             thinking: std::mem::take(&mut pending_thinking),
         };
-        let _ = app.emit(&session_key, ev);
+        emit(&app, &session_key, ev);
     }
 
     // Emit cache usage stats for this turn
     if cache_hit_tokens > 0 || cache_miss_tokens > 0 {
         let total = cache_hit_tokens + cache_miss_tokens;
         let ratio = if total > 0 { cache_hit_tokens as f64 / total as f64 } else { 0.0 };
-        let _ = app.emit(&session_key, StreamEvent::CacheUsage {
+        emit(&app, &session_key, StreamEvent::CacheUsage {
             cache_hit_tokens,
             cache_miss_tokens,
             cache_hit_ratio: ratio,
@@ -881,7 +912,7 @@ async fn process_sse_stream(
             .unwrap_or(false);
 
         // Check cancel before tool dispatch
-        if cancel_flag.load(Ordering::Relaxed) {
+        if *cancel_rx.borrow() {
             eprintln!("[process_sse_stream] Canceled before tool dispatch for session {}", session_id);
             return (None, assistant_text, assistant_thinking, tool_uses, Vec::new());
         }
@@ -910,7 +941,7 @@ async fn process_sse_stream(
                 let (_tool_id, tool_name, final_input) = &tool_uses[i];
                 let input_json: serde_json::Value =
                     serde_json::from_str(final_input).unwrap_or(json!({}));
-                let _ = app.emit(&session_key, StreamEvent::ToolStart {
+                emit(&app, &session_key, StreamEvent::ToolStart {
                     tool: tool_name.clone(),
                     tool_id: _tool_id.clone(),
                     input: input_json,
@@ -934,14 +965,14 @@ async fn process_sse_stream(
                 let pending_asks = pending_asks.clone();
                 let app = app.clone();
                 let sid = session_id;
-                let cancel_flag = cancel_flag.clone();
+                let cancel_rx = cancel_rx.clone();
                 tokio::spawn(async move {
                     let result = execute_tool(
                         &tool_name, &final_input, sid,
                         api_key, api_url, model, provider,
                         skill_service, mcp_service,
                         db, lsp_manager, permission_service, pending_asks, app,
-                        cancel_flag,
+                        cancel_rx,
                     ).await;
                     (i, tool_name, result)
                 })
@@ -954,7 +985,7 @@ async fn process_sse_stream(
                 match r {
                     Ok((i, tool_name, result)) => {
                         let tool_id = tool_uses[i].0.clone();
-                        let _ = app.emit(&session_key, StreamEvent::ToolEnd {
+                        emit(&app, &session_key, StreamEvent::ToolEnd {
                             tool: tool_name.clone(),
                             tool_id: tool_id.clone(),
                             result: result.clone(),
@@ -962,7 +993,7 @@ async fn process_sse_stream(
                         tool_results.push((tool_name, tool_id, result));
                     }
                     Err(e) => {
-                        let _ = app.emit(&session_key, StreamEvent::Error {
+                        emit(&app, &session_key, StreamEvent::Error {
                             content: format!("Tool join error: {}", e),
                         });
                     }
@@ -1072,7 +1103,7 @@ async fn execute_tool(
     permission_service: Arc<StdMutex<PermissionService>>,
     pending_asks: PendingAsks,
     app_handle: AppHandle,
-    cancel_flag: Arc<AtomicBool>,
+    cancel_rx: watch::Receiver<bool>,
 ) -> String {
     let params: serde_json::Value = serde_json::from_str(input).unwrap_or(json!({}));
 
@@ -1244,7 +1275,7 @@ async fn execute_tool(
         "read_knowledge" => tool_read_knowledge(&params).await,
         "write_knowledge" => tool_write_knowledge(&params).await,
         "list_knowledge" => tool_list_knowledge().await,
-        "send_to_agent" => tool_send_to_agent(session_id, &params, api_key.clone(), skill_service.clone(), mcp_service.clone(), db.clone(), lsp_manager.clone(), permission_service.clone(), pending_asks.clone(), app_handle.clone(), cancel_flag.clone()).await,
+        "send_to_agent" => tool_send_to_agent(session_id, &params, api_key.clone(), skill_service.clone(), mcp_service.clone(), db.clone(), lsp_manager.clone(), permission_service.clone(), pending_asks.clone(), app_handle.clone(), cancel_rx.clone()).await,
         "read_lints" => tool_read_lints(&params, lsp_manager.clone(), db.clone()).await,
         "touch_file" => tool_touch_file(&params, lsp_manager.clone(), db.clone()).await,
         "ask_choice" => tool_ask_choice(&params, session_id, "unknown", pending_asks.clone(), app_handle.clone()).await,
@@ -1285,7 +1316,7 @@ async fn tool_send_to_agent(
     permission_service: Arc<StdMutex<PermissionService>>,
     pending_asks: PendingAsks,
     app_handle: AppHandle,
-    cancel_flag: Arc<AtomicBool>,
+    cancel_rx: watch::Receiver<bool>,
 ) -> String {
     let target_agent = params["target_agent"].as_str().unwrap_or("");
     let message = params["message"].as_str().unwrap_or("");
@@ -1294,8 +1325,8 @@ async fn tool_send_to_agent(
         return json!({"error": "target_agent and message are required"}).to_string();
     }
 
-    // Check parent cancel flag before spawning sub-agent
-    if cancel_flag.load(Ordering::Relaxed) {
+    // Check parent cancel before spawning sub-agent
+    if *cancel_rx.borrow() {
         return json!({"error": "Parent agent was aborted"}).to_string();
     }
 
@@ -1445,7 +1476,7 @@ async fn tool_send_to_agent(
             std::thread::spawn(move || {
                 handle.block_on(async move {
                     let agent = AgentService::new(api_key, api_url, messages_path, model, context_window, provider, skill_service, mcp_service, db, lm, pm, pa);
-                    agent.stream_chat(&agent_type, history, None, workspace, app, target_session_id, cancel_flag).await;
+                    agent.stream_chat(&agent_type, history, None, workspace, app, target_session_id, cancel_rx).await;
                 });
             });
 
