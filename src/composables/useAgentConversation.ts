@@ -314,17 +314,9 @@ export function useAgentConversation(agentType: string) {
       const ev = event.payload
       switch (ev.type) {
         case 'content_block_delta':
-          if (ev.content) {
-            fullText += ev.content
-            updateStreamState(finalSessionId, {
-              text: fullText,
-              thinking: fullThinking,
-              done: false,
-              toolCallCount
-            })
-          }
-          if (ev.thinking) {
-            fullThinking += ev.thinking
+          if (ev.content) fullText += ev.content
+          if (ev.thinking) fullThinking += ev.thinking
+          if (ev.content || ev.thinking) {
             updateStreamState(finalSessionId, {
               text: fullText,
               thinking: fullThinking,

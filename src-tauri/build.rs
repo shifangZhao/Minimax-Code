@@ -14,9 +14,7 @@ fn main() {
             .parent().unwrap(); // release or debug
         let skills_dst = target_root.join("skills");
         if let Err(e) = copy_dir(skills_src, &skills_dst) {
-            eprintln!("cargo:warning=Failed to copy skills: {}", e);
-        } else {
-            println!("cargo:warning=Skills copied to {}", skills_dst.display());
+            println!("cargo:warning=Failed to copy skills: {}", e);
         }
     }
 }

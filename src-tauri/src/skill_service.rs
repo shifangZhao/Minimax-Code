@@ -7,7 +7,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::process::Command;
 
 fn hidden_cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
@@ -311,32 +310,50 @@ pub async fn execute_skill(&self, skill_name: &str, script_name: Option<&str>) -
 // ===== matching helpers (standalone, not in impl) =====
 
 fn score_skill(query: &str, name: &str, desc: &str) -> f32 {
-    if name == query { return 1.0; }
-    if name.contains(query) || query.contains(name) { return 0.95; }
-    if desc.contains(query) { return 0.85; }
+    let ql = query.to_lowercase();
+    let nl = name.to_lowercase();
+    let dl = desc.to_lowercase();
 
-    let query_tokens = tokenize(query);
-    let name_tokens = tokenize(name);
-    let desc_tokens = tokenize(desc);
+    // Exact and substring — strongest signals
+    if nl == ql { return 1.0; }
+    if nl.contains(&ql) { return 0.95; }
+    if ql.contains(&nl) { return 0.90; }
+    if dl.contains(&ql) { return 0.80; }
 
-    let name_score = token_jaccard(&query_tokens, &name_tokens);
-    let desc_score = token_jaccard(&query_tokens, &desc_tokens);
+    let q_tokens = tokenize(&ql);
+    let n_tokens = tokenize(&nl);
+    let d_tokens = tokenize(&dl);
 
-    let q_bigrams = bigrams(query);
-    let d_bigrams = bigrams(desc);
-    let n_bigrams = bigrams(name);
-    let bg_desc = bigram_jaccard(&q_bigrams, &d_bigrams);
-    let bg_name = bigram_jaccard(&q_bigrams, &n_bigrams);
+    // Token hit ratio: what fraction of QUERY tokens appear in the target?
+    // This penalizes long queries much less than Jaccard.
+    let name_token_hits = q_tokens.iter().filter(|t| n_tokens.contains(t)).count() as f32;
+    let desc_token_hits = q_tokens.iter().filter(|t| d_tokens.contains(t)).count() as f32;
+    let name_tok = if q_tokens.is_empty() { 0.0 } else { name_token_hits / q_tokens.len() as f32 };
+    let desc_tok = if q_tokens.is_empty() { 0.0 } else { desc_token_hits / q_tokens.len() as f32 };
 
-    let name_combined = f32::max(name_score, bg_name * 1.2);
-    let desc_combined = f32::max(desc_score, bg_desc);
+    // Bigram hit ratio — same idea, captures partial CJK+Latin overlaps
+    let q_bg = bigrams(&ql);
+    let n_bg = bigrams(&nl);
+    let d_bg = bigrams(&dl);
+    let name_bg = bg_hit_ratio(&q_bg, &n_bg);
+    let desc_bg = bg_hit_ratio(&q_bg, &d_bg);
 
-    let score = name_combined * 0.35 + desc_combined * 0.65;
+    // Name is the primary signal (60%), description supports (40%)
+    let name_signal = f32::max(name_tok, name_bg);
+    let desc_signal = f32::max(desc_tok, desc_bg);
 
-    let has_token_hit = query_tokens.iter().any(|t| desc.contains(t.as_str()));
-    let boost = if has_token_hit { 1.15 } else { 1.0 };
+    // Semantic boost: query token appears directly in name
+    let has_direct_hit = q_tokens.iter().any(|t| n_tokens.contains(t));
+    let boost = if has_direct_hit { 1.25 } else { 1.0 };
 
-    (score * boost).min(0.84)
+    (name_signal * 0.6 + desc_signal * 0.4 * boost).min(0.93)
+}
+
+/// Fraction of query bigrams found in target (not Jaccard — no union penalty).
+fn bg_hit_ratio(query_bg: &[String], target_bg: &[String]) -> f32 {
+    if query_bg.is_empty() || target_bg.is_empty() { return 0.0; }
+    let hits = query_bg.iter().filter(|b| target_bg.contains(b)).count() as f32;
+    hits / query_bg.len() as f32
 }
 
 fn tokenize(text: &str) -> Vec<String> {
@@ -356,28 +373,10 @@ fn tokenize(text: &str) -> Vec<String> {
     tokens
 }
 
-fn token_jaccard(a: &[String], b: &[String]) -> f32 {
-    if a.is_empty() || b.is_empty() { return 0.0; }
-    let set_a: HashSet<&String> = a.iter().collect();
-    let set_b: HashSet<&String> = b.iter().collect();
-    let common = set_a.intersection(&set_b).count() as f32;
-    let union = set_a.union(&set_b).count() as f32;
-    common / union
-}
-
 fn bigrams(text: &str) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     if chars.len() < 2 { return chars.iter().map(|c| c.to_string()).collect(); }
     chars.windows(2).map(|w| w.iter().collect()).collect()
-}
-
-fn bigram_jaccard(a: &[String], b: &[String]) -> f32 {
-    if a.is_empty() || b.is_empty() { return 0.0; }
-    let set_a: HashSet<&String> = a.iter().collect();
-    let set_b: HashSet<&String> = b.iter().collect();
-    let common = set_a.intersection(&set_b).count() as f32;
-    let union = set_a.union(&set_b).count() as f32;
-    common / union
 }
 
 impl Default for SkillService {

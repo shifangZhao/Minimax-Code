@@ -4,10 +4,10 @@
 // Config loaded from ~/.minimaxcode/mcp.json (global) and {workspace}/.minimaxcode/mcp.json (project).
 // Tool naming: {server_name}_{tool_name} to avoid collisions across servers.
 
-use reqwest::blocking::Client as HttpClient;
+use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 fn hidden_cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
@@ -90,6 +90,7 @@ struct StdioTransport {
     pending: Arc<Mutex<HashMap<u64, std::sync::mpsc::Sender<serde_json::Value>>>>,
     process: Mutex<Child>,
     alive: Arc<AtomicBool>,
+    stderr_buf: Arc<Mutex<String>>,
 }
 
 struct HttpTransport {
@@ -99,17 +100,35 @@ struct HttpTransport {
 }
 
 impl Transport {
-    fn send_request(&self, request: &serde_json::Value, timeout_ms: u64) -> Result<serde_json::Value, String> {
+    async fn send_request(&self, request: &serde_json::Value, timeout_ms: u64) -> Result<serde_json::Value, String> {
         match self {
             Transport::Stdio(t) => t.send_request(request, timeout_ms),
-            Transport::Http(t) => t.send_request(request, timeout_ms),
+            Transport::Http(t) => t.send_request(request, timeout_ms).await,
         }
     }
 
-    fn send_notification(&self, notification: &serde_json::Value) -> Result<(), String> {
+    async fn send_notification(&self, notification: &serde_json::Value) -> Result<(), String> {
         match self {
             Transport::Stdio(t) => t.send_notification(notification),
-            Transport::Http(t) => t.send_notification(notification),
+            Transport::Http(t) => t.send_notification(notification).await,
+        }
+    }
+
+    fn is_alive(&self) -> bool {
+        match self {
+            Transport::Stdio(t) => t.alive.load(Ordering::SeqCst),
+            Transport::Http(_) => true,
+        }
+    }
+
+    fn stderr_snippet(&self) -> String {
+        match self {
+            Transport::Stdio(t) => {
+                let sb = t.stderr_buf.lock().unwrap();
+                let s = sb.trim();
+                if s.is_empty() { String::new() } else { format!("\nstderr: {}", &s[..s.len().min(500)]) }
+            }
+            Transport::Http(_) => String::new(),
         }
     }
 }
@@ -126,7 +145,7 @@ impl StdioTransport {
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
 
         // Merge environment
         for (k, v) in env {
@@ -143,15 +162,38 @@ impl StdioTransport {
 
         let stdin = child.stdin.take().expect("stdin");
         let stdout = child.stdout.take().expect("stdout");
+        let stderr = child.stderr.take().expect("stderr");
         let writer = Mutex::new(BufWriter::new(stdin));
         let pending: Arc<Mutex<HashMap<u64, std::sync::mpsc::Sender<serde_json::Value>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let alive = Arc::new(AtomicBool::new(true));
+        let stderr_buf = Arc::new(Mutex::new(String::new()));
 
         let reader_pending = pending.clone();
         let reader_alive = alive.clone();
         std::thread::spawn(move || {
             stdio_read_loop(stdout, &reader_pending, &reader_alive);
+        });
+
+        let stderr_buf_clone = stderr_buf.clone();
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = [0u8; 4096];
+            let mut reader = std::io::BufReader::new(stderr);
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if let Ok(s) = String::from_utf8(buf[..n].to_vec()) {
+                            let mut sb = stderr_buf_clone.lock().unwrap();
+                            if sb.len() < 8192 {
+                                sb.push_str(&s);
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
         });
 
         Some(Self {
@@ -160,6 +202,7 @@ impl StdioTransport {
             pending,
             process: Mutex::new(child),
             alive,
+            stderr_buf,
         })
     }
 
@@ -191,6 +234,7 @@ impl StdioTransport {
     fn send_notification(&self, notification: &serde_json::Value) -> Result<(), String> {
         write_stdio_message(&self.writer, notification)
     }
+
 }
 
 impl Drop for StdioTransport {
@@ -215,68 +259,76 @@ fn stdio_read_loop(
     pending: &Arc<Mutex<HashMap<u64, std::sync::mpsc::Sender<serde_json::Value>>>>,
     alive: &Arc<AtomicBool>,
 ) {
+    use std::io::Read;
     let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
     loop {
-        let msg = match read_stdio_message(&mut reader) {
-            Ok(Some(m)) => m,
-            Ok(None) => break,
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                let trimmed = line.trim().to_string();
+                if trimmed.is_empty() { continue; }
+
+                // Auto-detect framing:
+                // Content-Length: <N>  → read N bytes of JSON (standard MCP)
+                // { ... } or other JSON → parse directly (NDJSON)
+                if let Some(cl_val) = trimmed
+                    .to_lowercase()
+                    .strip_prefix("content-length:")
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                {
+                    // Content-Length framing: consume blank line, then read exact bytes
+                    let mut blank = String::new();
+                    let _ = reader.read_line(&mut blank);  // skip \r\n after header
+                    let mut body = vec![0u8; cl_val];
+                    if reader.read_exact(&mut body).is_err() { break; }
+                    match serde_json::from_slice::<serde_json::Value>(&body) {
+                        Ok(msg) => dispatch_msg(msg, pending),
+                        Err(e) => eprintln!("[mcp] JSON parse error (Content-Length): {}", e),
+                    }
+                } else {
+                    // NDJSON: each line is one JSON message
+                    match serde_json::from_str::<serde_json::Value>(&trimmed) {
+                        Ok(msg) => dispatch_msg(msg, pending),
+                        Err(e) => eprintln!("[mcp] JSON parse error (NDJSON): {} — {}", e, trimmed),
+                    }
+                }
+            }
             Err(e) => {
                 eprintln!("[mcp] Stdio read error: {}", e);
                 break;
             }
-        };
-        if let Some(id) = msg.get("id").and_then(|i| i.as_u64()) {
-            if let Some(tx) = pending.lock().unwrap().remove(&id) {
-                let _ = tx.send(msg);
-            }
         }
-        // Notifications (no id) are ignored for now
     }
     alive.store(false, Ordering::SeqCst);
     eprintln!("[mcp] Stdio reader thread exited");
 }
 
-fn read_stdio_message(reader: &mut BufReader<ChildStdout>) -> Result<Option<serde_json::Value>, String> {
-    let mut header = String::new();
-    loop {
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-            Ok(0) => return Ok(None),
-            Ok(_) => {
-                header.push_str(&line);
-                if line == "\r\n" || line == "\n" {
-                    break;
-                }
-            }
-            Err(e) => return Err(e.to_string()),
+fn dispatch_msg(msg: serde_json::Value, pending: &Arc<Mutex<HashMap<u64, std::sync::mpsc::Sender<serde_json::Value>>>>) {
+    if let Some(id) = msg.get("id").and_then(|i| i.as_u64()) {
+        if let Some(tx) = pending.lock().unwrap().remove(&id) {
+            let _ = tx.send(msg);
         }
     }
-
-    let content_length = header
-        .lines()
-        .find(|l| l.to_lowercase().starts_with("content-length"))
-        .and_then(|l| l.split(':').nth(1))
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .ok_or("Missing Content-Length header")?;
-
-    let mut body = vec![0u8; content_length];
-    reader.read_exact(&mut body).map_err(|e| format!("Failed to read body: {}", e))?;
-
-    serde_json::from_slice(&body).map_err(|e| format!("JSON parse: {}", e))
 }
 
 // ---- HTTP Transport ----
 
 impl HttpTransport {
-    fn new(url: &str, headers: &HashMap<String, String>) -> Self {
+    fn new(url: &str, headers: &HashMap<String, String>, timeout_ms: u64) -> Self {
+        let client = HttpClient::builder()
+            .timeout(std::time::Duration::from_millis(timeout_ms))
+            .build()
+            .unwrap_or_else(|_| HttpClient::new());
         Self {
             url: url.to_string(),
-            client: HttpClient::new(),
+            client,
             headers: headers.clone(),
         }
     }
 
-    fn send_request(&self, request: &serde_json::Value, _timeout_ms: u64) -> Result<serde_json::Value, String> {
+    async fn send_request(&self, request: &serde_json::Value, _timeout_ms: u64) -> Result<serde_json::Value, String> {
         let mut req_builder = self.client
             .post(&self.url)
             .header("Content-Type", "application/json");
@@ -288,9 +340,10 @@ impl HttpTransport {
         let response = req_builder
             .json(request)
             .send()
+            .await
             .map_err(|e| e.to_string())?;
 
-        let body: serde_json::Value = response.json().map_err(|e| e.to_string())?;
+        let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
 
         if let Some(err) = body.get("error") {
             Err(format!("MCP error: {}", err))
@@ -299,7 +352,7 @@ impl HttpTransport {
         }
     }
 
-    fn send_notification(&self, notification: &serde_json::Value) -> Result<(), String> {
+    async fn send_notification(&self, notification: &serde_json::Value) -> Result<(), String> {
         let mut req_builder = self.client
             .post(&self.url)
             .header("Content-Type", "application/json");
@@ -308,8 +361,7 @@ impl HttpTransport {
             req_builder = req_builder.header(k, v);
         }
 
-        // Fire and forget
-        let _ = req_builder.json(notification).send();
+        let _ = req_builder.json(notification).send().await;
         Ok(())
     }
 }
@@ -322,6 +374,17 @@ struct McpServer {
     tools: Vec<McpTool>,
     info: McpServerInfo,
     timeout: u64,
+}
+
+/// Status of an MCP server after config reload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerStatus {
+    pub name: String,
+    pub status: String,  // "connected", "disabled", "failed"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools_count: Option<usize>,
 }
 
 impl McpServer {
@@ -347,8 +410,8 @@ impl McpService {
         }
     }
 
-    /// Load config and connect servers. Call from async context.
-    pub async fn reload(&self, workspace: Option<&str>) {
+    /// Load config and connect servers. Returns per-server status.
+    pub async fn reload(&self, workspace: Option<&str>) -> Vec<McpServerStatus> {
         let mut merged = Self::load_config_at(&Self::global_config_dir());
         if let Some(ws) = workspace {
             let project = Self::load_config_at(&Self::project_config_dir(ws));
@@ -356,7 +419,7 @@ impl McpService {
                 merged.mcp_servers.insert(name, cfg);
             }
         }
-        self.init_from_config(&merged, workspace.unwrap_or("")).await;
+        self.init_from_config(&merged, workspace.unwrap_or("")).await
     }
 
     // ---- Config Loading ----
@@ -388,17 +451,51 @@ impl McpService {
         }
         match std::fs::read_to_string(&path) {
             Ok(content) => {
-                // Parse as raw JSON first, strip underscore-prefixed keys (used for comments),
-                // then deserialize as McpConfig.
                 let mut servers_map: HashMap<String, McpServerConfig> = HashMap::new();
-                if let Ok(raw) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(obj) = raw.get("mcpServers").and_then(|v| v.as_object()) {
+                if let Ok(mut raw) = serde_json::from_str::<serde_json::Value>(&content) {
+                    // OpenCode format: "mcp" → internal key
+                    if raw.get("mcpServers").is_none() {
+                        if let Some(mcp_obj) = raw.get("mcp").cloned() {
+                            raw["mcpServers"] = mcp_obj;
+                        }
+                    }
+                    if let Some(obj) = raw.get_mut("mcpServers").and_then(|v| v.as_object_mut()) {
+                        for (_key, val) in obj.iter_mut() {
+                            // "environment" (OpenCode) → "env"
+                            if val.get("env").is_none() {
+                                if let Some(env_obj) = val.get("environment").cloned() {
+                                    val["env"] = env_obj;
+                                }
+                            }
+                            // Infer type if missing (common in Claude/Cursor format)
+                            if val.get("type").is_none() {
+                                if val.get("command").is_some() {
+                                    val["type"] = serde_json::json!("local");
+                                } else if val.get("url").is_some() {
+                                    val["type"] = serde_json::json!("remote");
+                                }
+                            }
+                            // Merge "command": "uvx" + "args": [...] → "command": ["uvx", ...]
+                            if val.get("command").map(|c| c.is_string()).unwrap_or(false) {
+                                let cmd = val["command"].as_str().unwrap().to_string();
+                                let mut full = vec![cmd];
+                                if let Some(args) = val.get("args").and_then(|a| a.as_array()) {
+                                    for a in args {
+                                        if let Some(s) = a.as_str() {
+                                            full.push(s.to_string());
+                                        }
+                                    }
+                                }
+                                val["command"] = serde_json::json!(full);
+                            }
+                        }
                         for (key, val) in obj {
                             if key.starts_with('_') { continue; }
-                            if let Ok(cfg) = serde_json::from_value::<McpServerConfig>(val.clone()) {
-                                servers_map.insert(key.clone(), cfg);
-                            } else {
-                                eprintln!("[mcp] Skipping invalid server config: {}", key);
+                            match serde_json::from_value::<McpServerConfig>(val.clone()) {
+                                Ok(cfg) => { servers_map.insert(key.clone(), cfg); }
+                                Err(e) => {
+                                    eprintln!("[mcp] Skipping '{}': {}", key, e);
+                                }
                             }
                         }
                     }
@@ -413,7 +510,7 @@ impl McpService {
         }
     }
 
-    async fn init_from_config(&self, config: &McpConfig, workspace: &str) {
+    async fn init_from_config(&self, config: &McpConfig, workspace: &str) -> Vec<McpServerStatus> {
         let cwd = if workspace.is_empty() {
             std::env::current_dir()
                 .map(|p| p.to_string_lossy().to_string())
@@ -422,37 +519,92 @@ impl McpService {
             workspace.to_string()
         };
 
+        let mut statuses = Vec::new();
         let mut servers = self.servers.write().await;
+
+        // Purge dead servers
+        let dead: Vec<String> = servers
+            .iter()
+            .filter(|(_, s)| !s.transport.is_alive())
+            .map(|(n, _)| n.clone())
+            .collect();
+        for name in &dead {
+            servers.remove(name);
+            eprintln!("[mcp] Removed dead server: {}", name);
+        }
+
         for (name, server_config) in &config.mcp_servers {
             let enabled = match server_config {
                 McpServerConfig::Local { enabled, .. } => *enabled,
                 McpServerConfig::Remote { enabled, .. } => *enabled,
             };
-            if !enabled || servers.contains_key(name) {
+            if !enabled {
+                statuses.push(McpServerStatus {
+                    name: name.clone(),
+                    status: "disabled".to_string(),
+                    error: None,
+                    tools_count: None,
+                });
                 continue;
             }
-            match Self::connect_server(name, server_config, &cwd) {
+            if servers.contains_key(name) {
+                // Already connected — report existing status
+                if let Some(s) = servers.get(name) {
+                    statuses.push(McpServerStatus {
+                        name: name.clone(),
+                        status: "connected".to_string(),
+                        error: None,
+                        tools_count: Some(s.tools.len()),
+                    });
+                }
+                continue;
+            }
+            match Self::connect_server(name, server_config, &cwd).await {
                 Ok(server) => {
+                    let tc = server.tools.len();
                     eprintln!("[mcp] Connected to {} ({})", name, server.info.name);
+                    statuses.push(McpServerStatus {
+                        name: name.clone(),
+                        status: "connected".to_string(),
+                        error: None,
+                        tools_count: Some(tc),
+                    });
                     servers.insert(name.clone(), server);
                 }
                 Err(e) => {
                     eprintln!("[mcp] Failed to connect {}: {}", name, e);
+                    statuses.push(McpServerStatus {
+                        name: name.clone(),
+                        status: "failed".to_string(),
+                        error: Some(e),
+                        tools_count: None,
+                    });
                 }
             }
         }
+        statuses
     }
 
-    fn connect_server(name: &str, config: &McpServerConfig, cwd: &str) -> Result<McpServer, String> {
+    async fn connect_server(name: &str, config: &McpServerConfig, cwd: &str) -> Result<McpServer, String> {
         let (transport, timeout) = match config {
             McpServerConfig::Local { command, env, timeout, .. } => {
+                // Pre-flight: check if the executable can be found
+                let exe = &command[0];
+                if which::which(exe).is_err() {
+                    return Err(format!(
+                        "找不到命令 '{}'——请确认已安装并加入 PATH。当前 PATH: {}",
+                        exe,
+                        std::env::var("PATH").unwrap_or_default()
+                    ));
+                }
                 let t = StdioTransport::spawn(command, env, cwd)
                     .ok_or_else(|| format!("Failed to spawn: {:?}", command))?;
                 (Transport::Stdio(t), timeout.unwrap_or(crate::MCP_HTTP_TIMEOUT_SECS * 1000))
             }
             McpServerConfig::Remote { url, headers, timeout, .. } => {
-                let t = HttpTransport::new(url, headers);
-                (Transport::Http(t), timeout.unwrap_or(crate::MCP_HTTP_TIMEOUT_SECS * 1000))
+                let ms = timeout.unwrap_or(crate::MCP_HTTP_TIMEOUT_SECS * 1000);
+                let t = HttpTransport::new(url, headers, ms);
+                (Transport::Http(t), ms)
             }
         };
 
@@ -471,7 +623,7 @@ impl McpService {
                 }
             }),
             timeout,
-        )?;
+        ).await.map_err(|e| format!("{}{}", e, transport.stderr_snippet()))?;
 
         let info = McpServerInfo {
             name: init_result
@@ -492,7 +644,7 @@ impl McpService {
         transport.send_notification(&serde_json::json!({
             "jsonrpc": "2.0",
             "method": "notifications/initialized"
-        })).ok();
+        })).await.ok();
 
         // List tools
         let tools_result = transport.send_request(
@@ -502,7 +654,7 @@ impl McpService {
                 "params": {}
             }),
             timeout,
-        )?;
+        ).await.map_err(|e| format!("{}{}", e, transport.stderr_snippet()))?;
 
         let tools: Vec<McpTool> = tools_result
             .get("tools")
@@ -542,7 +694,7 @@ impl McpService {
             enabled: true,
             timeout: None,
         };
-        let server = Self::connect_server(&name, &config, ".")?;
+        let server = Self::connect_server(&name, &config, ".").await?;
         servers.insert(name, server);
         Ok(())
     }
@@ -574,10 +726,14 @@ impl McpService {
     }
 
     /// Get all MCP tools from all connected servers, with server-name prefix.
+    /// Skips dead servers (stdio process crashed).
     pub async fn get_all_tools(&self) -> Vec<McpTool> {
         let servers = self.servers.read().await;
         let mut all = Vec::new();
         for server in servers.values() {
+            if !server.transport.is_alive() {
+                continue;
+            }
             all.extend(server.get_prefixed_tools());
         }
         all
@@ -589,17 +745,13 @@ impl McpService {
         tool_name: &str,
         args: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        let (timeout, server_exists) = {
-            let servers = self.servers.read().await;
-            servers.get(server_name).map(|s| (s.timeout, true)).unwrap_or((crate::MCP_HTTP_TIMEOUT_SECS * 1000, false))
-        };
-        if !server_exists {
-            return Err(format!("Server not found: {}", server_name));
-        }
-
-        // Re-acquire read lock to get transport reference
         let servers = self.servers.read().await;
-        let server = servers.get(server_name).ok_or_else(|| format!("Server not found: {}", server_name))?;
+        let server = servers.get(server_name)
+            .ok_or_else(|| format!("Server not found: {}", server_name))?;
+
+        if !server.transport.is_alive() {
+            return Err(format!("Server '{}' is not running (process exited)", server_name));
+        }
 
         server.transport.send_request(
             &serde_json::json!({
@@ -610,8 +762,8 @@ impl McpService {
                     "arguments": args
                 }
             }),
-            timeout,
-        )
+            server.timeout,
+        ).await
     }
 
     /// Call any MCP tool by its prefixed name (format: server_toolname).
@@ -619,32 +771,27 @@ impl McpService {
         let servers = self.servers.read().await;
         for (server_name, server) in servers.iter() {
             let prefix = format!("{}_", server_name);
-            if full_name.starts_with(&prefix) {
-                let tool_name = &full_name[prefix.len()..];
-                // Verify the tool exists
-                if server.tools.iter().any(|t| t.name == tool_name) {
-                    let server_name = server_name.clone();
-                    let tool_name = tool_name.to_string();
-                    let timeout = server.timeout;
-                    drop(servers);
-
-                    let servers = self.servers.read().await;
-                    let server = servers.get(&server_name)
-                        .ok_or_else(|| format!("Server disappeared: {}", server_name))?;
-
-                    return server.transport.send_request(
-                        &serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "method": "tools/call",
-                            "params": {
-                                "name": tool_name,
-                                "arguments": args
-                            }
-                        }),
-                        timeout,
-                    );
-                }
+            if !full_name.starts_with(&prefix) {
+                continue;
             }
+            let tool_name = &full_name[prefix.len()..];
+            if !server.tools.iter().any(|t| t.name == tool_name) {
+                continue;
+            }
+            if !server.transport.is_alive() {
+                return Err(format!("Server '{}' is not running (process exited)", server_name));
+            }
+            return server.transport.send_request(
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "tools/call",
+                    "params": {
+                        "name": tool_name,
+                        "arguments": args
+                    }
+                }),
+                server.timeout,
+            ).await;
         }
         Err(format!("Tool not found: {}", full_name))
     }

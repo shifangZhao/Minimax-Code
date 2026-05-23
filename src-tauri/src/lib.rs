@@ -12,7 +12,7 @@ mod system_prompts;
 pub(crate) const DEFAULT_API_URL: &str = "https://api.minimaxi.com";
 pub(crate) const SEARCH_TIMEOUT_SECS: u64 = 30;
 pub(crate) const VLM_TIMEOUT_SECS: u64 = 60;
-pub(crate) const MCP_HTTP_TIMEOUT_SECS: u64 = 30;
+pub(crate) const MCP_HTTP_TIMEOUT_SECS: u64 = 10;
 
 use agent_service::{AgentService, Message, StreamEvent};
 use lsp_manager::LspManager;
@@ -1612,28 +1612,10 @@ async fn mcp_reload(state: State<'_, AppState>) -> Result<String, String> {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         conn.query_row("SELECT workspace FROM app_config", [], |row| row.get(0)).ok()
     };
-    // Reload skills and MCP config
     state.skill_service.load_all_skills().await;
-    // For MCP, we need to drop the existing servers and reconnect from config
-    // McpService::reload accepts &self and workspace
-    let mcp = state.mcp_service.clone();
-    let svc = mcp.read().await;
-    drop(svc);
-    // McpService internally uses RwLock for servers, reload is &self
-    let _ = state.mcp_service.read().await;
-    // Actually, reload needs to be called. The issue is it's behind Arc<RwLock>.
-    // Let me restructure: just call reload on the inner service.
-    // We need a write lock to replace the content, but reload takes &self (read lock).
-    // The solution: drop all servers and re-init.
-    // Simplest: clone the Arc, then in a spawned task, acquire read and call reload.
-    let mcp_clone = state.mcp_service.clone();
-    let ws_clone = workspace.clone();
-    let result = tokio::task::spawn(async move {
-        let svc = mcp_clone.read().await;
-        svc.reload(ws_clone.as_deref()).await;
-        format!("MCP config reloaded{}", if ws_clone.is_some() { format!(" for workspace: {}", ws_clone.unwrap()) } else { String::new() })
-    }).await.map_err(|e| format!("Task failed: {}", e))?;
-    Ok(result)
+    let svc = state.mcp_service.read().await;
+    let statuses = svc.reload(workspace.as_deref()).await;
+    Ok(serde_json::to_string(&statuses).unwrap_or_default())
 }
 
 #[tauri::command]
@@ -1909,21 +1891,17 @@ fn init_user_dir() {
     let mcp_config = base.join("mcp.json");
     if !mcp_config.exists() {
         let template = serde_json::json!({
-            "mcpServers": {
-                "_comment": "=== MCP Server 配置模板 ===",
-                "_local_example": {
+            "mcp": {
+                "example-local": {
                     "type": "local",
                     "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem"],
-                    "env": {},
-                    "enabled": false,
-                    "timeout": 30000
+                    "enabled": false
                 },
-                "_remote_example": {
+                "example-remote": {
                     "type": "remote",
                     "url": "https://example.com/mcp",
                     "headers": {},
-                    "enabled": false,
-                    "timeout": 30000
+                    "enabled": false
                 }
             }
         });
@@ -2387,8 +2365,10 @@ pub fn run() {
             let skill_service_clone = skill_service.clone();
             tauri::async_runtime::spawn(async move {
                 skill_service_clone.load_all_skills().await;
-                eprintln!("[startup] Skills loaded: {} skills available",
-                    skill_service_clone.list_skills(None).await.len());
+                let user_count = skill_service_clone.list_skills(None).await.len();
+                let builtin_count = skill_service_clone.list_skills(Some("builtin")).await.len();
+                eprintln!("[startup] Skills loaded: {} user/project, {} builtin",
+                    user_count, builtin_count);
             });
 
             Ok(())

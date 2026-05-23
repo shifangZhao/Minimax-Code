@@ -347,11 +347,22 @@ impl AgentService {
         let session_key = format!("agent_stream_{}", session_id);
         eprintln!("[stream_chat] session_key: {}", session_key);
 
-        // Load project skills if workspace is set
+        // Load project skills if workspace is set.
+        // MCP reload is spawned in background — don't block the first API turn
+        // waiting for slow server connections.
         if let Some(ref ws) = workspace {
             skill_service.load_project_skills(ws).await;
-            let mcp = mcp_service.read().await;
-            mcp.reload(Some(ws)).await;
+            let mcp = mcp_service.clone();
+            let ws_clone = ws.clone();
+            tokio::spawn(async move {
+                let svc = mcp.read().await;
+                let statuses = svc.reload(Some(&ws_clone)).await;
+                for s in &statuses {
+                    if s.status == "failed" {
+                        eprintln!("[stream_chat] MCP {} failed: {:?}", s.name, s.error);
+                    }
+                }
+            });
         }
 
         // Build system prompt based on agent type
@@ -981,9 +992,8 @@ async fn process_sse_stream(
 
             // Run chunk concurrently
             let futs: Vec<_> = chunk.iter().map(|&i| {
-                let (_tool_id, tool_name, final_input) = &tool_uses[i];
-                let tool_name = tool_name.clone();
-                let final_input = final_input.clone();
+                let tool_name = tool_uses[i].1.clone();
+                let final_input = tool_uses[i].2.clone();
                 let api_key = api_key.clone();
                 let api_url = api_url.clone();
                 let model = model.clone();
@@ -1302,7 +1312,7 @@ async fn execute_tool(
         "list_builtin_skills" => tool_list_builtin_skills(tool_name, &params, skill_service.clone()).await,
         "list_user_skills" => tool_list_user_skills(tool_name, &params, skill_service.clone()).await,
         "match_skills" => tool_match_skills(tool_name, &params, skill_service.clone()).await,
-        "mcp_reload" => tool_mcp_reload(&params, mcp_service.clone(), skill_service.clone()).await,
+        "mcp_reload" => tool_mcp_reload(&params, mcp_service.clone(), skill_service.clone(), db.clone()).await,
         "execute_skill" => tool_execute_skill(tool_name, &params, skill_service.clone()).await,
         "read_knowledge" => tool_read_knowledge(&params).await,
         "write_knowledge" => tool_write_knowledge(&params).await,
@@ -3021,20 +3031,42 @@ async fn tool_mcp_reload(
     _params: &serde_json::Value,
     mcp_service: Arc<RwLock<McpService>>,
     skill_service: Arc<SkillService>,
+    db: Arc<StdMutex<Connection>>,
 ) -> String {
-    // Reload skills from all sources
     skill_service.load_all_skills().await;
-    // Reload MCP servers from config files
+    let workspace: Option<String> = {
+        if let Ok(conn) = db.lock() {
+            conn.query_row("SELECT workspace FROM app_config", [], |row| row.get(0)).ok()
+        } else {
+            None
+        }
+    };
     let mcp = mcp_service.read().await;
-    // Read workspace from DB to pass to reload
-    let workspace: Option<String> = None; // Can't access DB here; reload will use current workspace
-    mcp.reload(workspace.as_deref()).await;
-    let server_count = mcp.list_servers().await.len();
+    let statuses = mcp.reload(workspace.as_deref()).await;
     let tool_count = mcp.get_all_tools().await.len();
-    serde_json::to_string(&serde_json::json!({
+    let config_info = if let Some(ref ws) = workspace {
+        format!("全局 + 项目 ({})", ws)
+    } else {
+        "全局".to_string()
+    };
+    let connected = statuses.iter().filter(|s| s.status == "connected").count();
+    let failed: Vec<_> = statuses.iter().filter(|s| s.status == "failed").collect();
+    let disabled: Vec<_> = statuses.iter().filter(|s| s.status == "disabled").collect();
+    let mut result = serde_json::json!({
         "success": true,
-        "message": format!("MCP 配置已重载：{} 个服务器，{} 个工具可用", server_count, tool_count)
-    })).unwrap_or_default()
+        "message": format!("MCP 配置已重载 ({}): {} 个服务器连接成功，{} 个工具可用", config_info, connected, tool_count)
+    });
+    if !failed.is_empty() {
+        result["failed"] = serde_json::Value::Array(
+            failed.iter().map(|s| serde_json::json!({"name": s.name, "error": s.error})).collect()
+        );
+    }
+    if !disabled.is_empty() {
+        result["disabled"] = serde_json::Value::Array(
+            disabled.iter().map(|s| serde_json::json!({"name": s.name})).collect()
+        );
+    }
+    serde_json::to_string(&result).unwrap_or_default()
 }
 
 async fn tool_skill(_tool_name: &str, params: &serde_json::Value, skill_service: Arc<SkillService>) -> String {
