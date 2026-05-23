@@ -14,9 +14,9 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
           - os: macos-latest
-            target: x86_64-apple-darwin
-          - os: macos-latest
             target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
 
@@ -41,6 +41,18 @@ jobs:
           workspaces: src-tauri -> target
           key: ${{ matrix.target }}
 
+      - name: Setup China mirrors
+        run: |
+          mkdir -p ~/.cargo
+          cat > ~/.cargo/config.toml << 'EOF'
+          [source.crates-io]
+          replace-with = "ustc"
+
+          [source.ustc]
+          registry = "https://mirrors.ustc.edu.cn/crates.io-index"
+          EOF
+          npm config set registry https://registry.npmmirror.com
+
       - name: Install dependencies (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -50,15 +62,36 @@ jobs:
       - name: Install frontend deps
         run: npm ci
 
-      - name: Build Tauri
-        uses: tauri-apps/tauri-action@v0
+      - name: Build & Bundle (Windows)
+        if: matrix.os == 'windows-latest'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          args: --target ${{ matrix.target }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+        run: npx tauri build --target ${{ matrix.target }}
 
-      - name: Upload artifacts
+      - name: Build & Bundle (macOS / Linux)
+        if: matrix.os != 'windows-latest'
+        run: npx tauri build --target ${{ matrix.target }}
+
+      - name: Upload artifacts (Windows)
+        if: matrix.os == 'windows-latest'
         uses: actions/upload-artifact@v4
         with:
-          name: minimax-code-${{ matrix.os }}-${{ matrix.target }}
+          name: minimax-code-windows-${{ matrix.target }}
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/nsis/
+            src-tauri/target/${{ matrix.target }}/release/bundle/msi/
+
+      - name: Upload artifacts (macOS)
+        if: startsWith(matrix.os, 'macos')
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimax-code-macos-${{ matrix.target }}
+          path: src-tauri/target/${{ matrix.target }}/release/bundle/dmg/
+
+      - name: Upload artifacts (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimax-code-linux-${{ matrix.target }}
           path: src-tauri/target/${{ matrix.target }}/release/bundle/
