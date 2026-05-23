@@ -1013,6 +1013,20 @@ onDeactivated(() => {
   color: var(--text-primary);
 }
 
+/* Soften highlight.js syntax colors */
+.text :deep(.hljs-keyword)  { color: #708; }
+.text :deep(.hljs-string)   { color: #a50; }
+.text :deep(.hljs-comment)  { color: #998; font-style: italic; }
+.text :deep(.hljs-number)   { color: #a50; }
+.text :deep(.hljs-literal)  { color: #a50; }
+.text :deep(.hljs-built_in) { color: #708; }
+.text :deep(.hljs-type)     { color: #708; }
+.text :deep(.hljs-function) { color: #36a; }
+.text :deep(.hljs-title)    { color: #36a; }
+.text :deep(.hljs-attr)     { color: #a50; }
+.text :deep(.hljs-params)   { color: var(--text-primary); }
+.text :deep(.hljs-meta)     { color: #998; }
+
 .text :deep(a) {
   color: var(--accent);
   text-decoration: none;
