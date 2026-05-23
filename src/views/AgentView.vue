@@ -402,7 +402,15 @@ const displayMessages = computed(() => {
     })
 })
 
-function formatContent(text: string): string {
+function formatContent(text: string, streaming?: boolean): string {
+  if (streaming && text) {
+    // Defer unclosed fenced code blocks — prevent half the page from
+    // flashing into code-style while the LLM is still typing.
+    const lastOpen = text.lastIndexOf('```')
+    if (lastOpen >= 0 && text.slice(lastOpen).split('\n').filter(l => l.trim().startsWith('```')).length % 2 !== 0) {
+      text = text.slice(0, lastOpen)
+    }
+  }
   return renderMarkdown(text) || ''
 }
 

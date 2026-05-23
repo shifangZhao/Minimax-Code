@@ -291,9 +291,6 @@ export function useAgentConversation(agentType: string) {
     let fullText = ''
     let fullThinking = ''
     let toolCallCount = 0
-    let isDone = false
-    let hasError = false
-
     // 收集 tool_calls 信息
     const collectedToolCalls: Array<{
       id: string
@@ -307,6 +304,22 @@ export function useAgentConversation(agentType: string) {
       streamListeners.delete(finalSessionId)
     }
 
+    // Promise-based completion — replaces the polling loop
+    let resolveStream: (() => void) | null = null
+    const streamComplete = new Promise<void>(r => { resolveStream = r })
+
+    // rAF pacing: buffer rapid stream events and flush once per animation frame
+    let rAFPending = false
+    const flushRAF = () => {
+      rAFPending = false
+      updateStreamState(finalSessionId, {
+        text: fullText,
+        thinking: fullThinking,
+        done: false,
+        toolCallCount
+      })
+    }
+
     // Set up event listener for real-time streaming
     console.log('[sendMessage] Setting up event listener for:', `agent_stream_${finalSessionId}`)
     const unlisten = await listen<RustStreamEvent>(`agent_stream_${finalSessionId}`, (event) => {
@@ -317,39 +330,22 @@ export function useAgentConversation(agentType: string) {
           if (ev.content) fullText += ev.content
           if (ev.thinking) fullThinking += ev.thinking
           if (ev.content || ev.thinking) {
-            updateStreamState(finalSessionId, {
-              text: fullText,
-              thinking: fullThinking,
-              done: false,
-              toolCallCount
-            })
+            if (!rAFPending) {
+              rAFPending = true
+              requestAnimationFrame(flushRAF)
+            }
           }
           break
         case 'tool_start':
           toolCallCount++
-          // 收集 tool_call 信息
           if (ev.tool_id && ev.tool) {
             collectedToolCalls.push({
-              id: ev.tool_id,
-              type: 'function',
-              function: {
-                name: ev.tool,
-                arguments: JSON.stringify(ev.input || {})
-              }
+              id: ev.tool_id, type: 'function',
+              function: { name: ev.tool, arguments: JSON.stringify(ev.input || {}) }
             })
           }
-          toolEvents.value.push({
-            type: 'tool_start',
-            tool: ev.tool || '',
-            tool_id: ev.tool_id || '',
-            input: ev.input
-          })
-          updateStreamState(finalSessionId, {
-            text: fullText,
-            thinking: fullThinking,
-            done: false,
-            toolCallCount
-          })
+          toolEvents.value.push({ type: 'tool_start', tool: ev.tool || '', tool_id: ev.tool_id || '', input: ev.input })
+          if (!rAFPending) { rAFPending = true; requestAnimationFrame(flushRAF) }
           break
         case 'tool_end':
           toolEvents.value.push({
@@ -360,23 +356,17 @@ export function useAgentConversation(agentType: string) {
           })
           break
         case 'done':
-          isDone = true
-          // Immediately show final content so there's no gap before loadMessages
+          resolveStream?.()
+          if (rAFPending) { rAFPending = false; flushRAF() }
           updateStreamState(finalSessionId, {
-            text: fullText,
-            thinking: fullThinking,
-            done: false,
-            toolCallCount
+            text: fullText, thinking: fullThinking, done: false, toolCallCount
           })
           break
         case 'aborted':
-          isDone = true
-          // Keep done:false so streaming div stays visible until fallback saves it
+          resolveStream?.()
+          if (rAFPending) { rAFPending = false; flushRAF() }
           updateStreamState(finalSessionId, {
-            text: fullText,
-            thinking: fullThinking,
-            done: false,
-            toolCallCount
+            text: fullText, thinking: fullThinking, done: false, toolCallCount
           })
           break
         case 'cache_usage':
@@ -394,7 +384,7 @@ export function useAgentConversation(agentType: string) {
           sessionTokenUsage.set(finalSessionId, tu)
           break
         case 'error':
-          hasError = true
+          resolveStream?.()
           fullText += `\n\nError: ${ev.content}`
           updateStreamState(finalSessionId, {
             text: fullText,
@@ -421,12 +411,12 @@ export function useAgentConversation(agentType: string) {
       })
       console.log('[sendMessage] invoke completed')
 
-      // Wait for stream to complete
+      // Wait for stream to complete (event-driven, no polling)
       console.log('[sendMessage] Waiting for stream...')
-      const startTime = Date.now()
-      while (!isDone && !hasError && Date.now() - startTime < 120000) {
-        await new Promise(resolve => setTimeout(resolve, 100))
-      }
+      await Promise.race([
+        streamComplete,
+        new Promise(r => setTimeout(r, 120000))
+      ])
 
       // Final state update — keep done:false so streaming content stays visible
       // until loadMessages() populates the persisted message in the messages list.
@@ -494,7 +484,6 @@ export function useAgentConversation(agentType: string) {
 
     } catch (e: any) {
       console.error('Agent error:', e)
-      hasError = true
       const errorMsg = `Error: ${e.toString()}`
       updateStreamState(finalSessionId, {
         text: errorMsg,

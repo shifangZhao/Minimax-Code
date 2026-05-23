@@ -8,39 +8,56 @@ use serde_json::Value;
 
 const COMPRESS_THRESHOLD: f64 = 0.8;
 
-// Token estimation using character-class weighting.
-// CJK characters are token-dense (~1.5 chars/token). ASCII text is sparse (~4 chars/token).
-// JSON structural characters are individually significant and counted at 1:1.
+// Token estimation using head+tail sampling for large content.
+// Avoids O(n) full serialization when tool outputs (read_file / grep) are large.
+const SAMPLE_BOUND: usize = 4096;       // chars to sample from head and tail each
+const FULL_SCAN_BOUND: usize = 16384;   // below this, scan everything
+
 pub fn estimate_tokens(messages: &[Value]) -> usize {
+    let mut total = 0usize;
+    for m in messages {
+        let text = serde_json::to_string(m).unwrap_or_default();
+        total += estimate_one(&text);
+    }
+    total
+}
+
+fn estimate_one(text: &str) -> usize {
+    let len = text.chars().count();
+    if len <= FULL_SCAN_BOUND {
+        return count_tokens_from_chars(text);
+    }
+    // Sample head + tail, compute ratio, extrapolate
+    let head: String = text.chars().take(SAMPLE_BOUND).collect();
+    let tail: String = text.chars().rev().take(SAMPLE_BOUND).collect::<Vec<_>>().into_iter().rev().collect();
+    let sample_chars = head.chars().count() + tail.chars().count();
+    let sample_tokens = count_tokens_from_chars(&head) + count_tokens_from_chars(&tail);
+    if sample_chars == 0 { return 0; }
+    let ratio = sample_tokens as f64 / sample_chars as f64;
+    (len as f64 * ratio) as usize
+}
+
+fn count_tokens_from_chars(text: &str) -> usize {
     let mut cjk = 0usize;
     let mut ascii_alpha = 0usize;
     let mut json_structural = 0usize;
     let mut other = 0usize;
-
-    for m in messages {
-        for ch in serde_json::to_string(m).unwrap_or_default().chars() {
-            match ch {
-                '\u{4E00}'..='\u{9FFF}'   // CJK Unified Ideographs
-                | '\u{3400}'..='\u{4DBF}' // CJK Extension A
-                | '\u{20000}'..='\u{2A6DF}' // CJK Extension B
-                | '\u{F900}'..='\u{FAFF}' // CJK Compatibility Ideographs
-                | '\u{3040}'..='\u{309F}' // Hiragana
-                | '\u{30A0}'..='\u{30FF}' // Katakana
-                | '\u{AC00}'..='\u{D7AF}' // Hangul
-                => cjk += 1,
-                '{' | '}' | '[' | ']' | '"' | ':' | ',' => json_structural += 1,
-                'a'..='z' | 'A'..='Z' | '0'..='9' => ascii_alpha += 1,
-                _ => other += 1,
-            }
+    for ch in text.chars() {
+        match ch {
+            '\u{4E00}'..='\u{9FFF}'
+            | '\u{3400}'..='\u{4DBF}'
+            | '\u{20000}'..='\u{2A6DF}'
+            | '\u{F900}'..='\u{FAFF}'
+            | '\u{3040}'..='\u{309F}'
+            | '\u{30A0}'..='\u{30FF}'
+            | '\u{AC00}'..='\u{D7AF}'
+            => cjk += 1,
+            '{' | '}' | '[' | ']' | '"' | ':' | ',' => json_structural += 1,
+            'a'..='z' | 'A'..='Z' | '0'..='9' => ascii_alpha += 1,
+            _ => other += 1,
         }
     }
-
-    // CJK: ~1.5 chars per token, ASCII text: ~4 chars per token,
-    // JSON structural: 1 char per token, other: ~3 chars per token
-    (cjk as f64 / 1.5) as usize
-        + ascii_alpha / 4
-        + json_structural
-        + other / 3
+    (cjk as f64 / 1.5) as usize + ascii_alpha / 4 + json_structural + other / 3
 }
 
 /// Compress api_messages in-place when token budget exceeds 80%.
