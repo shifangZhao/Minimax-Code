@@ -14,7 +14,8 @@ pub(crate) const SEARCH_TIMEOUT_SECS: u64 = 30;
 pub(crate) const VLM_TIMEOUT_SECS: u64 = 60;
 pub(crate) const MCP_HTTP_TIMEOUT_SECS: u64 = 30;
 
-use agent_service::{AgentService, Message};
+use agent_service::{AgentService, Message, StreamEvent};
+use futures::FutureExt;
 use lsp_manager::LspManager;
 use mcp_service::{McpService, McpTool};
 use permission::{PermissionService, PermissionMode, PermissionAction};
@@ -23,9 +24,23 @@ use serde::{Deserialize, Serialize};
 use skill_service::{Skill, SkillMatch, SkillService};
 use std::collections::HashMap;
 use std::process::Command;
+use std::sync::atomic::AtomicBool;
+
+fn hidden_cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut cmd = Command::new(program.as_ref());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
 use std::sync::{Arc, Mutex};
 use tokio::sync::{oneshot, RwLock};
-use tauri::{State, Window, AppHandle};
+use tauri::{State, Window, AppHandle, Emitter};
+
+type CancelRegistry = Arc<Mutex<HashMap<i64, Arc<AtomicBool>>>>;
 
 struct AppState {
     db: Arc<Mutex<Connection>>,
@@ -34,6 +49,7 @@ struct AppState {
     lsp_manager: Arc<Mutex<Option<LspManager>>>,
     permission_service: Arc<Mutex<PermissionService>>,
     pending_asks: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
+    cancel_registry: CancelRegistry,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -602,17 +618,16 @@ pub struct CommandOutput {
 #[tauri::command]
 fn run_command(command: String, cwd: Option<String>) -> Result<CommandOutput, String> {
     let (cmd, args) = if cfg!(windows) {
-        ("cmd", vec!["/C".to_string(), command])
+        ("powershell", vec!["-NoProfile".to_string(), "-NonInteractive".to_string(), "-Command".to_string(), command])
     } else {
         ("sh", vec!["-c".to_string(), command])
     };
 
-    let mut process = Command::new(cmd);
+    let mut process = hidden_cmd(cmd);
     if let Some(dir) = cwd {
         process.current_dir(dir);
     }
-    process.arg(&args[0]);
-    for arg in &args[1..] {
+    for arg in &args {
         process.arg(arg);
     }
 
@@ -826,12 +841,12 @@ fn git_stash_pop(repo_path: String) -> Result<CommandOutput, String> {
 fn run_git_command(repo_path: &str, args: &str) -> Result<CommandOutput, String> {
     let escaped_path = std::path::Path::new(repo_path).display().to_string();
     let (cmd, shell_args) = if cfg!(windows) {
-        ("cmd", vec!["/C".to_string(), format!("git -C \"{}\" {}", escaped_path, args)])
+        ("powershell", vec!["-NoProfile".to_string(), "-NonInteractive".to_string(), "-Command".to_string(), format!("git -C \"{}\" {}", escaped_path, args)])
     } else {
         ("sh", vec!["-c".to_string(), format!("git -C \"{}\" {}", repo_path, args)])
     };
 
-    let output = Command::new(cmd)
+    let output = hidden_cmd(cmd)
         .args(&shell_args[1..])
         .output()
         .map_err(|e| format!("Failed to run git command: {}", e))?;
@@ -1000,16 +1015,19 @@ pub struct EnvInfo {
 }
 
 fn run_simple_cmd(cmd: &str) -> Result<String, String> {
-    let (shell, arg) = if cfg!(windows) {
-        ("cmd", "/C")
+    let output = if cfg!(windows) {
+        hidden_cmd("powershell")
+            .arg("-NoProfile")
+            .arg("-NonInteractive")
+            .arg("-Command")
+            .arg(cmd)
+            .output()
     } else {
-        ("sh", "-c")
-    };
-    let output = Command::new(shell)
-        .arg(arg)
-        .arg(cmd)
-        .output()
-        .map_err(|e| e.to_string())?;
+        hidden_cmd("sh")
+            .arg("-c")
+            .arg(cmd)
+            .output()
+    }.map_err(|e| e.to_string())?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
@@ -1143,12 +1161,12 @@ pub struct FileWriteResult {
 #[tauri::command]
 fn spawn_process(command: String, cwd: Option<String>) -> Result<i32, String> {
     let (cmd, args) = if cfg!(windows) {
-        ("cmd", vec!["/C".to_string(), "start".to_string(), "/B".to_string(), command])
+        ("powershell", vec!["-NoProfile".to_string(), "-NonInteractive".to_string(), "-Command".to_string(), command])
     } else {
         ("sh", vec!["-c".to_string(), format!("{} &", command)])
     };
 
-    let mut process = Command::new(cmd);
+    let mut process = hidden_cmd(cmd);
     if let Some(dir) = cwd {
         process.current_dir(dir);
     }
@@ -1165,14 +1183,14 @@ fn spawn_process(command: String, cwd: Option<String>) -> Result<i32, String> {
 fn kill_process(pid: i32) -> Result<(), String> {
     #[cfg(windows)]
     {
-        Command::new("taskkill")
+        hidden_cmd("taskkill")
             .args(["/F", "/PID", &pid.to_string()])
             .output()
             .map_err(|e| e.to_string())?;
     }
     #[cfg(not(windows))]
     {
-        Command::new("kill")
+        hidden_cmd("kill")
             .arg(&["-9".to_string(), pid.to_string()])
             .output()
             .map_err(|e| e.to_string())?;
@@ -1266,12 +1284,12 @@ fn apply_patch(repo_path: String, patch_content: String) -> Result<CommandOutput
     let escaped_repo = std::path::Path::new(&repo_path).display().to_string();
     let escaped_patch = std::path::Path::new(&patch_file).display().to_string();
     let (cmd, args) = if cfg!(windows) {
-        ("cmd", vec!["/C".to_string(), format!("git -C \"{}\" apply --3way \"{}\"", escaped_repo, escaped_patch)])
+        ("powershell", vec!["-NoProfile".to_string(), "-NonInteractive".to_string(), "-Command".to_string(), format!("git -C \"{}\" apply --3way \"{}\"", escaped_repo, escaped_patch)])
     } else {
         ("sh", vec!["-c".to_string(), format!("git -C \"{}\" apply --3way \"{}\"", repo_path, patch_file.to_string_lossy())])
     };
 
-    let output = Command::new(cmd)
+    let output = hidden_cmd(cmd)
         .args(&args[1..])
         .output()
         .map_err(|e| format!("Failed to apply patch: {}", e))?;
@@ -1288,18 +1306,23 @@ fn apply_patch(repo_path: String, patch_content: String) -> Result<CommandOutput
 fn create_patch(repo_path: String, target: Option<String>, output_path: Option<String>) -> Result<String, String> {
     let t = target.unwrap_or_else(|| "HEAD".to_string());
     let escaped_repo = std::path::Path::new(&repo_path).display().to_string();
-    let (_cmd, shell_arg) = if cfg!(windows) {
-        ("cmd", format!("git -C \"{}\" {} diff {}", escaped_repo, t, if output_path.is_some() { format!("> \"{}\"", std::path::Path::new(output_path.as_ref().unwrap()).display()) } else { String::new() }))
+    let git_cmd = if let Some(ref op) = output_path {
+        let escaped_out = std::path::Path::new(op).display().to_string();
+        format!("git -C \"{}\" diff {} {} > \"{}\"", escaped_repo, t, t, escaped_out)
     } else {
-        ("sh", format!("git -C \"{}\" diff {} {}", repo_path, t, if output_path.is_some() { format!("> \"{}\"", output_path.as_ref().unwrap()) } else { String::new() }))
+        format!("git -C \"{}\" diff {} {}", escaped_repo, t, t)
     };
-
-    let (shell, arg) = if cfg!(windows) { ("cmd", "/C") } else { ("sh", "-c") };
-    let output = Command::new(shell)
-        .arg(arg)
-        .arg(&shell_arg)
-        .output()
-        .map_err(|e| e.to_string())?;
+    let output = if cfg!(windows) {
+        hidden_cmd("powershell")
+            .arg("-NoProfile").arg("-NonInteractive").arg("-Command")
+            .arg(&git_cmd)
+            .output()
+    } else {
+        hidden_cmd("sh")
+            .arg("-c")
+            .arg(&git_cmd)
+            .output()
+    }.map_err(|e| e.to_string())?;
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -1314,10 +1337,10 @@ fn create_patch(repo_path: String, target: Option<String>, output_path: Option<S
 fn run_tests(repo_path: String, test_framework: String) -> Result<TestResult, String> {
     let (cmd, args) = if cfg!(windows) {
         match test_framework.as_str() {
-            "jest" => ("cmd", vec!["/C".to_string(), "npm test -- --coverage=false --json".to_string()]),
-            "pytest" => ("cmd", vec!["/C".to_string(), "python -m pytest --tb=short -q".to_string()]),
-            "cargo" => ("cmd", vec!["/C".to_string(), "cargo test -- --nocapture".to_string()]),
-            "npm" => ("cmd", vec!["/C".to_string(), "npm test -- --coverage=false".to_string()]),
+            "jest" => ("powershell", vec!["-NoProfile".to_string(), "-NonInteractive".to_string(), "-Command".to_string(), "npm test -- --coverage=false --json".to_string()]),
+            "pytest" => ("powershell", vec!["-NoProfile".to_string(), "-NonInteractive".to_string(), "-Command".to_string(), "python -m pytest --tb=short -q".to_string()]),
+            "cargo" => ("powershell", vec!["-NoProfile".to_string(), "-NonInteractive".to_string(), "-Command".to_string(), "cargo test -- --nocapture".to_string()]),
+            "npm" => ("powershell", vec!["-NoProfile".to_string(), "-NonInteractive".to_string(), "-Command".to_string(), "npm test -- --coverage=false".to_string()]),
             _ => return Err(format!("Unknown test framework: {}", test_framework)),
         }
     } else {
@@ -1330,7 +1353,7 @@ fn run_tests(repo_path: String, test_framework: String) -> Result<TestResult, St
         }
     };
 
-    let mut process = Command::new(cmd);
+    let mut process = hidden_cmd(cmd);
     if test_framework == "pytest" || test_framework == "cargo" {
         process.current_dir(&repo_path);
     }
@@ -1535,13 +1558,60 @@ async fn agent_chat_stream(
     let service = AgentService::new(api_key, api_url, messages_path, model, context_window, provider, state.skill_service.clone(), state.mcp_service.clone(), state.db.clone(), state.lsp_manager.clone(), state.permission_service.clone(), state.pending_asks.clone());
     eprintln!("[agent_chat_stream] AgentService created, spawning stream_chat");
 
-    // Start streaming - spawn and await
-    let _ = tokio::spawn(async move {
-        service.stream_chat(&agent_type, messages, system, workspace, app_handle, session_id).await;
+    // Register cancel token for this stream session
+    let cancel_flag = {
+        let mut registry = state.cancel_registry.lock().map_err(|e| e.to_string())?;
+        registry.remove(&session_id); // clean stale flag from previous stream
+        let flag = Arc::new(AtomicBool::new(false));
+        registry.insert(session_id, flag.clone());
+        flag
+    };
+    let cancel_registry = state.cancel_registry.clone();
+
+    // Start streaming - spawn and await.
+    // Use catch_unwind so a panic inside stream_chat doesn't silently hang the frontend.
+    let panic_app = app_handle.clone();
+    let panic_session_id = session_id;
+    let panic_key = format!("agent_stream_{}", session_id);
+    let _stream_task = tokio::spawn(async move {
+        let result = FutureExt::catch_unwind(
+            std::panic::AssertUnwindSafe(
+                service.stream_chat(&agent_type, messages, system, workspace, app_handle, session_id, cancel_flag)
+            )
+        ).await;
+
+        if let Err(e) = result {
+            let msg = if let Some(s) = e.downcast_ref::<String>() {
+                s.clone()
+            } else if let Some(s) = e.downcast_ref::<&str>() {
+                s.to_string()
+            } else {
+                "Unknown internal error".to_string()
+            };
+            eprintln!("[agent_chat_stream] PANIC in stream_chat: {}", msg);
+            let _ = panic_app.emit(&panic_key, StreamEvent::Error {
+                content: format!("内部服务错误: {}", msg),
+            });
+        }
+
+        // Clean up cancel flag when stream ends (normal or aborted)
+        if let Ok(mut registry) = cancel_registry.lock() {
+            registry.remove(&panic_session_id);
+        }
     });
 
-    eprintln!("[agent_chat_stream] stream_chat spawned");
+    eprintln!("[agent_chat_stream] stream_chat spawned for session {}", panic_session_id);
 
+    Ok(())
+}
+
+#[tauri::command]
+fn abort_stream(state: State<'_, AppState>, session_id: i64) -> Result<(), String> {
+    let registry = state.cancel_registry.lock().map_err(|e| e.to_string())?;
+    if let Some(flag) = registry.get(&session_id) {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        eprintln!("[abort_stream] Cancel flag set for session {}", session_id);
+    }
     Ok(())
 }
 
@@ -2311,6 +2381,7 @@ pub fn run() {
             lsp_manager: Arc::new(Mutex::new(None)),
             permission_service: Arc::new(Mutex::new(perm_svc)),
             pending_asks: Arc::new(Mutex::new(HashMap::new())),
+            cancel_registry: Arc::new(Mutex::new(HashMap::new())),
         })
         .setup(move |_app| {
             // Set builtin skills root - use directory relative to executable
@@ -2373,6 +2444,7 @@ pub fn run() {
             set_agent_model_config,
             delete_agent_model_config,
             agent_chat_stream,
+            abort_stream,
             read_file,
             write_file,
             list_dir,

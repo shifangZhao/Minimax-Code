@@ -9,6 +9,12 @@ edition = "2021"
 name = "minimax_code_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[profile.release]
+opt-level = 2      # ~20% faster compile than level 3, ~5% slower runtime
+lto = false        # no link-time optimization (faster linking)
+codegen-units = 16 # max parallelism during codegen
+incremental = true # reuse previous build artifacts
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

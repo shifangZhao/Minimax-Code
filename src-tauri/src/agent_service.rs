@@ -14,9 +14,23 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{Mutex, RwLock};
+
+/// Build a Command that runs without a visible console window on Windows.
+fn hidden_cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut cmd = Command::new(program.as_ref());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
 
 use crate::context_compressor::{compress_context, estimate_tokens};
 use crate::lsp_manager::LspManager;
@@ -52,6 +66,8 @@ pub enum StreamEvent {
     ToolEnd { tool: String, tool_id: String, result: String },
     #[serde(rename = "done")]
     Done,
+    #[serde(rename = "aborted")]
+    Aborted,
     #[serde(rename = "error")]
     Error { content: String },
     #[serde(rename = "cache_usage")]
@@ -319,6 +335,7 @@ impl AgentService {
         workspace: Option<String>,
         app_handle: AppHandle,
         session_id: i64,
+        cancel_flag: Arc<AtomicBool>,
     ) {
         let api_key = self.api_key.lock().await.clone();
         let skill_service = self.skill_service.clone();
@@ -330,11 +347,25 @@ impl AgentService {
         let session_key = format!("agent_stream_{}", session_id);
         eprintln!("[stream_chat] session_key: {}", session_key);
 
-        // Load project skills if workspace is set
+        // Emit startup signal BEFORE any potentially-blocking operations
+        // (MCP/skill loading, API request). This confirms the stream task is alive.
+        emit(&app, &session_key, StreamEvent::TokenUsage {
+            estimated_tokens: 0,
+            context_window: self.context_window,
+            usage_pct: 0.0,
+        });
+
+        // Load project skills if workspace is set.
+        // MCP reload is spawned in background — it can take 30s to time out
+        // on unreachable servers. Don't block the first API turn waiting for it.
         if let Some(ref ws) = workspace {
             skill_service.load_project_skills(ws).await;
-            let mcp = mcp_service.read().await;
-            mcp.reload(Some(ws)).await;
+            let mcp = mcp_service.clone();
+            let ws_clone = ws.clone();
+            tokio::spawn(async move {
+                let svc = mcp.read().await;
+                svc.reload(Some(&ws_clone)).await;
+            });
         }
 
         // Build system prompt based on agent type
@@ -348,12 +379,13 @@ impl AgentService {
             _ => FRONT_SYSTEM,
         };
 
-        // Build immutable system prompt — NEVER mutate after construction.
-        // Prefix-based KV caching depends on byte-identical prefix across turns.
-        let system_text = match workspace {
-            Some(ws) => format!("{}\n\n# 工作目录\n{}", base_system, ws),
-            None => base_system.to_string(),
-        };
+        // Build system prompt. Model info is included here so the model
+        // treats it as system-level identity, not user input.
+        let mut system_text = base_system.to_string();
+        if let Some(ws) = &workspace {
+            system_text.push_str(&format!("\n\n# 工作目录\n{}", ws));
+        }
+        system_text.push_str(&format!("\n\n当前运行模型: {}", self.model));
 
         // System prompt as top-level `system` field (Anthropic format).
         // cache_control only for MiniMax (KV cache). Custom providers may reject it.
@@ -449,13 +481,6 @@ impl AgentService {
             }));
         }
 
-        // Model info as dynamic message — keeps system prompt immutable for cache.
-        // Placed before skill context so the stable model_name prefix can be cached.
-        api_messages.push(json!({
-            "role": "user",
-            "content": format!("当前模型: {}", self.model)
-        }));
-
         // Proactive skill matching: separate built-in (invisible to user) from user/project skills.
         let matched_skills = skill_service.match_skills(&last_user_msg, 5).await;
         let relevant: Vec<_> = matched_skills.iter().filter(|m| m.score > 0.10).collect();
@@ -493,13 +518,20 @@ impl AgentService {
 
         // Main loop: continue until stop_reason is not "tool_use"
         loop {
+            // Check cancel flag before each API round-trip
+            if cancel_flag.load(Ordering::SeqCst) {
+                eprintln!("[stream_chat] Canceled at loop start for session {}", session_id);
+                emit(&app, &session_key, StreamEvent::Aborted);
+                break;
+            }
+
             // Compress context when approaching token limit (80% of context window)
             compress_context(agent_type, &mut api_messages, self.context_window);
 
             // Emit token usage for context window display
             let est = estimate_tokens(&api_messages);
             let usage_pct = (est as f64 / self.context_window as f64) * 100.0;
-            let _ = app.emit(&session_key, StreamEvent::TokenUsage {
+            emit(&app, &session_key, StreamEvent::TokenUsage {
                 estimated_tokens: est,
                 context_window: self.context_window,
                 usage_pct,
@@ -518,8 +550,12 @@ impl AgentService {
 
             eprintln!("[stream_chat] Model: {}, Ctx: {}K, Messages: {}", self.model, self.context_window / 1000, api_messages.len());
 
-            // Send request
-            let client = Client::new();
+            // Send request (120s timeout — reqwest default is infinite)
+            let client = Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .connect_timeout(std::time::Duration::from_secs(15))
+                .build()
+                .unwrap_or_else(|_| Client::new());
             let response = match client
                 .post(format!("{}{}", self.api_url, self.messages_path))
                 .header("Authorization", format!("Bearer {}", api_key))
@@ -532,7 +568,7 @@ impl AgentService {
                 Err(e) => {
                     eprintln!("[stream_chat] Request failed: {}", e);
                     let ev = StreamEvent::Error { content: format!("Request failed: {}", e) };
-                    let _ = app.emit(&session_key, ev);
+                    emit(&app, &session_key, ev);
                     return;
                 }
             };
@@ -543,7 +579,7 @@ impl AgentService {
                 eprintln!("[stream_chat] API error {}: {}", status, err_text);
                 eprintln!("[stream_chat] URL: {}{}", self.api_url, self.messages_path);
                 let ev = StreamEvent::Error { content: format!("API error {}: {}", status, err_text) };
-                let _ = app.emit(&session_key, ev);
+                emit(&app, &session_key, ev);
                 return;
             }
 
@@ -564,10 +600,30 @@ impl AgentService {
                 permission_service.clone(),
                 pending_asks.clone(),
                 &mut api_messages,
+                cancel_flag.clone(),
             ).await;
 
             eprintln!("[stream_chat] Model: {}, stop_reason: {:?}, thinking: {} chars, text: {} chars, tool_uses: {}", self.model,
                 stop_reason, assistant_thinking.len(), assistant_text.len(), tool_uses.len());
+
+            // Check cancel flag after SSE process returns
+            if cancel_flag.load(Ordering::SeqCst) {
+                eprintln!("[stream_chat] Canceled after SSE for session {}", session_id);
+                // Save partial content so it survives reload
+                if !assistant_thinking.is_empty() || !assistant_text.is_empty() {
+                    let mut partial = Vec::new();
+                    if !assistant_thinking.is_empty() {
+                        partial.push(json!({"type": "thinking", "thinking": assistant_thinking}));
+                    }
+                    if !assistant_text.is_empty() {
+                        partial.push(json!({"type": "text", "text": assistant_text}));
+                    }
+                    let partial_msg = json!({"role": "assistant", "content": partial});
+                    save_api_message(&self.db, session_id, &partial_msg);
+                }
+                emit(&app, &session_key, StreamEvent::Aborted);
+                break;
+            }
 
             // If stop_reason is not "tool_use", we're done
             if stop_reason.as_deref() != Some("tool_use") {
@@ -588,7 +644,7 @@ impl AgentService {
                     api_messages.push(final_msg);
                 }
                 let ev = StreamEvent::Done;
-                let _ = app.emit(&session_key, ev);
+                emit(&app, &session_key, ev);
                 break;
             }
 
@@ -639,6 +695,23 @@ impl AgentService {
     }
 }
 
+/// Emit a stream event with error logging (instead of silently discarding failures).
+fn emit(app: &AppHandle, key: &str, event: StreamEvent) {
+    if let Err(e) = app.emit(key, &event) {
+        let type_name = match &event {
+            StreamEvent::ContentBlockDelta { .. } => "content_block_delta",
+            StreamEvent::ToolStart { .. } => "tool_start",
+            StreamEvent::ToolEnd { .. } => "tool_end",
+            StreamEvent::Done => "done",
+            StreamEvent::Aborted => "aborted",
+            StreamEvent::Error { .. } => "error",
+            StreamEvent::CacheUsage { .. } => "cache_usage",
+            StreamEvent::TokenUsage { .. } => "token_usage",
+        };
+        eprintln!("[emit] FAILED key={} type={}: {:?}", key, type_name, e);
+    }
+}
+
 // Process SSE stream from MiniMax API
 // Returns (stop_reason, assistant_text, assistant_thinking, tool_uses, tool_results)
 // tool_uses: Vec<(tool_id, tool_name, input_accumulated)>
@@ -659,6 +732,7 @@ async fn process_sse_stream(
     permission_service: Arc<StdMutex<PermissionService>>,
     pending_asks: PendingAsks,
     _api_messages: &mut Vec<serde_json::Value>,
+    cancel_flag: Arc<AtomicBool>,
 ) -> (Option<String>, String, String, Vec<(String, String, String)>, Vec<(String, String, String)>) {
     eprintln!("[process_sse_stream] Starting with session_key: {}", session_key);
     let mut current_tool_id: Option<String> = None;
@@ -683,7 +757,27 @@ async fn process_sse_stream(
 
     futures_util::pin_mut!(stream);
 
+    // Cancel check counter — avoid atomic load on every SSE event
+    let mut cancel_check_counter: u32 = 0;
+
     while let Some(item) = stream.next().await {
+        // Check cancel flag every ~50 SSE events (~50ms at typical rate)
+        cancel_check_counter += 1;
+        if cancel_check_counter % 50 == 0 {
+            if cancel_flag.load(Ordering::SeqCst) {
+                eprintln!("[process_sse_stream] Canceled mid-stream for session {}", session_id);
+                // Flush buffered text before returning
+                if !pending_text.is_empty() || !pending_thinking.is_empty() {
+                    let ev = StreamEvent::ContentBlockDelta {
+                        content: std::mem::take(&mut pending_text),
+                        thinking: std::mem::take(&mut pending_thinking),
+                    };
+                    emit(&app, &session_key, ev);
+                }
+                return (None, assistant_text, assistant_thinking, Vec::new(), Vec::new());
+            }
+        }
+
         match item {
             Ok(bytes) => {
                 if let Ok(text) = String::from_utf8(bytes.to_vec()) {
@@ -745,7 +839,7 @@ async fn process_sse_stream(
                                             content: std::mem::take(&mut pending_text),
                                             thinking: std::mem::take(&mut pending_thinking),
                                         };
-                                        let _ = app.emit(&session_key, ev);
+                                        emit(&app, &session_key, ev);
                                         last_emit = std::time::Instant::now();
                                     }
                                 }
@@ -761,10 +855,10 @@ async fn process_sse_stream(
                         content: std::mem::take(&mut pending_text),
                         thinking: std::mem::take(&mut pending_thinking),
                     };
-                    let _ = app.emit(&session_key, ev);
+                    emit(&app, &session_key, ev);
                 }
                 let ev = StreamEvent::Error { content: format!("Stream error: {}", e) };
-                let _ = app.emit(&session_key, ev);
+                emit(&app, &session_key, ev);
                 break;
             }
         }
@@ -776,14 +870,14 @@ async fn process_sse_stream(
             content: std::mem::take(&mut pending_text),
             thinking: std::mem::take(&mut pending_thinking),
         };
-        let _ = app.emit(&session_key, ev);
+        emit(&app, &session_key, ev);
     }
 
     // Emit cache usage stats for this turn
     if cache_hit_tokens > 0 || cache_miss_tokens > 0 {
         let total = cache_hit_tokens + cache_miss_tokens;
         let ratio = if total > 0 { cache_hit_tokens as f64 / total as f64 } else { 0.0 };
-        let _ = app.emit(&session_key, StreamEvent::CacheUsage {
+        emit(&app, &session_key, StreamEvent::CacheUsage {
             cache_hit_tokens,
             cache_miss_tokens,
             cache_hit_ratio: ratio,
@@ -826,6 +920,12 @@ async fn process_sse_stream(
             .map(|v| v == "serial")
             .unwrap_or(false);
 
+        // Check cancel before tool dispatch
+        if cancel_flag.load(Ordering::SeqCst) {
+            eprintln!("[process_sse_stream] Canceled before tool dispatch for session {}", session_id);
+            return (None, assistant_text, assistant_thinking, tool_uses, Vec::new());
+        }
+
         let mut idx = 0;
         while idx < tool_uses.len() {
             // Build chunk: consecutive parallel-safe tools up to parallel_max
@@ -850,7 +950,7 @@ async fn process_sse_stream(
                 let (_tool_id, tool_name, final_input) = &tool_uses[i];
                 let input_json: serde_json::Value =
                     serde_json::from_str(final_input).unwrap_or(json!({}));
-                let _ = app.emit(&session_key, StreamEvent::ToolStart {
+                emit(&app, &session_key, StreamEvent::ToolStart {
                     tool: tool_name.clone(),
                     tool_id: _tool_id.clone(),
                     input: input_json,
@@ -874,12 +974,14 @@ async fn process_sse_stream(
                 let pending_asks = pending_asks.clone();
                 let app = app.clone();
                 let sid = session_id;
+                let cancel_flag = cancel_flag.clone();
                 tokio::spawn(async move {
                     let result = execute_tool(
                         &tool_name, &final_input, sid,
                         api_key, api_url, model, provider,
                         skill_service, mcp_service,
                         db, lsp_manager, permission_service, pending_asks, app,
+                        cancel_flag,
                     ).await;
                     (i, tool_name, result)
                 })
@@ -892,7 +994,7 @@ async fn process_sse_stream(
                 match r {
                     Ok((i, tool_name, result)) => {
                         let tool_id = tool_uses[i].0.clone();
-                        let _ = app.emit(&session_key, StreamEvent::ToolEnd {
+                        emit(&app, &session_key, StreamEvent::ToolEnd {
                             tool: tool_name.clone(),
                             tool_id: tool_id.clone(),
                             result: result.clone(),
@@ -900,7 +1002,7 @@ async fn process_sse_stream(
                         tool_results.push((tool_name, tool_id, result));
                     }
                     Err(e) => {
-                        let _ = app.emit(&session_key, StreamEvent::Error {
+                        emit(&app, &session_key, StreamEvent::Error {
                             content: format!("Tool join error: {}", e),
                         });
                     }
@@ -1010,6 +1112,7 @@ async fn execute_tool(
     permission_service: Arc<StdMutex<PermissionService>>,
     pending_asks: PendingAsks,
     app_handle: AppHandle,
+    cancel_flag: Arc<AtomicBool>,
 ) -> String {
     let params: serde_json::Value = serde_json::from_str(input).unwrap_or(json!({}));
 
@@ -1037,7 +1140,9 @@ async fn execute_tool(
                     command: command.map(|s| s.to_string()),
                     reason: reason.clone(),
                 };
-                let _ = app_handle.emit("permission_asked", &req);
+                if let Err(e) = app_handle.emit("permission_asked", &req) {
+                    eprintln!("[emit] FAILED permission_asked: {:?}", e);
+                }
                 match rx.await {
                     Ok(PermissionAction::Allow) => {
                         eprintln!("[perm] {} allowed by user", tool_name);
@@ -1181,7 +1286,7 @@ async fn execute_tool(
         "read_knowledge" => tool_read_knowledge(&params).await,
         "write_knowledge" => tool_write_knowledge(&params).await,
         "list_knowledge" => tool_list_knowledge().await,
-        "send_to_agent" => tool_send_to_agent(session_id, &params, api_key.clone(), skill_service.clone(), mcp_service.clone(), db.clone(), lsp_manager.clone(), permission_service.clone(), pending_asks.clone(), app_handle.clone()).await,
+        "send_to_agent" => tool_send_to_agent(session_id, &params, api_key.clone(), skill_service.clone(), mcp_service.clone(), db.clone(), lsp_manager.clone(), permission_service.clone(), pending_asks.clone(), app_handle.clone(), cancel_flag.clone()).await,
         "read_lints" => tool_read_lints(&params, lsp_manager.clone(), db.clone()).await,
         "touch_file" => tool_touch_file(&params, lsp_manager.clone(), db.clone()).await,
         "ask_choice" => tool_ask_choice(&params, session_id, "unknown", pending_asks.clone(), app_handle.clone()).await,
@@ -1222,12 +1327,18 @@ async fn tool_send_to_agent(
     permission_service: Arc<StdMutex<PermissionService>>,
     pending_asks: PendingAsks,
     app_handle: AppHandle,
+    cancel_flag: Arc<AtomicBool>,
 ) -> String {
     let target_agent = params["target_agent"].as_str().unwrap_or("");
     let message = params["message"].as_str().unwrap_or("");
 
     if target_agent.is_empty() || message.is_empty() {
         return json!({"error": "target_agent and message are required"}).to_string();
+    }
+
+    // Check parent cancel flag before spawning sub-agent
+    if cancel_flag.load(Ordering::SeqCst) {
+        return json!({"error": "Parent agent was aborted"}).to_string();
     }
 
     // Look up caller's agent type first
@@ -1309,12 +1420,14 @@ async fn tool_send_to_agent(
                 caller_session_id, target_agent, target_session_id, group_chat_id, history.len());
 
             // Emit agent_invoked FIRST so frontend can set up listeners before stream starts
-            let _ = app_handle.emit("agent_invoked", json!({
+            if let Err(e) = app_handle.emit("agent_invoked", json!({
                 "target_agent": target_agent,
                 "session_id": target_session_id,
                 "group_chat_id": group_chat_id,
                 "message": message,
-            }));
+            })) {
+                eprintln!("[emit] FAILED agent_invoked: {:?}", e);
+            }
 
             // Small delay to let frontend listeners attach
             tokio::time::sleep(std::time::Duration::from_millis(30)).await;
@@ -1376,7 +1489,7 @@ async fn tool_send_to_agent(
             std::thread::spawn(move || {
                 handle.block_on(async move {
                     let agent = AgentService::new(api_key, api_url, messages_path, model, context_window, provider, skill_service, mcp_service, db, lm, pm, pa);
-                    agent.stream_chat(&agent_type, history, None, workspace, app, target_session_id).await;
+                    agent.stream_chat(&agent_type, history, None, workspace, app, target_session_id, cancel_flag).await;
                 });
             });
 
@@ -1533,7 +1646,7 @@ async fn tool_read_files(params: &serde_json::Value) -> String {
 async fn tool_git_status(params: &serde_json::Value) -> String {
     let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     tokio::task::spawn_blocking(move || {
-        match std::process::Command::new("git")
+        match hidden_cmd("git")
             .args(["-C", &path, "status", "--porcelain"])
             .output()
         {
@@ -1556,7 +1669,7 @@ async fn tool_git_log(params: &serde_json::Value) -> String {
     let count = params["count"].as_i64().unwrap_or(20) as usize;
     let path = path.to_string();
     tokio::task::spawn_blocking(move || {
-        match std::process::Command::new("git")
+        match hidden_cmd("git")
             .args(["-C", &path, "log", "--oneline", &format!("-{}", count)])
             .output()
         {
@@ -1574,7 +1687,7 @@ async fn tool_git_diff(params: &serde_json::Value) -> String {
     let path = path.to_string();
     let target = target.to_string();
     tokio::task::spawn_blocking(move || {
-        match std::process::Command::new("git")
+        match hidden_cmd("git")
             .args(["-C", &path, "diff", &target])
             .output()
         {
@@ -1592,7 +1705,7 @@ async fn tool_git_commit(params: &serde_json::Value) -> String {
     let path = path.to_string();
     let message = message.to_string();
     tokio::task::spawn_blocking(move || {
-        match std::process::Command::new("git")
+        match hidden_cmd("git")
             .args(["-C", &path, "commit", "-m", &message])
             .output()
         {
@@ -1614,7 +1727,7 @@ async fn tool_git_branch(params: &serde_json::Value) -> String {
     let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     let path = path.to_string();
     tokio::task::spawn_blocking(move || {
-        match std::process::Command::new("git")
+        match hidden_cmd("git")
             .args(["-C", &path, "branch", "-v"])
             .output()
         {
@@ -1632,7 +1745,7 @@ async fn tool_git_checkout(params: &serde_json::Value) -> String {
     let path = path.to_string();
     let branch = branch.to_string();
     tokio::task::spawn_blocking(move || {
-        match std::process::Command::new("git")
+        match hidden_cmd("git")
             .args(["-C", &path, "checkout", &branch])
             .output()
         {
@@ -1654,7 +1767,7 @@ async fn tool_git_stash(params: &serde_json::Value) -> String {
     let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     let path = path.to_string();
     tokio::task::spawn_blocking(move || {
-        match std::process::Command::new("git")
+        match hidden_cmd("git")
             .args(["-C", &path, "stash", "push", "-m", "auto-stash"])
             .output()
         {
@@ -1676,7 +1789,7 @@ async fn tool_git_stash_pop(params: &serde_json::Value) -> String {
     let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     let path = path.to_string();
     tokio::task::spawn_blocking(move || {
-        match std::process::Command::new("git")
+        match hidden_cmd("git")
             .args(["-C", &path, "stash", "pop"])
             .output()
         {
@@ -1736,11 +1849,11 @@ async fn tool_run_command(params: &serde_json::Value) -> String {
     let cwd = params["path"].as_str().map(|s| normalize_file_path(s));
     tokio::task::spawn_blocking(move || {
         let mut cmd = if cfg!(windows) {
-            let mut c = std::process::Command::new("cmd");
-            c.args(["/C", &command]);
+            let mut c = hidden_cmd("powershell");
+            c.args(["-NoProfile", "-NonInteractive", "-Command", &command]);
             c
         } else {
-            let mut c = std::process::Command::new("sh");
+            let mut c = hidden_cmd("sh");
             c.args(["-c", &command]);
             c
         };
@@ -2422,11 +2535,11 @@ async fn tool_run_background(params: &serde_json::Value) -> String {
     let err_file_clone = err_file.clone();
 
     let mut cmd = if cfg!(windows) {
-        let mut c = std::process::Command::new("cmd");
+        let mut c = hidden_cmd("cmd");
         c.args(["/C", command]);
         c
     } else {
-        let mut c = std::process::Command::new("sh");
+        let mut c = hidden_cmd("sh");
         c.args(["-c", command]);
         c
     };
@@ -2518,13 +2631,13 @@ async fn tool_job_output(params: &serde_json::Value) -> String {
 
         // Check if process is still running
         let status = if cfg!(windows) {
-            std::process::Command::new("tasklist")
+            hidden_cmd("tasklist")
                 .args(["/FI", &format!("PID eq {}", pid)])
                 .output()
                 .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
                 .unwrap_or(false)
         } else {
-            std::process::Command::new("ps")
+            hidden_cmd("ps")
                 .args(["-p", &pid.to_string()])
                 .output()
                 .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
@@ -2543,7 +2656,7 @@ async fn tool_job_output(params: &serde_json::Value) -> String {
     }
     // Legacy: try to get process info via tasklist/ps
     if cfg!(windows) {
-        let output = std::process::Command::new("tasklist")
+        let output = hidden_cmd("tasklist")
             .args(["/FI", &format!("PID eq {}", pid)])
             .output();
         match output {
@@ -2558,7 +2671,7 @@ async fn tool_job_output(params: &serde_json::Value) -> String {
             Err(_) => format!("Process {} status unknown.", pid),
         }
     } else {
-        let output = std::process::Command::new("ps")
+        let output = hidden_cmd("ps")
             .args(["-p", &pid.to_string(), "-o", "pid,stat,command"])
             .output();
         match output {
@@ -2577,7 +2690,7 @@ async fn tool_job_output(params: &serde_json::Value) -> String {
 
 async fn tool_list_jobs(_params: &serde_json::Value) -> String {
     if cfg!(windows) {
-        match std::process::Command::new("tasklist")
+        match hidden_cmd("tasklist")
             .args(["/FO", "CSV", "/NH"])
             .output()
         {
@@ -2592,7 +2705,7 @@ async fn tool_list_jobs(_params: &serde_json::Value) -> String {
             Err(e) => format!("Error: {}", e),
         }
     } else {
-        match std::process::Command::new("ps").args(["-eo", "pid,comm,stat"]).output() {
+        match hidden_cmd("ps").args(["-eo", "pid,comm,stat"]).output() {
             Ok(o) => {
                 let text = String::from_utf8_lossy(&o.stdout).to_string();
                 if text.trim().is_empty() {
@@ -2619,7 +2732,7 @@ async fn tool_run_tests(params: &serde_json::Value) -> String {
             "npm" => ("npm", vec!["test", "--", "--coverage=false"]),
             _ => return format!("Unknown test framework: {}", framework),
         };
-        let mut process = std::process::Command::new(cmd);
+        let mut process = hidden_cmd(cmd);
         if framework == "pytest" || framework == "cargo" {
             process.current_dir(&path);
         }
@@ -2644,11 +2757,11 @@ async fn tool_spawn_process(params: &serde_json::Value) -> String {
     let cwd = cwd.map(|s| s.to_string());
     tokio::task::spawn_blocking(move || {
         let mut cmd = if cfg!(windows) {
-            let mut c = std::process::Command::new("cmd");
+            let mut c = hidden_cmd("cmd");
             c.args(["/C", "start", "/B", &command]);
             c
         } else {
-            let mut c = std::process::Command::new("sh");
+            let mut c = hidden_cmd("sh");
             c.args(["-c", &format!("{} &", command)]);
             c
         };
@@ -2668,11 +2781,11 @@ async fn tool_kill_process(params: &serde_json::Value) -> String {
     let pid = params["pid"].as_i64().unwrap_or(0) as u32;
     tokio::task::spawn_blocking(move || {
         let output = if cfg!(windows) {
-            std::process::Command::new("taskkill")
+            hidden_cmd("taskkill")
                 .args(["/F", "/PID", &pid.to_string()])
                 .output()
         } else {
-            std::process::Command::new("kill")
+            hidden_cmd("kill")
                 .args(["-9", &pid.to_string()])
                 .output()
         };
@@ -3124,7 +3237,7 @@ fn get_env_info_sync(repo_path: &str) -> String {
         info.push("Project: Python".to_string());
     }
 
-    let output = std::process::Command::new("git")
+    let output = hidden_cmd("git")
         .args(["-C", repo_path, "status", "--porcelain"])
         .output();
     if let Ok(o) = output {
@@ -3469,12 +3582,14 @@ async fn tool_ask_choice(
     let (tx, rx) = tokio::sync::oneshot::channel();
     pending_asks.lock().unwrap().insert(ask_id.clone(), tx);
 
-    let _ = app_handle.emit("ask_choice", json!({
+    if let Err(e) = app_handle.emit("ask_choice", json!({
         "id": ask_id,
         "session_id": session_id,
         "agent_type": agent_type,
         "questions": questions
-    }));
+    })) {
+        eprintln!("[emit] FAILED ask_choice: {:?}", e);
+    }
 
     match rx.await {
         Ok(answers) => answers,

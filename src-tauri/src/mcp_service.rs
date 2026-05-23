@@ -9,6 +9,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+
+fn hidden_cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut cmd = Command::new(program.as_ref());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
@@ -110,7 +121,7 @@ impl StdioTransport {
         let cmd_name = &command[0];
         let cmd_args: Vec<&str> = command[1..].iter().map(|s| s.as_str()).collect();
 
-        let mut cmd = Command::new(cmd_name);
+        let mut cmd = hidden_cmd(cmd_name);
         cmd.args(&cmd_args)
             .current_dir(cwd)
             .stdin(Stdio::piped())
@@ -377,16 +388,23 @@ impl McpService {
         }
         match std::fs::read_to_string(&path) {
             Ok(content) => {
-                match serde_json::from_str::<McpConfig>(&content) {
-                    Ok(cfg) => {
-                        eprintln!("[mcp] Loaded config from {}", path.display());
-                        cfg
-                    }
-                    Err(e) => {
-                        eprintln!("[mcp] Failed to parse config {}: {}", path.display(), e);
-                        McpConfig { mcp_servers: HashMap::new() }
+                // Parse as raw JSON first, strip underscore-prefixed keys (used for comments),
+                // then deserialize as McpConfig.
+                let mut servers_map: HashMap<String, McpServerConfig> = HashMap::new();
+                if let Ok(raw) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(obj) = raw.get("mcpServers").and_then(|v| v.as_object()) {
+                        for (key, val) in obj {
+                            if key.starts_with('_') { continue; }
+                            if let Ok(cfg) = serde_json::from_value::<McpServerConfig>(val.clone()) {
+                                servers_map.insert(key.clone(), cfg);
+                            } else {
+                                eprintln!("[mcp] Skipping invalid server config: {}", key);
+                            }
+                        }
                     }
                 }
+                eprintln!("[mcp] Loaded config from {} ({} servers)", path.display(), servers_map.len());
+                McpConfig { mcp_servers: servers_map }
             }
             Err(e) => {
                 eprintln!("[mcp] Failed to read config {}: {}", path.display(), e);

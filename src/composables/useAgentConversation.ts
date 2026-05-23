@@ -31,7 +31,7 @@ export interface AssistantMessage {
 }
 
 interface RustStreamEvent {
-  type: 'content_block_delta' | 'tool_start' | 'tool_end' | 'done' | 'error' | 'cache_usage' | 'token_usage'
+  type: 'content_block_delta' | 'tool_start' | 'tool_end' | 'done' | 'aborted' | 'error' | 'cache_usage' | 'token_usage'
   content?: string
   thinking?: string
   tool?: string
@@ -131,12 +131,22 @@ export function useAgentConversation(agentType: string) {
     const sessions = await db.getAgentSessions(groupChatId, agentType)
     const session = sessions.find(s => s.agent_type === agentType)
 
-    if (session) {
-      sessionId.value = session.id
-    } else {
-      sessionId.value = await db.createAgentSession(groupChatId, agentType)
+    const newSessionId = session ? session.id : await db.createAgentSession(groupChatId, agentType)
+
+    // Clean up stale stream listener from previous session to prevent
+    // events from old session leaking into the new session's stream state.
+    if (sessionId.value !== null && sessionId.value !== newSessionId) {
+      const oldListener = streamListeners.get(sessionId.value)
+      if (oldListener) {
+        oldListener()
+        streamListeners.delete(sessionId.value)
+      }
+      // Also clear the old session's stream state from the global map
+      const { clearStreamState } = useGlobalStreaming()
+      clearStreamState(sessionId.value)
     }
 
+    sessionId.value = newSessionId
     await loadMessages()
   }
 
@@ -262,8 +272,22 @@ export function useAgentConversation(agentType: string) {
     // Set up event listener for real-time streaming
     const { updateStreamState, clearStreamState } = useGlobalStreaming()
 
-    // Clear and prepare stream state
+    // Clear and prepare stream state, then wire abort callback
     clearStreamState(finalSessionId)
+    updateStreamState(finalSessionId, {
+      text: '',
+      thinking: '',
+      done: false,
+      abort: async () => {
+        console.log('[abort] Aborting stream for session:', finalSessionId)
+        try {
+          await invoke('abort_stream', { sessionId: finalSessionId })
+        } catch (e) {
+          console.error('[abort] Failed to abort stream:', e)
+        }
+      },
+      toolCallCount: 0
+    })
     let fullText = ''
     let fullThinking = ''
     let toolCallCount = 0
@@ -345,6 +369,23 @@ export function useAgentConversation(agentType: string) {
           break
         case 'done':
           isDone = true
+          // Immediately show final content so there's no gap before loadMessages
+          updateStreamState(finalSessionId, {
+            text: fullText,
+            thinking: fullThinking,
+            done: false,
+            toolCallCount
+          })
+          break
+        case 'aborted':
+          isDone = true
+          // Keep done:false so streaming div stays visible until fallback saves it
+          updateStreamState(finalSessionId, {
+            text: fullText,
+            thinking: fullThinking,
+            done: false,
+            toolCallCount
+          })
           break
         case 'cache_usage':
           console.log(
@@ -395,14 +436,14 @@ export function useAgentConversation(agentType: string) {
         await new Promise(resolve => setTimeout(resolve, 100))
       }
 
-      // Final state update
-      const displayContent = fullThinking
-        ? `💭 ${fullThinking}\n\n${fullText}`
-        : fullText
+      // Final state update — keep done:false so streaming content stays visible
+      // until loadMessages() populates the persisted message in the messages list.
+      // Use raw text here (not displayContent) because thinking is rendered
+      // separately via the thinking field.
       updateStreamState(finalSessionId, {
-        text: displayContent,
+        text: fullText || undefined,
         thinking: fullThinking,
-        done: true,
+        done: false,
         toolCallCount
       })
 
@@ -425,9 +466,31 @@ export function useAgentConversation(agentType: string) {
         assistantMsg.tool_calls = collectedToolCalls
       }
 
-      // Backend now persists assistant messages (with raw_json for cache).
-      // Reload from DB to pick up backend-saved messages, then clear stream state.
+      // Reload from DB to pick up backend-persisted messages.
       await loadMessages()
+
+      // Fallback: if backend didn't persist the assistant message (abort /
+      // timing gap), push what we have from the stream buffer so the user
+      // never loses the agent's output.
+      if (fullText || fullThinking) {
+        const lastMsg = messages.value[messages.value.length - 1]
+        const isAssistantSaved = lastMsg?.role === 'assistant' && lastMsg?.content
+        if (!isAssistantSaved) {
+          const fallbackContent = fullThinking
+            ? `💭 ${fullThinking}\n\n${fullText}`
+            : fullText
+          messages.value.push({
+            id: Date.now() + 1,
+            session_id: finalSessionId,
+            role: 'assistant',
+            content: fallbackContent,
+            thinking: fullThinking || undefined,
+            created_at: new Date().toISOString(),
+          } as ChatMessage)
+        }
+      }
+
+      // Now safe to clear stream — content is in messages list one way or another
       updateStreamState(finalSessionId, {
         text: '',
         thinking: '',
