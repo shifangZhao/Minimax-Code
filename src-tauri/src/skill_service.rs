@@ -187,7 +187,12 @@ impl SkillService {
                 .filter(|s| s.source == source)
                 .cloned()
                 .collect(),
-            None => skills.values().cloned().collect(),
+            // Default: hide builtin skills from the list.
+            // Builtins are discovered via automatic matching and loaded on-demand.
+            None => skills.values()
+                .filter(|s| s.source != "builtin")
+                .cloned()
+                .collect(),
         }
     }
 
@@ -215,19 +220,13 @@ impl SkillService {
     pub async fn match_skills(&self, query: &str, top_k: usize) -> Vec<SkillMatch> {
         let skills = self.skills.read().await;
         let query_lower = query.to_lowercase();
-        let query_chars: HashSet<char> = query_lower.chars().collect();
 
         let mut scores: Vec<SkillMatch> = skills.values()
             .filter_map(|skill| {
+                let name_lower = skill.name.to_lowercase();
                 let desc_lower = skill.description.to_lowercase();
-                let score = if desc_lower.contains(&query_lower) {
-                    1.0
-                } else {
-                    let desc_chars: HashSet<char> = desc_lower.chars().collect();
-                    let common = query_chars.intersection(&desc_chars).count() as f32;
-                    let union = query_chars.union(&desc_chars).count() as f32;
-                    if union > 0.0 { common / union } else { 0.0 }
-                };
+
+                let score = score_skill(&query_lower, &name_lower, &desc_lower);
 
                 if score > 0.0 {
                     Some(SkillMatch {
@@ -247,7 +246,7 @@ impl SkillService {
         scores
     }
 
-    pub async fn execute_skill(&self, skill_name: &str, script_name: Option<&str>) -> Result<String, String> {
+pub async fn execute_skill(&self, skill_name: &str, script_name: Option<&str>) -> Result<String, String> {
         let skills = self.skills.read().await;
         let skill = skills.get(skill_name).ok_or_else(|| format!("Skill not found: {}", skill_name))?;
 
@@ -307,6 +306,78 @@ impl SkillService {
             Err(e) => Err(e.to_string()),
         }
     }
+}
+
+// ===== matching helpers (standalone, not in impl) =====
+
+fn score_skill(query: &str, name: &str, desc: &str) -> f32 {
+    if name == query { return 1.0; }
+    if name.contains(query) || query.contains(name) { return 0.95; }
+    if desc.contains(query) { return 0.85; }
+
+    let query_tokens = tokenize(query);
+    let name_tokens = tokenize(name);
+    let desc_tokens = tokenize(desc);
+
+    let name_score = token_jaccard(&query_tokens, &name_tokens);
+    let desc_score = token_jaccard(&query_tokens, &desc_tokens);
+
+    let q_bigrams = bigrams(query);
+    let d_bigrams = bigrams(desc);
+    let n_bigrams = bigrams(name);
+    let bg_desc = bigram_jaccard(&q_bigrams, &d_bigrams);
+    let bg_name = bigram_jaccard(&q_bigrams, &n_bigrams);
+
+    let name_combined = f32::max(name_score, bg_name * 1.2);
+    let desc_combined = f32::max(desc_score, bg_desc);
+
+    let score = name_combined * 0.35 + desc_combined * 0.65;
+
+    let has_token_hit = query_tokens.iter().any(|t| desc.contains(t.as_str()));
+    let boost = if has_token_hit { 1.15 } else { 1.0 };
+
+    (score * boost).min(0.84)
+}
+
+fn tokenize(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        if ch.is_whitespace() || ch == '-' || ch == '_' || ch == '/' {
+            if !current.is_empty() { tokens.push(current.clone()); current.clear(); }
+        } else if ch.is_ascii_alphabetic() || ch.is_ascii_digit() {
+            current.push(ch.to_ascii_lowercase());
+        } else {
+            if !current.is_empty() { tokens.push(current.clone()); current.clear(); }
+            tokens.push(ch.to_string());
+        }
+    }
+    if !current.is_empty() { tokens.push(current); }
+    tokens
+}
+
+fn token_jaccard(a: &[String], b: &[String]) -> f32 {
+    if a.is_empty() || b.is_empty() { return 0.0; }
+    let set_a: HashSet<&String> = a.iter().collect();
+    let set_b: HashSet<&String> = b.iter().collect();
+    let common = set_a.intersection(&set_b).count() as f32;
+    let union = set_a.union(&set_b).count() as f32;
+    common / union
+}
+
+fn bigrams(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() < 2 { return chars.iter().map(|c| c.to_string()).collect(); }
+    chars.windows(2).map(|w| w.iter().collect()).collect()
+}
+
+fn bigram_jaccard(a: &[String], b: &[String]) -> f32 {
+    if a.is_empty() || b.is_empty() { return 0.0; }
+    let set_a: HashSet<&String> = a.iter().collect();
+    let set_b: HashSet<&String> = b.iter().collect();
+    let common = set_a.intersection(&set_b).count() as f32;
+    let union = set_a.union(&set_b).count() as f32;
+    common / union
 }
 
 impl Default for SkillService {
