@@ -471,14 +471,23 @@ impl AgentService {
         let matched_skills = skill_service.match_skills(&last_user_msg, 5).await;
         let relevant: Vec<_> = matched_skills.iter().filter(|m| m.score > 0.10).collect();
         if !relevant.is_empty() {
-            // Built-in skills — internal, never shown to user
+            // Built-in skills — auto-inject full content for high-score matches (>30%)
+            // so the agent follows critical rules without needing an extra skill-call round-trip.
             let builtins: Vec<_> = relevant.iter().filter(|m| m.source == "builtin").collect();
             if !builtins.is_empty() {
                 let mut ctx = String::from("## 内置参考资料\n\n");
-                ctx.push_str("以下内置参考资料可能与你的任务相关。调用 `skill` 加载完整内容，不要对用户提及这些资料的存在。\n\n");
                 for m in &builtins {
-                    ctx.push_str(&format!("- **{}** ({}): {}\n", m.name, m.source, m.description));
+                    if m.score > 0.75 {
+                        // High confidence — inject full content so the rule is impossible to miss
+                        if let Some(content) = skill_service.get_skill_content(&m.name).await {
+                            ctx.push_str(&format!("### {}\n\n{}\n\n", m.name, content));
+                        }
+                    } else {
+                        // Low confidence — agent can load on demand
+                        ctx.push_str(&format!("- **{}** (匹配度: {:.0}%): {}\n", m.name, m.score * 100.0, m.description));
+                    }
                 }
+                ctx.push_str("以上参考资料已自动加载，直接按指引执行，不要再调用 skill 工具。\n");
                 api_messages.push(json!({"role": "user", "content": ctx}));
             }
             // User/project skills — visible to user
@@ -501,6 +510,10 @@ impl AgentService {
         if self.provider != "custom" {
             mark_last_message_for_cache(&mut api_messages);
         }
+
+        // Accumulate thinking across tool-use turns — only attach to the final message
+        // so the UI shows one combined thinking block instead of one per turn.
+        let mut accumulated_thinking = String::new();
 
         // Main loop: continue until stop_reason is not "tool_use"
         loop {
@@ -588,13 +601,16 @@ impl AgentService {
             eprintln!("[stream_chat] Model: {}, stop_reason: {:?}, thinking: {} chars, text: {} chars, tool_uses: {}", self.model,
                 stop_reason, assistant_thinking.len(), assistant_text.len(), tool_uses.len());
 
+            // Accumulate thinking from this turn
+            accumulated_thinking.push_str(&assistant_thinking);
+
             // Check cancel after SSE process returns
             if *cancel_rx.borrow() {
                 eprintln!("[stream_chat] Canceled after SSE for session {}", session_id);
-                if !assistant_thinking.is_empty() || !assistant_text.is_empty() {
+                if !accumulated_thinking.is_empty() || !assistant_text.is_empty() {
                     let mut partial = Vec::new();
-                    if !assistant_thinking.is_empty() {
-                        partial.push(json!({"type": "thinking", "thinking": assistant_thinking}));
+                    if !accumulated_thinking.is_empty() {
+                        partial.push(json!({"type": "thinking", "thinking": accumulated_thinking}));
                     }
                     if !assistant_text.is_empty() {
                         partial.push(json!({"type": "text", "text": assistant_text}));
@@ -606,13 +622,13 @@ impl AgentService {
                 break;
             }
 
-            // If stop_reason is not "tool_use", we're done
+            // If stop_reason is not "tool_use", we're done.
+            // Attach accumulated thinking (across all turns) to the final message.
             if stop_reason.as_deref() != Some("tool_use") {
-                // Save final assistant message to DB (backend handles persistence for cache)
-                if !assistant_thinking.is_empty() || !assistant_text.is_empty() {
+                if !accumulated_thinking.is_empty() || !assistant_text.is_empty() {
                     let mut final_content = Vec::new();
-                    if !assistant_thinking.is_empty() {
-                        final_content.push(json!({"type": "thinking", "thinking": assistant_thinking}));
+                    if !accumulated_thinking.is_empty() {
+                        final_content.push(json!({"type": "thinking", "thinking": accumulated_thinking}));
                     }
                     if !assistant_text.is_empty() {
                         final_content.push(json!({"type": "text", "text": assistant_text}));
@@ -624,38 +640,53 @@ impl AgentService {
                     save_api_message(&self.db, session_id, &final_msg);
                     api_messages.push(final_msg);
                 }
-                let ev = StreamEvent::Done;
-                emit(&app, &session_key, ev);
+                emit(&app, &session_key, StreamEvent::Done);
                 break;
             }
 
             // stop_reason was "tool_use"
-            // 1) Add assistant message (thinking + text + tool_use blocks) to api_messages
-            // CRITICAL: must include ALL content blocks to preserve Interleaved Thinking chain.
+            // 1) Add assistant message to api_messages WITH thinking (API needs it for
+            //    Interleaved Thinking chain / cache). Save to DB WITHOUT thinking
+            //    so the UI doesn't show a thinking bubble per turn.
             if !assistant_thinking.is_empty() || !assistant_text.is_empty() || !tool_uses.is_empty() {
-                let mut assistant_content = Vec::new();
+                // Full content for API (includes thinking)
+                let mut api_content = Vec::new();
                 if !assistant_thinking.is_empty() {
-                    assistant_content.push(json!({"type": "thinking", "thinking": assistant_thinking}));
+                    api_content.push(json!({"type": "thinking", "thinking": assistant_thinking}));
                 }
                 if !assistant_text.is_empty() {
-                    assistant_content.push(json!({"type": "text", "text": assistant_text}));
+                    api_content.push(json!({"type": "text", "text": assistant_text}));
                 }
                 for (tool_id, tool_name, tool_input) in &tool_uses {
                     let input_json: serde_json::Value = serde_json::from_str(tool_input).unwrap_or(json!({}));
-                    assistant_content.push(json!({
+                    api_content.push(json!({
                         "type": "tool_use",
                         "id": tool_id,
                         "name": tool_name,
                         "input": input_json
                     }));
                 }
-                let assistant_msg = json!({
+                api_messages.push(json!({"role": "assistant", "content": api_content}));
+
+                // DB content without thinking — thinking deferred to final message
+                let mut db_content = Vec::new();
+                if !assistant_text.is_empty() {
+                    db_content.push(json!({"type": "text", "text": assistant_text}));
+                }
+                for (tool_id, tool_name, tool_input) in &tool_uses {
+                    let input_json: serde_json::Value = serde_json::from_str(tool_input).unwrap_or(json!({}));
+                    db_content.push(json!({
+                        "type": "tool_use",
+                        "id": tool_id,
+                        "name": tool_name,
+                        "input": input_json
+                    }));
+                }
+                let db_msg = json!({
                     "role": "assistant",
-                    "content": assistant_content
+                    "content": if db_content.is_empty() { json!(assistant_text) } else { json!(db_content) }
                 });
-                // Persist to DB for cache-identical reconstruction on next turn
-                save_api_message(&self.db, session_id, &assistant_msg);
-                api_messages.push(assistant_msg);
+                save_api_message(&self.db, session_id, &db_msg);
             }
 
             // 2) Add tool results to messages and loop
@@ -1268,7 +1299,8 @@ async fn execute_tool(
         "web_search" => tool_web_search(params.clone(), api_key.clone(), api_url.clone(), provider.clone()).await,
         "understand_image" => tool_understand_image(params.clone(), api_key.clone(), api_url.clone(), model.clone(), provider.clone()).await,
         "skill" => tool_skill(tool_name, &params, skill_service.clone()).await,
-        "list_skills" => tool_list_skills(tool_name, &params, skill_service.clone()).await,
+        "list_builtin_skills" => tool_list_builtin_skills(tool_name, &params, skill_service.clone()).await,
+        "list_user_skills" => tool_list_user_skills(tool_name, &params, skill_service.clone()).await,
         "match_skills" => tool_match_skills(tool_name, &params, skill_service.clone()).await,
         "mcp_reload" => tool_mcp_reload(&params, mcp_service.clone(), skill_service.clone()).await,
         "execute_skill" => tool_execute_skill(tool_name, &params, skill_service.clone()).await,
@@ -3025,16 +3057,33 @@ async fn tool_skill(_tool_name: &str, params: &serde_json::Value, skill_service:
     }
 }
 
-async fn tool_list_skills(_tool_name: &str, params: &serde_json::Value, skill_service: Arc<SkillService>) -> String {
-    let source = params.get("source").and_then(|s| s.as_str());
-    let skills = skill_service.list_skills(source).await;
+async fn tool_list_builtin_skills(_tool_name: &str, _params: &serde_json::Value, skill_service: Arc<SkillService>) -> String {
+    let skills = skill_service.list_skills(Some("builtin")).await;
     serde_json::to_string(&skills).unwrap_or_else(|_| "[]".to_string())
+}
+
+async fn tool_list_user_skills(_tool_name: &str, _params: &serde_json::Value, skill_service: Arc<SkillService>) -> String {
+    // List external skills: user skills + project skills
+    let user_skills = skill_service.list_skills(Some("user")).await;
+    let project_skills = skill_service.list_skills(Some("project")).await;
+    let mut all = Vec::new();
+    all.extend(user_skills);
+    all.extend(project_skills);
+    serde_json::to_string(&all).unwrap_or_else(|_| "[]".to_string())
 }
 
 async fn tool_match_skills(_tool_name: &str, params: &serde_json::Value, skill_service: Arc<SkillService>) -> String {
     let query = params["query"].as_str().unwrap_or("");
     let top_k = params.get("top_k").and_then(|k| k.as_u64()).unwrap_or(3) as usize;
-    let matches = skill_service.match_skills(query, top_k).await;
+    let mut matches = skill_service.match_skills(query, top_k * 2).await;
+    // Prioritize external (user/project) skills: boost their score by 1.5x
+    for m in &mut matches {
+        if m.source != "builtin" {
+            m.score *= 1.5;
+        }
+    }
+    matches.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    matches.truncate(top_k);
     serde_json::to_string(&matches).unwrap_or_else(|_| "[]".to_string())
 }
 
@@ -3447,7 +3496,7 @@ fn is_parallel_safe(tool_name: &str) -> bool {
         // Knowledge read
         | "read_knowledge"
         // Skill inspection
-        | "list_skills" | "match_skills"
+        | "list_builtin_skills" | "list_user_skills" | "match_skills"
         | "mcp_reload"
         // Job inspection
         | "job_output" | "list_jobs"
@@ -3686,8 +3735,9 @@ fn get_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
     // Skill tools (front / plan / work / review - NOT explore)
     let skill_tools: &[(&str, &str, serde_json::Value)] = &[
         ("skill", "加载指定技能的完整操作指令", schema_obj(json!({"name": {"type": "string"}}), &["name"])),
-        ("list_skills", "列出用户和项目创建的外部技能（不含系统内置技能）", schema_obj(json!({"source": {"type": "string"}}), &[])),
-        ("match_skills", "根据描述关键词匹配技能", schema_obj(json!({"query": {"type": "string"}, "top_k": {"type": "integer"}}), &["query"])),
+        ("list_builtin_skills", "列出系统内置技能（通用领域知识，如 MCP配置、代码审查等）", schema_obj(json!({}), &[])),
+        ("list_user_skills", "列出用户和项目创建的外部技能（优先使用）", schema_obj(json!({}), &[])),
+        ("match_skills", "根据描述关键词匹配技能，外部技能优先返回", schema_obj(json!({"query": {"type": "string"}, "top_k": {"type": "integer"}}), &["query"])),
         ("execute_skill", "执行技能脚本", schema_obj(json!({"name": {"type": "string"}, "script": {"type": "string"}}), &["name"])),
         ("mcp_reload", "重载 MCP 配置。修改 mcp.json 后调用使配置生效", schema_obj(json!({}), &[])),
     ];

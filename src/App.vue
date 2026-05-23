@@ -32,7 +32,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { db } from './services/db'
 import { check } from '@tauri-apps/plugin-updater'
-import { relaunch } from '@tauri-apps/plugin-process'
+
 import { useGlobalStreaming } from './composables/useGlobalStreaming'
 import { usePermissions } from './composables/usePermissions'
 import TitleBar from './components/TitleBar.vue'
