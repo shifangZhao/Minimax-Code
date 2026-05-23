@@ -1,82 +1,87 @@
 ---
-description: 如何创建和配置外部自定义技能——全局技能放在 C:\Users\Admin\.minimaxcode\skills\，项目技能放在 <项目根>\.minimaxcode\skills\
-version: 1.0.0
+description: 创建外部技能的标准流程——默认放到全局 ~/.minimaxcode/skills/
+version: 1.2.0
 ---
 
-# 配置外部技能
+# 创建外部技能
 
-用户可以创建自定义技能来扩展助手的能力。技能本质是一个包含 `SKILL.md` 文件的目录。
+## 核心规则
 
-## 技能存放位置
+**默认一律放全局目录。**
+除非用户明确说了"仅这个项目"、"项目级"、"放在项目里"才放项目目录。
 
-### 全局技能（所有项目可用）
+## 路径速查
+
+**全局（默认）：**
+
+| 平台 | 路径 |
+|------|------|
+| Windows | `C:\Users\<用户名>\.minimaxcode\skills\<技能名>\` |
+| macOS | `/Users/<用户名>/.minimaxcode/skills/<技能名>/` |
+| Linux | `/home/<用户名>/.minimaxcode/skills/<技能名>/` |
+
+简写为 `~/.minimaxcode/skills/<技能名>/`，用 `get_env_info` 可查当前用户名。
+
+**项目级（仅当用户明确要求）：**
 ```
-C:\Users\Admin\.minimaxcode\skills\<技能名称>\
+<当前工作目录>\.minimaxcode\skills\<技能名>\
 ```
 
-### 项目级技能（仅当前项目可用）
-```
-<项目根目录>\.minimaxcode\skills\<技能名称>\
-```
+## 第一步：创建目录
 
-## 创建步骤
+用 `create_directory` 在全局路径下创建以技能名称命名的目录。
 
-1. 在对应位置创建技能目录，目录名即为技能名称（中文或英文均可）
-2. 在目录内创建 `SKILL.md` 文件
-3. 可选：创建 `scripts/` 子目录存放脚本（.py/.sh/.js），创建 `references/` 子目录存放参考资料
+如 Windows：`create_directory C:\Users\<用户名>\.minimaxcode\skills\my-skill\`
 
-## SKILL.md 格式
+## 第二步：写 SKILL.md
+
+用 `write_file` 在刚创建的目录里写入 `SKILL.md`，格式：
 
 ```markdown
 ---
-description: 技能的简要描述（一句话说明用途）
+description: 一句话说明这个技能做什么（这是匹配依据，必填）
 version: 1.0.0
 ---
 
-# 技能标题
+# <技能标题>
 
-此处写技能的完整操作指令。可以是：
-- 特定领域的知识和规范
-- 项目特有的操作流程
-- 代码生成模板
-- 配置说明
-- 任何希望助手遵循的指导
-
-内容越详细越好，助手会严格遵循这里的指令。
+<详细的操作指令、规范、模板、注意事项等>
 ```
 
-## 示例
+## 第三步：可选附件
 
-创建一个名为 `api规范` 的技能，放在 `C:\Users\Admin\.minimaxcode\skills\api规范\SKILL.md`：
+- `scripts/` 目录：放可执行脚本（.py / .sh / .js）
+- `references/` 目录：放参考资料
+
+## 完整示例（Windows）
+
+用户说："帮我创建一个 Python 代码审查的技能"
+
+→ 默认放全局。
+
+```
+create_directory C:\Users\Admin\.minimaxcode\skills\python-review\
+
+write_file C:\Users\Admin\.minimaxcode\skills\python-review\SKILL.md
+```
 
 ```markdown
 ---
-description: 项目 API 设计规范和命名约定
+description: Python 代码审查规范和常见问题检查清单
 version: 1.0.0
 ---
 
-# API 设计规范
+# Python 代码审查
 
-## 命名约定
-- REST 端点使用复数名词：`/users`、`/orders`
-- 版本号放在 URL 路径：`/api/v1/users`
-- 查询参数使用 snake_case：`?page_size=20`
+## 必查项
+- 类型注解是否完整
+- 异常处理是否吞掉了错误
+- 是否有 SQL 注入风险
 
-## 响应格式
-所有响应统一包装：
-{
-  "code": 0,
-  "data": ...,
-  "message": "ok"
-}
-
-## 错误码
-- 0: 成功
-- 1001: 参数错误
-- 1002: 未授权
-- 1003: 资源不存在
+## 风格
+- 遵循 PEP 8，函数不超过 30 行
 ```
 
-## 生效方式
+## 生效
 
-技能创建后无需重启应用。下次对话时系统会自动匹配相关技能，助手也可以主动调用 `skill` 工具加载。
+创建后即刻生效，无需重启。

@@ -458,7 +458,7 @@ impl AgentService {
 
         // Proactive skill matching: separate built-in (invisible to user) from user/project skills.
         let matched_skills = skill_service.match_skills(&last_user_msg, 5).await;
-        let relevant: Vec<_> = matched_skills.iter().filter(|m| m.score > 0.15).collect();
+        let relevant: Vec<_> = matched_skills.iter().filter(|m| m.score > 0.10).collect();
         if !relevant.is_empty() {
             // Built-in skills — internal, never shown to user
             let builtins: Vec<_> = relevant.iter().filter(|m| m.source == "builtin").collect();
@@ -3586,7 +3586,7 @@ fn get_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
     // Skill tools (front / plan / work / review - NOT explore)
     let skill_tools: &[(&str, &str, serde_json::Value)] = &[
         ("skill", "加载指定技能的完整操作指令", schema_obj(json!({"name": {"type": "string"}}), &["name"])),
-        ("list_skills", "列出所有已加载的技能", schema_obj(json!({"source": {"type": "string"}}), &[])),
+        ("list_skills", "列出用户和项目创建的外部技能（不含系统内置技能）", schema_obj(json!({"source": {"type": "string"}}), &[])),
         ("match_skills", "根据描述关键词匹配技能", schema_obj(json!({"query": {"type": "string"}, "top_k": {"type": "integer"}}), &["query"])),
         ("execute_skill", "执行技能脚本", schema_obj(json!({"name": {"type": "string"}, "script": {"type": "string"}}), &["name"])),
         ("mcp_reload", "重载 MCP 配置。修改 mcp.json 后调用使配置生效", schema_obj(json!({}), &[])),
