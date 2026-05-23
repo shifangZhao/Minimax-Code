@@ -42,6 +42,7 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Setup China mirrors
+        shell: bash
         run: |
           mkdir -p ~/.cargo
           cat > ~/.cargo/config.toml << 'EOF'
@@ -55,6 +56,7 @@ jobs:
 
       - name: Install dependencies (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
+        shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
@@ -64,6 +66,7 @@ jobs:
 
       - name: Build & Bundle (Windows)
         if: matrix.os == 'windows-latest'
+        shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
@@ -71,6 +74,7 @@ jobs:
 
       - name: Build & Bundle (macOS / Linux)
         if: matrix.os != 'windows-latest'
+        shell: bash
         run: npx tauri build --target ${{ matrix.target }}
 
       - name: Upload artifacts (Windows)
