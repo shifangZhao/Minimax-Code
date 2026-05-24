@@ -1,12 +1,21 @@
 import { shallowRef } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 
+export interface StreamToolEvent {
+  type: 'tool_start' | 'tool_end'
+  tool: string
+  tool_id: string
+  input?: Record<string, any>
+  result?: string
+}
+
 interface StreamState {
   text: string
   thinking: string
   done: boolean
   abort: (() => void) | null
   toolCallCount: number
+  toolEvents: StreamToolEvent[]
 }
 
 // Module-level singleton — both display state AND Tauri listener handles.
@@ -26,7 +35,7 @@ export function useGlobalStreaming() {
   function getStreamState(sessionId: number | null): StreamState {
     const key = getStreamKey(sessionId)
     return sessions.value.get(key)?.state
-      || { text: '', thinking: '', done: true, abort: null, toolCallCount: 0 }
+      || { text: '', thinking: '', done: true, abort: null, toolCallCount: 0, toolEvents: [] }
   }
 
   function updateStreamState(sessionId: number | null, updates: Partial<StreamState>) {
@@ -34,10 +43,10 @@ export function useGlobalStreaming() {
     const newMap = new Map(sessions.value)
     const entry = newMap.get(key)
     if (entry) {
-      newMap.set(key, { ...entry, state: { ...entry.state, ...updates } })
+      newMap.set(key, { ...entry, state: { ...entry.state, ...updates, toolEvents: updates.toolEvents ?? entry.state.toolEvents } })
     } else {
       newMap.set(key, {
-        state: { text: '', thinking: '', done: true, abort: null, toolCallCount: 0, ...updates },
+        state: { text: '', thinking: '', done: true, abort: null, toolCallCount: 0, toolEvents: [], ...updates },
         unlisten: null,
       })
     }
@@ -53,7 +62,7 @@ export function useGlobalStreaming() {
     // Keep the unlisten handle alive — the caller manages listener lifecycle
     const newMap = new Map(sessions.value)
     newMap.set(key, {
-      state: { text: '', thinking: '', done: true, abort: null, toolCallCount: 0 },
+      state: { text: '', thinking: '', done: true, abort: null, toolCallCount: 0, toolEvents: [] },
       unlisten: entry?.unlisten ?? null,
     })
     sessions.value = newMap
@@ -72,7 +81,7 @@ export function useGlobalStreaming() {
     const newMap = new Map(sessions.value)
     const existing = newMap.get(key)
     newMap.set(key, {
-      state: existing?.state ?? { text: '', thinking: '', done: true, abort: null, toolCallCount: 0 },
+      state: existing?.state ?? { text: '', thinking: '', done: true, abort: null, toolCallCount: 0, toolEvents: [] },
       unlisten,
     })
     sessions.value = newMap
@@ -88,7 +97,7 @@ export function useGlobalStreaming() {
     }
     const newMap = new Map(sessions.value)
     newMap.set(key, {
-      state: entry?.state ?? { text: '', thinking: '', done: true, abort: null, toolCallCount: 0 },
+      state: entry?.state ?? { text: '', thinking: '', done: true, abort: null, toolCallCount: 0, toolEvents: [] },
       unlisten: null,
     })
     sessions.value = newMap
@@ -102,7 +111,7 @@ export function useGlobalStreaming() {
         if (entry?.state.abort) entry.state.abort()
         if (entry?.unlisten) entry.unlisten()
         newMap.set(key, {
-          state: { text: '', thinking: '', done: true, abort: null, toolCallCount: 0 },
+          state: { text: '', thinking: '', done: true, abort: null, toolCallCount: 0, toolEvents: [] },
           unlisten: null,
         })
       }

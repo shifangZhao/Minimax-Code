@@ -192,6 +192,21 @@ fn save_api_message(db: &Arc<StdMutex<Connection>>, session_id: i64, message: &s
     }
 }
 
+/// Strip all cache_control markers from messages so we start with a clean
+/// byte sequence before re-marking. Old markers from persisted raw_json would
+/// otherwise create non-deterministic byte patterns that break prefix cache.
+fn strip_cache_control(msgs: &mut [serde_json::Value]) {
+    for msg in msgs.iter_mut() {
+        if let Some(arr) = msg["content"].as_array_mut() {
+            for block in arr.iter_mut() {
+                if block.is_object() {
+                    block.as_object_mut().map(|o| o.remove("cache_control"));
+                }
+            }
+        }
+    }
+}
+
 /// Mark the last message's last content block with cache_control for incremental
 /// multi-turn caching. Converts string content to block array format if needed.
 fn mark_last_message_for_cache(msgs: &mut Vec<serde_json::Value>) {
@@ -604,13 +619,12 @@ impl AgentService {
             }
         }
 
-        // Mark last message's last content block with cache_control for incremental
-        // multi-turn caching. Per MiniMax docs, this caches the entire conversation prefix.
-        // Only done once before the loop — subsequent loop iterations benefit from prefix cache.
-        // Mark last message's last content block with cache_control for incremental
-        // multi-turn caching. Per MiniMax docs, this caches the entire conversation prefix.
-        // Only done once before the loop — subsequent loop iterations benefit from prefix cache.
-        mark_last_message_for_cache(&mut api_messages);
+        // Append-only prefix cache: strip stale markers from persisted raw_json,
+        // then mark one clean breakpoint. Re-marked every tool_use iteration.
+        if self.provider != "custom" {
+            strip_cache_control(&mut api_messages);
+            mark_last_message_for_cache(&mut api_messages);
+        }
 
         // Accumulate thinking across tool-use turns — only attach to the final message
         // so the UI shows one combined thinking block instead of one per turn.
@@ -904,6 +918,16 @@ impl AgentService {
                 });
                 save_api_message(&self.db, session_id, &tool_msg);
                 api_messages.push(tool_msg);
+            }
+
+            // Append-only: strip stale markers, re-mark on the new last message.
+            // This moves the cache breakpoint forward so the next request's prefix
+            // covers the assistant + tool_result messages just added. Without this,
+            // every subsequent request pays input_tokens for all accumulated content
+            // after the original (pre-loop) breakpoint.
+            if self.provider != "custom" {
+                strip_cache_control(&mut api_messages);
+                mark_last_message_for_cache(&mut api_messages);
             }
         }
     }

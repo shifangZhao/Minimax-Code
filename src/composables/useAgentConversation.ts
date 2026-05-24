@@ -49,7 +49,7 @@ export function useAgentConversation(agentType: string) {
   const currentGroupChatId = ref<number | null>(null)
   const pendingAsk = ref<any>(null)
   const toolEvents = ref<ToolEvent[]>([])
-  const tokenUsage = ref<TokenUsage>({ estimated_tokens: 0, context_window: 200000, usage_pct: 0 })
+  const tokenUsage = ref<TokenUsage>({ estimated_tokens: 0, context_window: 204800, usage_pct: 0 })
 
   // Per-session loading state
   const loadingSessions = new Set<number>()
@@ -107,7 +107,7 @@ export function useAgentConversation(agentType: string) {
       currentGroupChatId.value = groupChatId
       sessionId.value = null
       messages.value = []
-      tokenUsage.value = { estimated_tokens: 0, context_window: 200000, usage_pct: 0 }
+      tokenUsage.value = { estimated_tokens: 0, context_window: 204800, usage_pct: 0 }
       loading.value = false
       return
     }
@@ -143,7 +143,7 @@ export function useAgentConversation(agentType: string) {
   async function loadMessages(targetSessionId?: number) {
     const sid = targetSessionId ?? sessionId.value
     if (!sid) {
-      tokenUsage.value = { estimated_tokens: 0, context_window: 200000, usage_pct: 0 }
+      tokenUsage.value = { estimated_tokens: 0, context_window: 204800, usage_pct: 0 }
       return
     }
     const msgs = await db.getMessages(sid)
@@ -160,7 +160,7 @@ export function useAgentConversation(agentType: string) {
         const cw = tokenUsage.value.context_window
         tokenUsage.value = { estimated_tokens: est, context_window: cw, usage_pct: Math.min((est / cw) * 100, 99) }
       } else {
-        tokenUsage.value = { estimated_tokens: 0, context_window: 200000, usage_pct: 0 }
+        tokenUsage.value = { estimated_tokens: 0, context_window: 204800, usage_pct: 0 }
       }
     }
     // Always update token cache for the loaded session
@@ -168,7 +168,7 @@ export function useAgentConversation(agentType: string) {
     if (!tu && msgs.length > 0) {
       const totalChars = msgs.reduce((sum, m) => sum + (m.content?.length || 0) + ((m as any).thinking?.length || 0), 0)
       const est = Math.max(1, Math.round(totalChars / 3))
-      sessionTokenUsage.set(sid, { estimated_tokens: est, context_window: 200000, usage_pct: 0 })
+      sessionTokenUsage.set(sid, { estimated_tokens: est, context_window: 204800, usage_pct: 0 })
     }
   }
 
@@ -285,6 +285,7 @@ export function useAgentConversation(agentType: string) {
       text: '',
       thinking: '',
       done: false,
+      toolEvents: [],
       abort: async () => {
         console.log('[abort] Aborting stream for session:', finalSessionId)
         try {
@@ -298,6 +299,7 @@ export function useAgentConversation(agentType: string) {
     let fullText = ''
     let fullThinking = ''
     let toolCallCount = 0
+    const streamToolEvents: Array<{ type: 'tool_start' | 'tool_end'; tool: string; tool_id: string; input?: Record<string, any>; result?: string }> = []
     // 收集 tool_calls 信息
     const collectedToolCalls: Array<{
       id: string
@@ -332,18 +334,24 @@ export function useAgentConversation(agentType: string) {
               function: { name: ev.tool, arguments: JSON.stringify(ev.input || {}) }
             })
           }
-          toolEvents.value.push({ type: 'tool_start', tool: ev.tool || '', tool_id: ev.tool_id || '', input: ev.input })
-          updateStreamState(finalSessionId, {
-            text: fullText, thinking: fullThinking, done: false, toolCallCount
-          })
+          {
+            const te = { type: 'tool_start' as const, tool: ev.tool || '', tool_id: ev.tool_id || '', input: ev.input }
+            toolEvents.value.push(te)
+            streamToolEvents.push(te)
+            updateStreamState(finalSessionId, {
+              text: fullText, thinking: fullThinking, done: false, toolCallCount, toolEvents: [...streamToolEvents]
+            })
+          }
           break
         case 'tool_end':
-          toolEvents.value.push({
-            type: 'tool_end',
-            tool: ev.tool || '',
-            tool_id: ev.tool_id || '',
-            result: ev.result
-          })
+          {
+            const te = { type: 'tool_end' as const, tool: ev.tool || '', tool_id: ev.tool_id || '', result: ev.result }
+            toolEvents.value.push(te)
+            streamToolEvents.push(te)
+            updateStreamState(finalSessionId, {
+              text: fullText, thinking: fullThinking, done: false, toolCallCount, toolEvents: [...streamToolEvents]
+            })
+          }
           break
         case 'done':
           resolveStream?.()
@@ -368,7 +376,7 @@ export function useAgentConversation(agentType: string) {
           const est = ev.estimated_tokens || 0
           const tu = {
             estimated_tokens: cached && cached.estimated_tokens > est ? cached.estimated_tokens : est,
-            context_window: ev.context_window || 200000,
+            context_window: ev.context_window || 204800,
             usage_pct: ev.usage_pct || 0
           }
           sessionTokenUsage.set(finalSessionId, tu)
@@ -533,7 +541,7 @@ export function useAgentConversation(agentType: string) {
       messages.value = []
       sessionMessages.delete(sessionId.value)
       toolEvents.value = []
-      tokenUsage.value = { estimated_tokens: 0, context_window: 200000, usage_pct: 0 }
+      tokenUsage.value = { estimated_tokens: 0, context_window: 204800, usage_pct: 0 }
       sessionTokenUsage.delete(sessionId.value)
       showClearConfirm.value = false
     } catch (e) {
