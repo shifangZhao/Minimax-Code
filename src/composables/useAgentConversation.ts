@@ -123,6 +123,7 @@ export function useAgentConversation(agentType: string) {
       sessionId.value = null
       messages.value = []
       tokenUsage.value = { estimated_tokens: 0, context_window: 200000, usage_pct: 0 }
+      loading.value = false
       return
     }
 
@@ -141,6 +142,9 @@ export function useAgentConversation(agentType: string) {
         oldListener()
         streamListeners.delete(sessionId.value)
       }
+      // Clean up loading state for the old session (isolate multi-agent/conversation)
+      loadingSessions.delete(sessionId.value)
+      loading.value = loadingSessions.size > 0
       // Also clear the old session's stream state from the global map
       const { clearStreamState } = useGlobalStreaming()
       clearStreamState(sessionId.value)
@@ -155,11 +159,20 @@ export function useAgentConversation(agentType: string) {
       tokenUsage.value = { estimated_tokens: 0, context_window: 200000, usage_pct: 0 }
       return
     }
-    // Restore cached token usage for this session, or reset
-    const cached = sessionTokenUsage.get(sessionId.value)
-    tokenUsage.value = cached ?? { estimated_tokens: 0, context_window: 200000, usage_pct: 0 }
     const msgs = await db.getMessages(sessionId.value)
     messages.value = msgs
+    // Restore cached token usage for this session, or estimate from messages
+    const cached = sessionTokenUsage.get(sessionId.value)
+    if (cached) {
+      tokenUsage.value = cached
+    } else if (msgs.length > 0) {
+      const totalChars = msgs.reduce((sum, m) => sum + (m.content?.length || 0) + ((m as any).thinking?.length || 0), 0)
+      const est = Math.max(1, Math.round(totalChars / 4))
+      const cw = tokenUsage.value.context_window
+      tokenUsage.value = { estimated_tokens: est, context_window: cw, usage_pct: (est / cw) * 100 }
+    } else {
+      tokenUsage.value = { estimated_tokens: 0, context_window: 200000, usage_pct: 0 }
+    }
   }
 
   // 构建发送给后端的历史消息（符合 MiniMax API 格式）
@@ -435,13 +448,14 @@ export function useAgentConversation(agentType: string) {
         assistantMsg.tool_calls = collectedToolCalls
       }
 
-      // Clear streaming display first so it doesn't overlap with DB messages
+      // Reload from DB to pick up backend-persisted messages first,
+      // THEN clear streaming display so there's no gap between stream end and DB load.
+      await loadMessages()
+
+      // Clear streaming display after DB messages are available
       updateStreamState(finalSessionId, {
         text: '', thinking: '', done: true, toolCallCount
       })
-
-      // Reload from DB to pick up backend-persisted messages.
-      await loadMessages()
 
       // Fallback: if backend didn't persist the assistant message, push stream buffer
       if (fullText || fullThinking) {

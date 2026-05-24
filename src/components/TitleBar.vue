@@ -3,8 +3,18 @@
     <div class="title-left" data-tauri-drag-region>
       <img src="../assets/icon.png" class="title-icon" alt="" />
       <span class="title">MinimaxCode</span>
+      <button class="sidebar-toggle-btn" @click="$emit('toggleSidebar')" title="切换侧边栏">
+        <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="3" width="13" height="14" rx="1.5"/>
+          <line x1="6" y1="7" x2="11" y2="7"/>
+          <line x1="6" y1="10" x2="11" y2="10"/>
+          <line x1="6" y1="13" x2="9" y2="13"/>
+          <line x1="17" y1="4" x2="17" y2="16"/>
+        </svg>
+      </button>
     </div>
     <div class="window-controls">
+      <ModeSwitcher class="inline-mode-switcher" />
       <button class="control-btn settings" @click="$emit('openSettings')" title="设置">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
       </button>
@@ -25,9 +35,11 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import ModeSwitcher from './ModeSwitcher.vue'
 
 defineEmits<{
   (e: 'openSettings'): void
+  (e: 'toggleSidebar'): void
 }>()
 
 const isMaximized = ref(false)
@@ -78,6 +90,26 @@ onMounted(() => {
   height: 20px;
 }
 
+.sidebar-toggle-btn {
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  -webkit-app-region: no-drag;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.sidebar-toggle-btn:hover {
+  background-color: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
 .title {
   font-size: 14px;
   font-weight: 500;
@@ -112,5 +144,19 @@ onMounted(() => {
 .control-btn.close:hover {
   background-color: #e81123;
   color: white;
+}
+
+.inline-mode-switcher {
+  margin: 0 4px;
+}
+
+.inline-mode-switcher :deep(.mode-switcher) {
+  margin: 0;
+  padding: 2px;
+}
+
+.inline-mode-switcher :deep(.mode-btn) {
+  padding: 4px 10px;
+  font-size: 12px;
 }
 </style>

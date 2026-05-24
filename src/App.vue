@@ -1,11 +1,10 @@
 <template>
   <div class="app">
-    <TitleBar @openSettings="showSettings = true" />
+    <TitleBar @openSettings="showSettings = true" @toggleSidebar="sidebarCollapsed = !sidebarCollapsed" />
     <ProjectPathInput />
     <div class="main-area">
-      <HistorySidebar ref="historySidebarRef" @selectGroupChat="onSelectGroupChat" />
+      <HistorySidebar ref="historySidebarRef" :collapsed="sidebarCollapsed" @selectGroupChat="onSelectGroupChat" />
       <div class="right-panel">
-        <ModeSwitcher />
         <TabBar v-if="$route.path !== '/ace'" />
         <main class="content">
           <router-view v-slot="{ Component, route }">
@@ -39,10 +38,10 @@ import TitleBar from './components/TitleBar.vue'
 import ProjectPathInput from './components/ProjectPathInput.vue'
 import HistorySidebar from './components/HistorySidebar.vue'
 import TabBar from './components/TabBar.vue'
-import ModeSwitcher from './components/ModeSwitcher.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
 
 const showSettings = ref(false)
+const sidebarCollapsed = ref(false)
 const currentGroupChatId = ref<number | null>(null)
 const historySidebarRef = ref<InstanceType<typeof HistorySidebar> | null>(null)
 let agentInvokedUnlisten: UnlistenFn | null = null

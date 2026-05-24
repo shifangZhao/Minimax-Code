@@ -43,6 +43,71 @@ export function escapeHtml(text: string): string {
   return text.replace(/[&<>"']/g, m => map[m])
 }
 
+// Highlight a single code block with language detection
+export function renderHighlightedBlock(code: string, lang: string): string {
+  const language = lang && hljs.getLanguage(lang) ? lang : 'plaintext'
+  let highlighted: string
+  try {
+    highlighted = hljs.highlight(code, { language }).value
+  } catch {
+    highlighted = escapeHtml(code)
+  }
+  return `<pre><code class="hljs language-${language}">${highlighted}</code></pre>`
+}
+
+// Render search/replace as a side-by-side diff with syntax highlighting
+export function renderSearchReplace(search: string, replace: string, path: string): string {
+  const lang = langFromPath(path)
+  const aLines = search.split('\n')
+  const bLines = replace.split('\n')
+
+  // Build old content HTML
+  let oldHtml = ''
+  for (const line of aLines) {
+    const escaped = escapeHtml(line)
+    const highlighted = lang ? hlLine(escaped, lang) : escaped
+    oldHtml += `<div class="diff-line">${highlighted || '&nbsp;'}</div>`
+  }
+
+  // Build new content HTML
+  let newHtml = ''
+  for (const line of bLines) {
+    const escaped = escapeHtml(line)
+    const highlighted = lang ? hlLine(escaped, lang) : escaped
+    newHtml += `<div class="diff-line">${highlighted || '&nbsp;'}</div>`
+  }
+
+  return `<div class="diff-view">` +
+    `<div class="diff-old">${oldHtml}</div>` +
+    `<div class="diff-new">${newHtml}</div>` +
+    `</div>`
+}
+
+// Infer language from file path
+export function langFromPath(path: string): string {
+  const ext = path.split('.').pop()?.toLowerCase() || ''
+  const langs: Record<string, string> = {
+    ts: 'typescript', tsx: 'tsx', js: 'javascript', jsx: 'jsx',
+    py: 'python', rs: 'rust', go: 'go', java: 'java', c: 'c',
+    cpp: 'cpp', h: 'c', hpp: 'cpp', cs: 'csharp',
+    vue: 'vue', svelte: 'svelte', json: 'json', yaml: 'yaml',
+    toml: 'toml', md: 'markdown', sql: 'sql', sh: 'bash',
+    css: 'css', html: 'html', xml: 'xml',
+  }
+  return langs[ext] || 'plaintext'
+}
+
+// Highlight a single line of code (for diff views)
+export function hlLine(line: string, lang: string): string {
+  if (!line.trim()) return ''
+  try {
+    if (lang && hljs.getLanguage(lang)) {
+      return hljs.highlight(line, { language: lang }).value
+    }
+  } catch {}
+  return escapeHtml(line)
+}
+
 // Parse code blocks from markdown
 export interface CodeBlock {
   language: string

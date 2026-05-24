@@ -36,7 +36,7 @@ fn hidden_cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
 /// after a 2s grace period. Output is capped at 256KB to prevent OOM.
 fn output_with_timeout(cmd: &mut Command, timeout_secs: u64) -> String {
     use std::sync::mpsc;
-    let mut child = match cmd
+    let child = match cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -84,7 +84,7 @@ fn output_with_timeout(cmd: &mut Command, timeout_secs: u64) -> String {
     }
 }
 
-use crate::context_compressor::{compress_context, estimate_tokens};
+use crate::context_compressor::{compress_context, compress_context_aggressive, estimate_request_tokens};
 use crate::lsp_manager::LspManager;
 use crate::lsp_types::format_diagnostics;
 use crate::mcp_service::McpService;
@@ -444,6 +444,7 @@ impl AgentService {
             json!({"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}})
         };
         let system_prompt = json!([system_block]);
+        let system_json = system_prompt.to_string();
 
         let mut tools: Vec<serde_json::Value> = get_agent_tools(agent_type)
             .into_iter()
@@ -476,6 +477,9 @@ impl AgentService {
                 obj.insert("cache_control".to_string(), json!({"type": "ephemeral"}));
             }
         }
+
+        // Serialize tools once for token estimation
+        let tools_json = serde_json::to_string(&tools).unwrap_or_default();
 
         // Build messages array (NO system message — system is top-level `system` field).
         let mut api_messages: Vec<serde_json::Value> = Vec::new();
@@ -580,7 +584,7 @@ impl AgentService {
 
         // Stability guards
         let max_steps: usize = std::env::var("MINIMAX_MAX_STEPS")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(30);
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(100);
         let context_guard_pct: f64 = std::env::var("MINIMAX_CONTEXT_GUARD")
             .ok().and_then(|v| v.parse().ok()).unwrap_or(0.80);
         let mut step = 0usize;
@@ -596,10 +600,10 @@ impl AgentService {
             }
 
             // Compress context when approaching token limit (80% of context window)
-            compress_context(agent_type, &mut api_messages, self.context_window);
+            compress_context(agent_type, &mut api_messages, self.context_window, false);
 
-            // Emit token usage for context window display
-            let est = estimate_tokens(&api_messages);
+            // Emit token usage for context window display (includes system + tools)
+            let est = estimate_request_tokens(&api_messages, &system_json, &tools_json);
             let usage_pct = (est as f64 / self.context_window as f64) * 100.0;
             emit(&app, &session_key, StreamEvent::TokenUsage {
                 estimated_tokens: est,
@@ -630,47 +634,86 @@ impl AgentService {
                 }
             }
 
-            let request_body = json!({
-                "model": self.model,
-                "system": system_prompt,
-                "messages": api_messages,
-                "max_tokens": 16384,
-                "temperature": 1,
-                "stream": true,
-                "tools": tools,
-            });
-            let request_body_str = serde_json::to_string(&request_body).unwrap();
+            // Collapse Drain: retry with aggressive compression on context overflow
+            let mut collapse_level = 0usize;
+            let response: reqwest::Response = loop {
+                let request_body = json!({
+                    "model": self.model,
+                    "system": system_prompt,
+                    "messages": api_messages,
+                    "max_tokens": 16384,
+                    "temperature": 1,
+                    "stream": true,
+                    "tools": tools,
+                });
+                let request_body_str = serde_json::to_string(&request_body).unwrap();
 
-            eprintln!("[stream_chat] Model: {}, Ctx: {}K, Messages: {}", self.model, self.context_window / 1000, api_messages.len());
+                let est = estimate_request_tokens(&api_messages, &system_json, &tools_json);
+                eprintln!("[stream_chat] Model: {}, Ctx: {}K, Messages: {}, EstTokens: {}", self.model, self.context_window / 1000, api_messages.len(), est);
 
-            // Send request
-            let client = Client::new();
-            let response = match client
-                .post(format!("{}{}", self.api_url, self.messages_path))
-                .header("Authorization", format!("Bearer {}", api_key))
-                .header("Content-Type", "application/json")
-                .body(request_body_str)
-                .send()
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("[stream_chat] Request failed: {}", e);
-                    let ev = StreamEvent::Error { content: format!("Request failed: {}", e) };
-                    emit(&app, &session_key, ev);
-                    return;
+                let client = Client::new();
+                let resp = match client
+                    .post(format!("{}{}", self.api_url, self.messages_path))
+                    .header("Authorization", format!("Bearer {}", api_key))
+                    .header("Content-Type", "application/json")
+                    .body(request_body_str)
+                    .send()
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let err_msg = e.to_string();
+                        // Detect context overflow from network-level errors too
+                        let is_overflow = err_msg.contains("413")
+                            || err_msg.contains("context")
+                            || err_msg.contains("token")
+                            || err_msg.contains("too large")
+                            || err_msg.contains("too long")
+                            || err_msg.contains("body");
+                        if is_overflow && collapse_level < 2 {
+                            collapse_level += 1;
+                            eprintln!("[collapse_drain] Network error hints at overflow, level {}", collapse_level);
+                            compress_context_aggressive(agent_type, &mut api_messages, collapse_level);
+                            continue;
+                        }
+                        eprintln!("[stream_chat] Request failed: {}", e);
+                        let ev = StreamEvent::Error { content: format!("Request failed: {}", e) };
+                        emit(&app, &session_key, ev);
+                        return;
+                    }
+                };
+
+                if resp.status().is_success() {
+                    break resp;
                 }
-            };
 
-            if !response.status().is_success() {
-                let status = response.status();
-                let err_text = response.text().await.unwrap_or_default();
+                let status = resp.status();
+                let err_text = resp.text().await.unwrap_or_default();
                 eprintln!("[stream_chat] API error {}: {}", status, err_text);
-                eprintln!("[stream_chat] URL: {}{}", self.api_url, self.messages_path);
+
+                // Detect context overflow: HTTP 400/413 with overflow-related keywords
+                let is_overflow = status.as_u16() == 413
+                    || (status.as_u16() == 400 && (
+                        err_text.contains("context")
+                        || err_text.contains("token")
+                        || err_text.contains("too large")
+                        || err_text.contains("too long")
+                        || err_text.contains("limit")
+                        || err_text.contains("overflow")
+                    ));
+
+                if is_overflow && collapse_level < 2 {
+                    collapse_level += 1;
+                    eprintln!("[collapse_drain] Context overflow detected, aggressive compress level {}", collapse_level);
+                    compress_context_aggressive(agent_type, &mut api_messages, collapse_level);
+                    // Rebuild request with compressed messages
+                    continue;
+                }
+
                 let ev = StreamEvent::Error { content: format!("API error {}: {}", status, err_text) };
                 emit(&app, &session_key, ev);
                 return;
-            }
+            };
 
             // Process SSE stream and collect result
             let (stop_reason, assistant_text, assistant_thinking, tool_uses, tool_results) = process_sse_stream(
@@ -1018,7 +1061,6 @@ async fn process_sse_stream(
     let storm_threshold: usize = std::env::var("MINIMAX_STORM_THRESHOLD")
         .ok().and_then(|v| v.parse().ok()).unwrap_or(3);
     let mut storm_history: Vec<String> = Vec::with_capacity(storm_window);
-    let mut self_corrected = false;
 
     let tool_uses = if stop_reason.as_deref() == Some("tool_use") {
         let storm_passed: Vec<(String, String, String)> = tool_uses.iter().filter(|(_, name, input)| {
@@ -1029,15 +1071,10 @@ async fn process_sse_stream(
             count < storm_threshold
         }).cloned().collect();
         let blocked = tool_uses.len() - storm_passed.len();
-        if storm_passed.is_empty() && !tool_uses.is_empty() && !self_corrected {
-            eprintln!("[storm_breaker] All {} calls suppressed — self-correction, retrying all", tool_uses.len());
-            self_corrected = true;
+        if storm_passed.is_empty() && !tool_uses.is_empty() {
+            eprintln!("[storm_breaker] All {} calls suppressed — allowing through", tool_uses.len());
             storm_history.clear();
             tool_uses.clone()
-        } else if storm_passed.is_empty() && self_corrected && !tool_uses.is_empty() {
-            eprintln!("[storm_breaker] Storm persists after self-correction — sending Done to stop loop");
-            emit(&app, &session_key, StreamEvent::Done);
-            return (Some("end_turn".to_string()), assistant_text, assistant_thinking, Vec::new(), Vec::new());
         } else {
             if blocked > 0 { eprintln!("[storm_breaker] Blocked {} repeated tool calls", blocked); }
             storm_passed

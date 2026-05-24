@@ -9,18 +9,18 @@
           title="停止生成"
           :disabled="stopClicked"
           @click="stopStream()"
-        >■ 停止</button>
+        >■</button>
         <button
           v-if="recentEdits.length > 0"
           class="header-btn"
           title="撤销编辑"
           @click="sessionId && undoLast(sessionId)"
-        >↩ 撤销</button>
+        >↩</button>
         <button
           class="header-btn"
           title="快照"
           @click="showBookmarkPanel = !showBookmarkPanel"
-        >📸 快照</button>
+        >📸</button>
         <button
           class="header-btn header-btn-danger"
           title="清空对话"
@@ -55,7 +55,7 @@
         </div>
       </div>
     </div>
-    <div v-if="tokenUsage.usage_pct > 0" class="context-usage">
+    <div v-if="messages.length > 0 || loading" class="context-usage">
       <div class="context-bar">
         <div class="context-fill" :class="usageColor" :style="{ width: Math.min(tokenUsage.usage_pct, 100) + '%' }"></div>
       </div>
@@ -67,7 +67,7 @@
         :key="i"
         :class="['message', msg.role]"
       >
-        <div class="avatar">{{ msg.role === 'user' ? 'U' : 'A' }}</div>
+        <div v-if="msg.role !== 'tool'" class="avatar">{{ msg.role === 'user' ? 'U' : 'A' }}</div>
         <div class="content">
           <div v-if="msg.thinking && msg.role === 'assistant'" class="thinking-block">
             <div class="thinking-toggle" :class="{ collapsed: !isThinkingExpanded(i) }" @click="toggleThinking(i)">
@@ -94,13 +94,16 @@
               </div>
             </div>
             <div class="text user-text">{{ msg.content }}</div>
-            <div class="msg-hover-actions">
-              <button class="hover-btn" title="重新生成" @click="retryMessage(i)">⟳</button>
-              <button class="hover-btn" title="回退到此" @click="rewindToMessage(msg.id, msg.content)">↩</button>
-            </div>
+          </div>
+          <div v-else-if="msg.role === 'tool'" class="tool-msg">
+            <ToolCard v-if="getToolCardInfo(msg)" :toolInfo="getToolCardInfo(msg)!" />
           </div>
           <div v-else class="text" v-html="formatContent(msg.content)"></div>
           <div class="time" v-if="msg.created_at">{{ formatTime(msg.created_at) }}</div>
+        </div>
+        <div v-if="msg.role === 'user'" class="msg-hover-actions">
+          <button class="hover-btn" title="重新生成" @click="retryMessage(i)">⟳</button>
+          <button class="hover-btn" title="回退到此" @click="rewindToMessage(msg.id, msg.content)">↩</button>
         </div>
       </div>
       <div v-if="showLoading" class="message assistant">
@@ -135,6 +138,11 @@
       :visible="showUndoToast"
       :message="lastUndone ? `已撤销: ${lastUndone}` : ''"
       @close="showUndoToast = false"
+    />
+    <ToastBar
+      :visible="showCompactToast"
+      :message="compactToastMsg"
+      @close="showCompactToast = false"
     />
     <AskDialog
       v-if="pendingAsk"
@@ -222,6 +230,7 @@ import { renderMarkdown } from '../composables/useMarkdown'
 import AskDialog from '../components/AskDialog.vue'
 import ToastBar from '../components/ToastBar.vue'
 import BookmarkPanel from '../components/BookmarkPanel.vue'
+import ToolCard from '../components/ToolCard.vue'
 import { useUndoHistory } from '../composables/useUndoHistory'
 import { useBookmarks } from '../composables/useBookmarks'
 
@@ -258,6 +267,8 @@ const {
 const { globalStreamingStates } = useGlobalStreaming()
 const { permRequests, respond: respondPerm } = usePermissions()
 const { recentEdits, lastUndone, showUndoToast, loadEdits, undoLast } = useUndoHistory()
+const showCompactToast = ref(false)
+const compactToastMsg = ref('')
 const { bookmarks, showBookmarkPanel, showSaveInput, bookmarkName, loadBookmarks, saveBookmark, restoreBookmark, deleteBookmark } = useBookmarks()
 
 const messagesEl = ref<HTMLElement>()
@@ -383,23 +394,49 @@ function isInternalCacheMessage(msg: any): boolean {
 }
 
 const displayMessages = computed(() => {
-  return messages.value
-    .filter(m => !isInternalCacheMessage(m))
-    .map(m => {
-      // If content starts with 💭, extract thinking and text
+  const result: any[] = []
+
+  // Iterate ALL messages in chronological order. Tool cards are emitted after
+  // their parent assistant message (even if the parent is hidden as pure tool_use).
+  for (const m of messages.value) {
+    const hidden = isInternalCacheMessage(m)
+
+    if (!hidden) {
       if (m.content && m.content.startsWith('💭')) {
         const parts = m.content.split('\n\n')
-        return {
+        result.push({
           ...m,
           thinking: parts[0].replace('💭 ', ''),
           content: parts.slice(1).join('\n\n'),
+        })
+      } else {
+        result.push({
+          ...m,
+          thinking: (m as any).thinking,
+        })
+      }
+    }
+
+    // Emit tool cards after this message (whether hidden or not)
+    if (m.role === 'assistant' && (m as any).tool_calls) {
+      try {
+        const calls = JSON.parse((m as any).tool_calls)
+        if (Array.isArray(calls)) {
+          for (const tc of calls) {
+            result.push({
+              id: `tool-${tc.id}`,
+              role: 'tool',
+              tool_calls: JSON.stringify([tc]),
+              content: '',
+              created_at: m.created_at,
+            } as any)
+          }
         }
-      }
-      return {
-        ...m,
-        thinking: (m as any).thinking,
-      }
-    })
+      } catch {}
+    }
+  }
+
+  return result
 })
 
 function formatContent(text: string, streaming?: boolean): string {
@@ -461,6 +498,22 @@ function onImgError(e: Event) {
 
 function formatTime(ts: string): string {
   return new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+}
+
+interface ToolCardInfo { name: string; args?: string; result?: string }
+
+function getToolCardInfo(msg: any): ToolCardInfo | null {
+  if (!msg.tool_calls) return null
+  try {
+    const calls = JSON.parse(msg.tool_calls)
+    if (!Array.isArray(calls) || calls.length === 0) return null
+    const tc = calls[0]
+    return {
+      name: tc.function?.name || 'tool',
+      args: tc.function?.arguments || undefined,
+      result: msg.content || undefined,
+    }
+  } catch { return null }
 }
 
 function isAtBottom(): boolean {
@@ -593,6 +646,7 @@ function autoResize(e: Event) {
 }
 
 function stopStream() {
+  if (sessionId.value === null) return
   stopClicked.value = true
   const state = globalStreamingStates.value.get(streamKey.value)
   if (state?.abort) {
@@ -608,13 +662,12 @@ async function onSend() {
     inputText.value = ''
     try {
       const msg = await invoke<string>('mcp_reload')
-      messages.value.push({
-        id: Date.now(), session_id: sessionId.value!, role: 'user' as const,
-        content: `/mcp reload — ${msg}`,
-        created_at: new Date().toISOString(),
-      } as any)
+      compactToastMsg.value = `MCP 重载 — ${msg}`
+      showCompactToast.value = true
     } catch (e) {
       console.error('MCP reload failed:', e)
+      compactToastMsg.value = 'MCP 重载失败'
+      showCompactToast.value = true
     }
     return
   }
@@ -623,14 +676,18 @@ async function onSend() {
     inputText.value = ''
     try {
       const result = await db.compactSession(sessionId.value)
-      messages.value.push({
-        id: Date.now(), session_id: sessionId.value!, role: 'user' as const,
-        content: `/compact — ${result.before} → ${result.after} tokens (${result.messages} msgs)`,
-        created_at: new Date().toISOString(),
-      } as any)
+      const freed = result.before - result.after
+      const freedKb = (freed / 1024).toFixed(1)
+      const beforeK = formatTokens(result.before)
+      const afterK = formatTokens(result.after)
+      const pct = result.before > 0 ? Math.round((freed / result.before) * 100) : 0
+      compactToastMsg.value = `压缩完成: ${beforeK} → ${afterK} tokens, 释放 ${freedKb}K (${pct}%)`
+      showCompactToast.value = true
       await loadMessages()
     } catch (e) {
       console.error('Compact failed:', e)
+      compactToastMsg.value = '压缩失败'
+      showCompactToast.value = true
     }
     return
   }
@@ -900,40 +957,106 @@ onDeactivated(() => {
 
 .message {
   display: flex;
-  gap: 10px;
-  max-width: 80%;
+  gap: 12px;
+  align-items: flex-start;
+  width: 100%;
+  position: relative;
 }
 
 .message.user {
-  align-self: flex-end;
-  flex-direction: row-reverse;
+  /* left-aligned like DeepSeek */
 }
 
 .message.assistant {
   align-self: flex-start;
 }
 
-.avatar {
-  width: 32px;
-  height: 32px;
+.message.tool {
+  align-self: flex-start;
+  width: 100%;
+}
+
+.tool-msg {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Role glyph (before avatar) */
+.glyph {
+  width: 24px;
+  height: 24px;
   border-radius: 50%;
   background: var(--bg-tertiary);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 16px;
+  font-size: 12px;
+  font-family: var(--font-mono);
   flex-shrink: 0;
+  color: var(--text-secondary);
+}
+
+.message.user .glyph {
+  color: var(--accent);
+  background: var(--bg-tertiary);
+}
+
+.message.assistant .glyph {
+  color: var(--accent-ok);
+  background: var(--bg-tertiary);
+}
+
+.message.tool .glyph {
+  color: var(--accent-warn);
+  background: var(--bg-tertiary);
+}
+
+.avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--bg-tertiary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
+
+.message.user .avatar {
+  color: var(--accent);
+}
+
+.message.assistant .avatar {
+  color: var(--accent-ok);
 }
 
 .content {
   background: var(--bg-secondary);
   border-radius: 12px;
   padding: 10px 14px;
-  max-width: 100%;
+  flex: 1;
+  min-width: 0;
+  border: 2px solid transparent;
+  position: relative;
 }
 
 .message.user .content {
   background: var(--bg-tertiary);
+  border-color: #888;
+}
+
+.message.assistant .content {
+  border-color: var(--accent);
+}
+
+.message.tool .content {
+  border: none;
+  padding: 0;
+  background: transparent;
+  margin-left: 36px;
 }
 
 .loading-content {
@@ -960,6 +1083,16 @@ onDeactivated(() => {
   margin: 0;
   font-family: inherit;
   user-select: text;
+}
+
+.tool-counter {
+  font-size: 12px;
+  color: var(--accent-warn);
+  margin-bottom: 6px;
+  padding: 4px 8px;
+  background: var(--bg-tertiary);
+  border-radius: 4px;
+  display: inline-block;
 }
 
 /* Markdown rendered content */
@@ -1741,15 +1874,16 @@ onDeactivated(() => {
 
 .msg-hover-actions {
   display: flex;
+  flex-direction: column;
   gap: 2px;
   position: absolute;
-  top: -6px;
-  left: -30px;
+  top: 28px;
+  left: 0;
   opacity: 0;
   transition: opacity 0.15s;
 }
 
-.user-msg:hover .msg-hover-actions {
+.message:hover .msg-hover-actions {
   opacity: 1;
 }
 

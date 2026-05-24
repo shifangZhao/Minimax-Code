@@ -1674,7 +1674,7 @@ fn compact_session(state: State<'_, AppState>, session_id: i64) -> Result<String
         serde_json::json!({"role": m.role, "content": content_val})
     }).collect();
 
-    compress_context(&agent_type, &mut api_messages, context_window);
+    compress_context(&agent_type, &mut api_messages, context_window, true);
 
     let token_after = estimate_tokens(&api_messages);
 

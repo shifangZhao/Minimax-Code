@@ -1,5 +1,5 @@
 <template>
-  <div class="history-sidebar">
+  <div class="history-sidebar" :class="{ collapsed }">
     <div class="sidebar-header">
       <span class="sidebar-title">{{ currentMode === 'ace' ? '历史会话' : '历史群聊' }}</span>
       <button class="add-btn" @click.stop="createGroupChat" :title="currentMode === 'ace' ? '新建会话' : '新建群聊'">+</button>
@@ -60,6 +60,10 @@ const loading = ref(false)
 const groupChats = ref<GroupChat[]>([])
 const activeChatId = ref<number | null>(null)
 const nextTemporaryId = ref(-1)
+
+defineProps<{
+  collapsed?: boolean
+}>()
 
 const emit = defineEmits<{
   (e: 'selectGroupChat', chatId: number): void
@@ -198,6 +202,14 @@ onMounted(async () => {
   background-color: var(--bg-secondary);
   border-right: 1px solid var(--border-color);
   width: 200px;
+  transition: width 0.2s ease;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.history-sidebar.collapsed {
+  width: 0;
+  border-right: none;
 }
 
 .sidebar-header {

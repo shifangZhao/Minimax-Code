@@ -13,6 +13,7 @@ const COMPRESS_THRESHOLD: f64 = 0.8;
 const SAMPLE_BOUND: usize = 4096;       // chars to sample from head and tail each
 const FULL_SCAN_BOUND: usize = 16384;   // below this, scan everything
 
+/// Estimate tokens for a messages array only (backward compatible).
 pub fn estimate_tokens(messages: &[Value]) -> usize {
     let mut total = 0usize;
     for m in messages {
@@ -20,6 +21,20 @@ pub fn estimate_tokens(messages: &[Value]) -> usize {
         total += estimate_one(&text);
     }
     total
+}
+
+/// Estimate total tokens for a full API request: messages + system + tools.
+/// system and tools are passed as already-serialized JSON strings.
+/// This gives a more accurate usage_pct since system/tools can be 20-40K tokens.
+pub fn estimate_request_tokens(
+    messages: &[Value],
+    system_json: &str,
+    tools_json: &str,
+) -> usize {
+    let msg_tokens = estimate_tokens(messages);
+    let system_tokens = estimate_one(system_json);
+    let tools_tokens = estimate_one(tools_json);
+    msg_tokens.saturating_add(system_tokens).saturating_add(tools_tokens)
 }
 
 fn estimate_one(text: &str) -> usize {
@@ -40,7 +55,6 @@ fn estimate_one(text: &str) -> usize {
 fn count_tokens_from_chars(text: &str) -> usize {
     let mut cjk = 0usize;
     let mut ascii_alpha = 0usize;
-    let mut json_structural = 0usize;
     let mut other = 0usize;
     for ch in text.chars() {
         match ch {
@@ -52,23 +66,59 @@ fn count_tokens_from_chars(text: &str) -> usize {
             | '\u{30A0}'..='\u{30FF}'
             | '\u{AC00}'..='\u{D7AF}'
             => cjk += 1,
-            '{' | '}' | '[' | ']' | '"' | ':' | ',' => json_structural += 1,
             'a'..='z' | 'A'..='Z' | '0'..='9' => ascii_alpha += 1,
             _ => other += 1,
         }
     }
-    (cjk as f64 / 1.5) as usize + ascii_alpha / 4 + json_structural + other / 3
+    (cjk as f64 / 2.0) as usize + ascii_alpha / 4 + other / 3
 }
 
-/// Compress api_messages in-place when token budget exceeds 80%.
+/// Collapse Drain — aggressive compression when API returns context overflow.
+/// `level`: 1 = moderately aggressive, 2 = keep only the very last exchange.
+/// Returns true if compression actually reduced the message count.
+pub fn compress_context_aggressive(agent_type: &str, messages: &mut Vec<Value>, level: usize) -> bool {
+    let keep_recent = match agent_type {
+        "ace" => if level >= 2 { 2 } else { 4 },
+        "front" => if level >= 2 { 2 } else { 3 },
+        _ => if level >= 2 { 1 } else { 2 },
+    };
+
+    // Need enough messages to be worth compressing
+    if messages.len() <= keep_recent + 3 {
+        return false;
+    }
+
+    let old_len = messages.len();
+    let split_idx = messages.len() - keep_recent;
+    let first_msg = messages[0].clone();
+    let recent: Vec<Value> = messages[split_idx..].to_vec();
+
+    let summary = build_summary(agent_type, &messages[1..split_idx]);
+
+    messages.clear();
+    messages.push(first_msg);
+    messages.push(serde_json::json!({
+        "role": "user",
+        "content": summary
+    }));
+    messages.extend(recent);
+
+    eprintln!(
+        "[collapse_drain] {} level={}: {} → {} messages",
+        agent_type, level, old_len, messages.len()
+    );
+    true
+}
+
+/// Compress api_messages in-place when token budget exceeds 80% (or force=true).
 /// Always keeps the first message (oldest history) and the last N messages.
 /// Middle messages are replaced with a single summary user message.
 /// Note: system prompt is sent as top-level `system` field, not in messages.
 /// `context_window` is the model's max context in tokens (e.g. 204000 for MiniMax, 200000 for Claude).
-pub fn compress_context(agent_type: &str, messages: &mut Vec<Value>, context_window: usize) {
+pub fn compress_context(agent_type: &str, messages: &mut Vec<Value>, context_window: usize, force: bool) {
     let tokens = estimate_tokens(messages);
     let threshold = (context_window as f64 * COMPRESS_THRESHOLD) as usize;
-    if tokens < threshold {
+    if !force && tokens < threshold {
         return;
     }
 
