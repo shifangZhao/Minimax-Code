@@ -5,8 +5,6 @@
 
 use serde_json::Value;
 
-const COMPRESS_THRESHOLD: f64 = 0.8;
-
 const SUMMARIZE_SYSTEM: &str = r#"你是上下文压缩器。你的任务是把对话历史压缩为结构化摘要，保留后续任务需要的全部关键信息。
 
 ## 必须保留
@@ -38,11 +36,13 @@ const SUMMARIZE_SYSTEM: &str = r#"你是上下文压缩器。你的任务是把�
 不要加解释，直接输出摘要。"#;
 
 /// Ask the model to summarize the given messages. Returns the summary string.
+/// Uses the same Anthropic-compatible endpoint as the main chat.
 pub async fn summarize_with_model(
     agent_type: &str,
     messages: &[Value],
     api_key: &str,
     api_url: &str,
+    messages_path: &str,
     model: &str,
 ) -> String {
     let messages_json = serde_json::to_string(messages).unwrap_or_default();
@@ -58,11 +58,12 @@ pub async fn summarize_with_model(
         "messages": [{"role": "user", "content": user_content}],
         "max_tokens": 2048,
         "temperature": 0.3,
+        "stream": false,
     });
 
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("{}/v1/chat/completions", api_url.trim_end_matches('/')))
+        .post(format!("{}{}", api_url, messages_path))
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .json(&body)
@@ -73,8 +74,10 @@ pub async fn summarize_with_model(
         Ok(r) if r.status().is_success() => {
             match r.json::<Value>().await {
                 Ok(json) => {
-                    let summary = json["choices"][0]["message"]["content"]
+                    // Anthropic format: content[0].text
+                    let summary = json["content"][0]["text"]
                         .as_str()
+                        .or_else(|| json["choices"][0]["message"]["content"].as_str())
                         .unwrap_or("")
                         .to_string();
                     if summary.is_empty() {
@@ -193,15 +196,10 @@ pub fn compress_context_aggressive(agent_type: &str, messages: &mut Vec<Value>, 
     true
 }
 
-/// Compress api_messages in-place. `force` skips the 80% threshold check.
+/// Compress api_messages in-place. The caller is responsible for deciding
+/// whether compression is needed (the old heuristic threshold check is gone).
 /// `summary`: model-generated summary.
-pub fn compress_context(agent_type: &str, messages: &mut Vec<Value>, context_window: usize, force: bool, summary: String) {
-    let tokens = estimate_tokens(messages);
-    let threshold = (context_window as f64 * COMPRESS_THRESHOLD) as usize;
-    if !force && tokens < threshold {
-        return;
-    }
-
+pub fn compress_context(agent_type: &str, messages: &mut Vec<Value>, summary: String) {
     let keep_recent = match agent_type {
         "ace" => 10,
         "front" => 8,
@@ -216,6 +214,7 @@ pub fn compress_context(agent_type: &str, messages: &mut Vec<Value>, context_win
         return;
     }
 
+    let old_len = messages.len();
     let split_idx = messages.len() - keep_recent;
     let first_msg = messages[0].clone();
     let recent: Vec<Value> = messages[split_idx..].to_vec();
@@ -225,6 +224,5 @@ pub fn compress_context(agent_type: &str, messages: &mut Vec<Value>, context_win
     messages.push(serde_json::json!({ "role": "user", "content": summary }));
     messages.extend(recent);
 
-    let new_tokens = estimate_tokens(messages);
-    eprintln!("[compress] {}: {} → {} tokens (ctx: {}, threshold: {})", agent_type, tokens, new_tokens, context_window, threshold);
+    eprintln!("[compress] {}: {} → {} messages", agent_type, old_len, messages.len());
 }

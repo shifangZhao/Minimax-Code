@@ -1,7 +1,7 @@
 // Agent conversation using Rust backend via Tauri invoke
 // Supports Interleaved Thinking with complete message history
 
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { db, type ChatMessage } from '../services/db'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
@@ -30,27 +30,15 @@ export interface AssistantMessage {
   }>
 }
 
-interface RustStreamEvent {
-  type: 'content_block_delta' | 'tool_start' | 'tool_end' | 'done' | 'aborted' | 'error' | 'cache_usage' | 'token_usage'
-  content?: string
-  thinking?: string
-  tool?: string
-  tool_id?: string
-  input?: Record<string, any>
-  result?: string
-  cache_hit_tokens?: number
-  cache_miss_tokens?: number
-  cache_hit_ratio?: number
-  estimated_tokens?: number
-  context_window?: number
-  usage_pct?: number
-}
-
 export interface TokenUsage {
   estimated_tokens: number
   context_window: number
   usage_pct: number
 }
+
+// Module-level cache: persists across composable instances so token counts
+// survive tab switches and are never lost between composable re-creations.
+const sessionTokenUsage = new Map<number, TokenUsage>()
 
 export function useAgentConversation(agentType: string) {
   const messages = ref<ChatMessage[]>([])
@@ -61,13 +49,9 @@ export function useAgentConversation(agentType: string) {
   const toolEvents = ref<ToolEvent[]>([])
   const tokenUsage = ref<TokenUsage>({ estimated_tokens: 0, context_window: 200000, usage_pct: 0 })
 
-  // Per-session token usage cache
-  const sessionTokenUsage = new Map<number, TokenUsage>()
-
-  // Per-session stream listeners for multi-group-chat support
-  const streamListeners = new Map<number, UnlistenFn>()
   // Per-session loading state
   const loadingSessions = new Set<number>()
+  const { updateStreamState, clearStreamState, setupListener, teardownListener, clearAgentStreams } = useGlobalStreaming()
 
   let agentInvokedUnlisten: UnlistenFn | null = null
   let askUnlisten: UnlistenFn | null = null
@@ -105,10 +89,7 @@ export function useAgentConversation(agentType: string) {
     setupAskListener()
   })
   onUnmounted(() => {
-    for (const [_, ul] of streamListeners) {
-      ul()
-    }
-    streamListeners.clear()
+    clearAgentStreams()
     if (agentInvokedUnlisten) {
       agentInvokedUnlisten()
     }
@@ -137,16 +118,9 @@ export function useAgentConversation(agentType: string) {
     // Clean up stale stream listener from previous session to prevent
     // events from old session leaking into the new session's stream state.
     if (sessionId.value !== null && sessionId.value !== newSessionId) {
-      const oldListener = streamListeners.get(sessionId.value)
-      if (oldListener) {
-        oldListener()
-        streamListeners.delete(sessionId.value)
-      }
-      // Clean up loading state for the old session (isolate multi-agent/conversation)
+      teardownListener(sessionId.value)
       loadingSessions.delete(sessionId.value)
       loading.value = loadingSessions.size > 0
-      // Also clear the old session's stream state from the global map
-      const { clearStreamState } = useGlobalStreaming()
       clearStreamState(sessionId.value)
     }
 
@@ -161,15 +135,16 @@ export function useAgentConversation(agentType: string) {
     }
     const msgs = await db.getMessages(sessionId.value)
     messages.value = msgs
-    // Restore cached token usage for this session, or estimate from messages
+    // Restore cached token usage (server-reported) or keep current display
     const cached = sessionTokenUsage.get(sessionId.value)
     if (cached) {
       tokenUsage.value = cached
     } else if (msgs.length > 0) {
+      // Rough fallback — only used before first server response in a session
       const totalChars = msgs.reduce((sum, m) => sum + (m.content?.length || 0) + ((m as any).thinking?.length || 0), 0)
-      const est = Math.max(1, Math.round(totalChars / 4))
+      const est = Math.max(1, Math.round(totalChars / 3))  // closer to real token ratio
       const cw = tokenUsage.value.context_window
-      tokenUsage.value = { estimated_tokens: est, context_window: cw, usage_pct: (est / cw) * 100 }
+      tokenUsage.value = { estimated_tokens: est, context_window: cw, usage_pct: Math.min((est / cw) * 100, 99) }
     } else {
       tokenUsage.value = { estimated_tokens: 0, context_window: 200000, usage_pct: 0 }
     }
@@ -282,9 +257,6 @@ export function useAgentConversation(agentType: string) {
       }
     }
 
-    // Set up event listener for real-time streaming
-    const { updateStreamState, clearStreamState } = useGlobalStreaming()
-
     // Clear and prepare stream state, then wire abort callback
     clearStreamState(finalSessionId)
     updateStreamState(finalSessionId, {
@@ -311,19 +283,13 @@ export function useAgentConversation(agentType: string) {
       function: { name: string; arguments: string }
     }> = []
 
-    // Clean up any existing listener for this session
-    if (streamListeners.has(finalSessionId)) {
-      streamListeners.get(finalSessionId)!()
-      streamListeners.delete(finalSessionId)
-    }
-
     // Promise-based completion — replaces the polling loop
     let resolveStream: (() => void) | null = null
     const streamComplete = new Promise<void>(r => { resolveStream = r })
 
-    // Set up event listener for real-time streaming
+    // Set up event listener for real-time streaming (managed by useGlobalStreaming)
     console.log('[sendMessage] Setting up event listener for:', `agent_stream_${finalSessionId}`)
-    const unlisten = await listen<RustStreamEvent>(`agent_stream_${finalSessionId}`, (event) => {
+    await setupListener(finalSessionId, (event) => {
       console.log('[sendMessage] Received event:', event.payload.type)
       const ev = event.payload
       switch (ev.type) {
@@ -375,8 +341,12 @@ export function useAgentConversation(agentType: string) {
           )
           break
         case 'token_usage':
+          // Never let the displayed token count decrease within a session —
+          // the API-reported cumulative count should be monotonic.
+          const cached = sessionTokenUsage.get(finalSessionId)
+          const est = ev.estimated_tokens || 0
           const tu = {
-            estimated_tokens: ev.estimated_tokens || 0,
+            estimated_tokens: cached && cached.estimated_tokens > est ? cached.estimated_tokens : est,
             context_window: ev.context_window || 200000,
             usage_pct: ev.usage_pct || 0
           }
@@ -396,8 +366,9 @@ export function useAgentConversation(agentType: string) {
       }
     })
 
-    // Store the listener for this session (multi-group-chat support)
-    streamListeners.set(finalSessionId, unlisten)
+    // Snapshot message count before the stream — used to detect whether
+    // backend persisted new messages after the stream completes.
+    const msgCountBefore = messages.value.length
 
     try {
       // Call Rust agent service
@@ -413,15 +384,9 @@ export function useAgentConversation(agentType: string) {
 
       // Wait for stream to complete (event-driven, no polling)
       console.log('[sendMessage] Waiting for stream...')
-      await Promise.race([
-        streamComplete,
-        new Promise(r => setTimeout(r, 120000))
-      ])
+      await streamComplete
 
-      // Final state update — keep done:false so streaming content stays visible
-      // until loadMessages() populates the persisted message in the messages list.
-      // Use raw text here (not displayContent) because thinking is rendered
-      // separately via the thinking field.
+      // Keep streaming content visible until DB load confirms persistence
       updateStreamState(finalSessionId, {
         text: fullText || undefined,
         thinking: fullThinking,
@@ -429,27 +394,7 @@ export function useAgentConversation(agentType: string) {
         toolCallCount
       })
 
-      // 构建完整的 assistant 消息（用于保存到历史）
-      const assistantMsg: any = {
-        id: Date.now() + 1,
-        session_id: finalSessionId,
-        role: 'assistant',
-        content: fullText,
-        created_at: new Date().toISOString(),
-      }
-
-      // 如果有 reasoning_details，保存到消息中
-      if (fullThinking) {
-        assistantMsg.reasoning_details = fullThinking
-      }
-
-      // 如果有 tool_calls，保存到消息中
-      if (collectedToolCalls.length > 0) {
-        assistantMsg.tool_calls = collectedToolCalls
-      }
-
-      // Reload from DB to pick up backend-persisted messages first,
-      // THEN clear streaming display so there's no gap between stream end and DB load.
+      // Reload from DB to pick up backend-persisted messages
       await loadMessages()
 
       // Clear streaming display after DB messages are available
@@ -457,11 +402,13 @@ export function useAgentConversation(agentType: string) {
         text: '', thinking: '', done: true, toolCallCount
       })
 
-      // Fallback: if backend didn't persist the assistant message, push stream buffer
+      // Fallback: if no new messages appeared in DB, push stream buffer
+      // so the user always sees the output. Checking message count is more
+      // reliable than checking the last message's role (multi-turn tool_use
+      // messages can cause false positives).
       if (fullText || fullThinking) {
-        const lastMsg = messages.value[messages.value.length - 1]
-        const isAssistantSaved = lastMsg?.role === 'assistant' && lastMsg?.content
-        if (!isAssistantSaved) {
+        const msgCountAfter = messages.value.length
+        if (msgCountAfter <= msgCountBefore) {
           const fallbackContent = fullThinking
             ? `💭 ${fullThinking}\n\n${fullText}`
             : fullText
@@ -471,6 +418,7 @@ export function useAgentConversation(agentType: string) {
             role: 'assistant',
             content: fallbackContent,
             thinking: fullThinking || undefined,
+            tool_calls: collectedToolCalls.length > 0 ? JSON.stringify(collectedToolCalls) : undefined,
             created_at: new Date().toISOString(),
           } as ChatMessage)
         }
@@ -491,12 +439,7 @@ export function useAgentConversation(agentType: string) {
     } finally {
       loadingSessions.delete(finalSessionId)
       loading.value = loadingSessions.size > 0
-      // Clean up this session's stream listener
-      const ul = streamListeners.get(finalSessionId)
-      if (ul) {
-        ul()
-        streamListeners.delete(finalSessionId)
-      }
+      teardownListener(finalSessionId)
     }
   }
 
@@ -532,7 +475,6 @@ export function useAgentConversation(agentType: string) {
     const info = showRewindConfirm.value
     if (!info || !sessionId.value) return null
     try {
-      const { clearStreamState } = useGlobalStreaming()
       clearStreamState(sessionId.value)
       const savedContent = await invoke<string>('rewind_conversation', {
         sessionId: sessionId.value,
@@ -557,7 +499,6 @@ export function useAgentConversation(agentType: string) {
   async function clearConversation() {
     if (!sessionId.value) return
     try {
-      const { clearStreamState } = useGlobalStreaming()
       clearStreamState(sessionId.value)
       await db.clearSessionHistory(sessionId.value)
       messages.value = []
@@ -570,6 +511,70 @@ export function useAgentConversation(agentType: string) {
     }
   }
 
+  function isInternalCacheMessage(msg: any): boolean {
+    if (msg.role === 'user' && msg.content?.startsWith('## 内置参考资料')) return true
+    if (msg.raw_json) {
+      try {
+        const blocks = JSON.parse(msg.raw_json)
+        if (Array.isArray(blocks)) {
+          if (msg.role === 'user' && blocks.some((b: any) => b.type === 'tool_result')) return true
+          if (msg.role === 'assistant' && blocks.some((b: any) => b.type === 'tool_use')) {
+            const hasText = blocks.some((b: any) => b.type === 'text' && b.text?.trim())
+            const hasThinking = blocks.some((b: any) => b.type === 'thinking')
+            if (!hasText && !hasThinking) return true
+          }
+        }
+      } catch {}
+    }
+    if (msg.role === 'user' && !msg.content?.trim()) return true
+    if (msg.tool_calls) {
+      try {
+        const tc = JSON.parse(msg.tool_calls)
+        if (Array.isArray(tc) && tc.some((t: any) =>
+          ['skill', 'match_skills', 'list_skills'].includes(t.function?.name)
+        )) return true
+      } catch {}
+    }
+    return false
+  }
+
+  const displayMessages = computed(() => {
+    const result: any[] = []
+    for (const m of messages.value) {
+      const hidden = isInternalCacheMessage(m)
+      if (!hidden) {
+        if (m.content && m.content.startsWith('💭')) {
+          const parts = m.content.split('\n\n')
+          result.push({
+            ...m,
+            thinking: parts[0].replace('💭 ', ''),
+            content: parts.slice(1).join('\n\n'),
+          })
+        } else {
+          result.push({ ...m, thinking: (m as any).thinking })
+        }
+      }
+      // Emit tool cards after this message (whether hidden or not)
+      if (m.role === 'assistant' && (m as any).tool_calls) {
+        try {
+          const calls = JSON.parse((m as any).tool_calls)
+          if (Array.isArray(calls)) {
+            for (const tc of calls) {
+              result.push({
+                id: `tool-${tc.id}`,
+                role: 'tool',
+                tool_calls: JSON.stringify([tc]),
+                content: '',
+                created_at: m.created_at,
+              } as any)
+            }
+          }
+        } catch {}
+      }
+    }
+    return result
+  })
+
   return {
     messages,
     loading,
@@ -577,6 +582,7 @@ export function useAgentConversation(agentType: string) {
     currentGroupChatId,
     pendingAsk,
     toolEvents,
+    displayMessages,
     initSession,
     loadMessages,
     sendMessage,

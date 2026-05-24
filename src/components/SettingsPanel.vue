@@ -18,7 +18,7 @@
           <div class="form-group">
             <label>API Key</label>
             <div class="input-wrapper">
-              <input :type="showKey ? 'text' : 'password'" v-model="minimaxApiKey" placeholder="输入 MiniMax API Key..." />
+              <input :type="showKey ? 'text' : 'password'" v-model="minimaxApiKey" placeholder="输入 MiniMax API Key..." @focus="handleKeyFocus" />
               <button class="toggle-btn" @click="showKey = !showKey">{{ showKey ? '👁' : '👁‍🗨' }}</button>
             </div>
           </div>
@@ -95,7 +95,7 @@
           <div class="form-group">
             <label>API Key</label>
             <div class="input-wrapper">
-              <input :type="showCustomKey ? 'text' : 'password'" v-model="customApiKey" placeholder="sk-ant-..." />
+              <input :type="showCustomKey ? 'text' : 'password'" v-model="customApiKey" placeholder="sk-ant-..." @focus="handleCustomKeyFocus" />
               <button class="toggle-btn" @click="showCustomKey = !showCustomKey">{{ showCustomKey ? '👁' : '👁‍🗨' }}</button>
             </div>
           </div>
@@ -150,6 +150,17 @@ const permMode = ref('normal')
 const saving = ref(false)
 const showKey = ref(false)
 const showCustomKey = ref(false)
+
+function handleKeyFocus() {
+  if (minimaxApiKey.value.includes('****')) {
+    minimaxApiKey.value = ''
+  }
+}
+function handleCustomKeyFocus() {
+  if (customApiKey.value.includes('****')) {
+    customApiKey.value = ''
+  }
+}
 
 // Per-agent model config
 const teamAgents = [

@@ -6,7 +6,6 @@
 // - Message history management
 // - Interleaved Thinking support
 
-use base64::Engine as _;
 use futures_util::StreamExt;
 use futures_util::future::join_all;
 use reqwest::Client;
@@ -19,9 +18,10 @@ use tokio::sync::watch;
 use std::sync::{Arc, Mutex as StdMutex};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{Mutex, RwLock};
+use crate::agent_tools::*;
 
 /// Build a Command that runs without a visible console window on Windows.
-fn hidden_cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
+pub(crate) fn hidden_cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
     let mut cmd = Command::new(program.as_ref());
     #[cfg(windows)]
     {
@@ -34,7 +34,7 @@ fn hidden_cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
 
 /// Run a command with a timeout. Graceful kill (SIGTERM equivalent), then force kill
 /// after a 2s grace period. Output is capped at 256KB to prevent OOM.
-fn output_with_timeout(cmd: &mut Command, timeout_secs: u64) -> String {
+pub(crate) fn output_with_timeout(cmd: &mut Command, timeout_secs: u64) -> String {
     use std::sync::mpsc;
     let child = match cmd
         .stdout(std::process::Stdio::piped())
@@ -84,14 +84,12 @@ fn output_with_timeout(cmd: &mut Command, timeout_secs: u64) -> String {
     }
 }
 
-use crate::context_compressor::{compress_context, compress_context_aggressive, estimate_request_tokens, summarize_with_model};
+use crate::context_compressor::{compress_context_aggressive, estimate_request_tokens, estimate_tokens, summarize_with_model};
 use crate::lsp_manager::LspManager;
-use crate::lsp_types::format_diagnostics;
 use crate::mcp_service::McpService;
 use crate::permission::{PermissionService, PermissionAction, PermissionRequest};
 use crate::skill_service::SkillService;
 use crate::system_prompts::{ACE_SYSTEM, EXPLORE_SYSTEM, FRONT_SYSTEM, PLAN_SYSTEM, REVIEW_SYSTEM, WORK_SYSTEM};
-use crate::{DEFAULT_API_URL, SEARCH_TIMEOUT_SECS, VLM_TIMEOUT_SECS};
 
 // ========== Types ==========
 
@@ -130,7 +128,7 @@ pub enum StreamEvent {
 
 // ========== Agent Service ==========
 
-type PendingAsks = Arc<StdMutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>>;
+pub(crate) type PendingAsks = Arc<StdMutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>>;
 
 /// Save an api_message (with structured content blocks) to the chat_message table.
 /// Stores display text in `content` and the full JSON block array in `raw_json`.
@@ -217,17 +215,15 @@ fn mark_last_message_for_cache(msgs: &mut Vec<serde_json::Value>) {
 }
 
 /// Save original file content before modification for undo support.
+/// Each call creates a new version, so multi-edit workflows can rewind step by step.
 fn save_file_snapshot(db: &Arc<StdMutex<Connection>>, session_id: i64, file_path: &str) {
     if let Ok(conn) = db.lock() {
-        // Keep only the earliest (original) snapshot per file for correct rewind
-        let exists: bool = conn.query_row(
-            "SELECT COUNT(*) > 0 FROM file_snapshot WHERE session_id = ?1 AND file_path = ?2",
+        // Find the next version for this file in this session
+        let next_version: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(version), 0) + 1 FROM file_snapshot WHERE session_id = ?1 AND file_path = ?2",
             rusqlite::params![session_id, file_path],
             |row| row.get(0),
-        ).unwrap_or(false);
-        if exists {
-            return;
-        }
+        ).unwrap_or(1);
 
         let original = match std::fs::read(file_path) {
             Ok(bytes) => {
@@ -239,8 +235,8 @@ fn save_file_snapshot(db: &Arc<StdMutex<Connection>>, session_id: i64, file_path
             Err(_) => None, // file doesn't exist yet
         };
         let _ = conn.execute(
-            "INSERT INTO file_snapshot (session_id, file_path, original_content) VALUES (?1, ?2, ?3)",
-            rusqlite::params![session_id, file_path, original],
+            "INSERT INTO file_snapshot (session_id, file_path, original_content, version) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![session_id, file_path, original, next_version],
         );
     }
 }
@@ -285,18 +281,23 @@ fn collect_dir_files(dir: &std::path::Path, out: &mut Vec<String>) {
     }
 }
 
+/// Override a constant with an environment variable if set, otherwise use the default.
+fn env_usize(key: &str, default: usize) -> usize {
+    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
 /// Snapshot all text files in a workspace before a destructive command.
-/// Limited to 200 files and 10MB total to avoid performance issues.
+/// Limits: MAX_SNAPSHOT_FILES (env, default 200), MAX_SNAPSHOT_BYTES (env, default 10MB).
 fn snapshot_workspace_files(db: &Arc<StdMutex<Connection>>, session_id: i64, cwd: &str) {
     let mut files: Vec<String> = Vec::new();
     collect_dir_files(std::path::Path::new(cwd), &mut files);
     let mut total: usize = 0;
-    const MAX_FILES: usize = 200;
-    const MAX_BYTES: usize = 10_000_000;
-    for f in files.iter().take(MAX_FILES) {
+    let max_files = env_usize("MAX_SNAPSHOT_FILES", 200);
+    let max_bytes = env_usize("MAX_SNAPSHOT_BYTES", 10_000_000);
+    for f in files.iter().take(max_files) {
         if let Ok(meta) = std::fs::metadata(f) {
             total += meta.len() as usize;
-            if total > MAX_BYTES { break; }
+            if total > max_bytes { break; }
         }
         save_file_snapshot(db, session_id, f);
     }
@@ -534,6 +535,37 @@ impl AgentService {
             }));
         }
 
+        // Merge consecutive tool_result-only user messages into one.
+        // Strict Anthropic-compatible APIs (DeepSeek) require all tool_results
+        // matching one assistant turn to be in a single user message.
+        {
+            let mut merged: Vec<serde_json::Value> = Vec::new();
+            for msg in api_messages.drain(..) {
+                let is_tool_result_msg = msg["role"] == "user"
+                    && msg["content"].as_array().map_or(false, |b: &Vec<serde_json::Value>| {
+                        !b.is_empty() && b.iter().all(|x| x["type"] == "tool_result")
+                    });
+                if is_tool_result_msg {
+                    if let Some(last) = merged.last_mut() {
+                        let last_is_tool_result = last["role"] == "user"
+                            && last["content"].as_array().map_or(false, |b: &Vec<serde_json::Value>| {
+                                !b.is_empty() && b.iter().all(|x| x["type"] == "tool_result")
+                            });
+                        if last_is_tool_result {
+                            if let Some(arr) = last["content"].as_array_mut() {
+                                if let Some(new_blocks) = msg["content"].as_array() {
+                                    arr.extend(new_blocks.clone());
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                }
+                merged.push(msg);
+            }
+            api_messages = merged;
+        }
+
         // Proactive skill matching: separate built-in (invisible to user) from user/project skills.
         let matched_skills = skill_service.match_skills(&last_user_msg, 5).await;
         let relevant: Vec<_> = matched_skills.iter().filter(|m| m.score > 0.10).collect();
@@ -588,6 +620,8 @@ impl AgentService {
         let context_guard_pct: f64 = std::env::var("MINIMAX_CONTEXT_GUARD")
             .ok().and_then(|v| v.parse().ok()).unwrap_or(0.80);
         let mut step = 0usize;
+        // Track API-reported cumulative token count — far more accurate than heuristic.
+        let mut last_cumulative_tokens: Option<u64> = None;
 
         // Main loop: continue until stop_reason is not "tool_use"
         loop {
@@ -599,19 +633,29 @@ impl AgentService {
                 break;
             }
 
-            // Compress context when approaching token limit (80% of context window)
-            let tokens = estimate_request_tokens(&api_messages, &system_json, &tools_json);
+            // Token count: API-reported cumulative value. On first call estimate from
+            // existing messages so the context bar never resets to 0 between turns.
+            let tokens = last_cumulative_tokens.map(|v| v as usize).unwrap_or_else(|| {
+                estimate_tokens(&api_messages)
+            });
+
+            // Compress context when approaching token limit (70% of context window).
+            // Uses shared compact_messages which persists to DB — same as /compact.
             if tokens > (self.context_window as f64 * 0.7) as usize && api_messages.len() > 12 {
-                let summary = summarize_with_model(agent_type, &api_messages, &api_key, &self.api_url, &self.model).await;
-                eprintln!("[compress] Model summary: {} chars", summary.len());
-                compress_context(agent_type, &mut api_messages, self.context_window, false, summary);
+                match crate::compact_messages(&self.db, session_id, agent_type, &mut api_messages, &api_key, &self.api_url, &self.messages_path, &self.model).await {
+                    Ok((before, after)) => {
+                        eprintln!("[compress] Compressed: {} → {} tokens", before, after);
+                    }
+                    Err(e) => {
+                        eprintln!("[compress] Compression failed: {}", e);
+                    }
+                }
             }
 
-            // Emit token usage for context window display (includes system + tools)
-            let est = estimate_request_tokens(&api_messages, &system_json, &tools_json);
-            let usage_pct = (est as f64 / self.context_window as f64) * 100.0;
+            // Emit token usage for context window display
+            let usage_pct = (tokens as f64 / self.context_window as f64) * 100.0;
             emit(&app, &session_key, StreamEvent::TokenUsage {
-                estimated_tokens: est,
+                estimated_tokens: tokens,
                 context_window: self.context_window,
                 usage_pct,
             });
@@ -678,7 +722,7 @@ impl AgentService {
                         if is_overflow && collapse_level < 2 {
                             collapse_level += 1;
                             eprintln!("[collapse_drain] Network error hints at overflow, level {}", collapse_level);
-                            let summary = summarize_with_model(agent_type, &api_messages, &api_key, &self.api_url, &self.model).await;
+                            let summary = summarize_with_model(agent_type, &api_messages, &api_key, &self.api_url, &self.messages_path, &self.model).await;
                             compress_context_aggressive(agent_type, &mut api_messages, collapse_level, summary);
                             continue;
                         }
@@ -711,7 +755,7 @@ impl AgentService {
                 if is_overflow && collapse_level < 2 {
                     collapse_level += 1;
                     eprintln!("[collapse_drain] Context overflow detected, aggressive compress level {}", collapse_level);
-                    let summary = summarize_with_model(agent_type, &api_messages, &api_key, &self.api_url, &self.model).await;
+                    let summary = summarize_with_model(agent_type, &api_messages, &api_key, &self.api_url, &self.messages_path, &self.model).await;
                     compress_context_aggressive(agent_type, &mut api_messages, collapse_level, summary);
                     continue;
                 }
@@ -722,7 +766,7 @@ impl AgentService {
             };
 
             // Process SSE stream and collect result
-            let (stop_reason, assistant_text, assistant_thinking, tool_uses, tool_results) = process_sse_stream(
+            let (stop_reason, assistant_text, assistant_thinking, tool_uses, tool_results, actual_tokens) = process_sse_stream(
                 response.bytes_stream(),
                 app.clone(),
                 session_key.clone(),
@@ -743,6 +787,19 @@ impl AgentService {
 
             eprintln!("[stream_chat] Model: {}, stop_reason: {:?}, thinking: {} chars, text: {} chars, tool_uses: {}", self.model,
                 stop_reason, assistant_thinking.len(), assistant_text.len(), tool_uses.len());
+
+            // Store API-reported cumulative token count and emit fresh usage
+            // so the context bar always reflects the latest API-reported value.
+            if let Some(real) = actual_tokens {
+                last_cumulative_tokens = Some(real);
+                let tokens = real as usize;
+                let usage_pct = (tokens as f64 / self.context_window as f64) * 100.0;
+                emit(&app, &session_key, StreamEvent::TokenUsage {
+                    estimated_tokens: tokens,
+                    context_window: self.context_window,
+                    usage_pct,
+                });
+            }
 
             // Accumulate thinking from this turn
             accumulated_thinking.push_str(&assistant_thinking);
@@ -832,17 +889,17 @@ impl AgentService {
                 save_api_message(&self.db, session_id, &db_msg);
             }
 
-            // 2) Add tool results to messages and loop
-            for (_tool_name, tool_id, result) in tool_results {
+            // 2) Add ALL tool results as a SINGLE user message (Anthropic spec: one
+            //    user message must contain all tool_result blocks matching the
+            //    assistant's tool_use blocks). DeepSeek enforces this strictly.
+            if !tool_results.is_empty() {
+                let result_blocks: Vec<serde_json::Value> = tool_results.iter().map(|(_tool_name, tool_id, result)| {
+                    json!({"type": "tool_result", "tool_use_id": tool_id, "content": result})
+                }).collect();
                 let tool_msg = json!({
                     "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": tool_id,
-                        "content": result
-                    }]
+                    "content": result_blocks
                 });
-                // Persist to DB for cache-identical reconstruction on next turn
                 save_api_message(&self.db, session_id, &tool_msg);
                 api_messages.push(tool_msg);
             }
@@ -868,9 +925,10 @@ fn emit(app: &AppHandle, key: &str, event: StreamEvent) {
     }
 }
 
-// Returns (stop_reason, assistant_text, assistant_thinking, tool_uses, tool_results)
+// Returns (stop_reason, assistant_text, assistant_thinking, tool_uses, tool_results, actual_input_tokens)
 // tool_uses: Vec<(tool_id, tool_name, input_accumulated)>
 // tool_results: Vec<(tool_name, tool_id, result)>
+// actual_input_tokens: prompt token count reported by API (None if not available)
 async fn process_sse_stream(
     stream: impl StreamExt<Item = Result<bytes::Bytes, reqwest::Error>>,
     app: AppHandle,
@@ -888,7 +946,7 @@ async fn process_sse_stream(
     pending_asks: PendingAsks,
     _api_messages: &mut Vec<serde_json::Value>,
     mut cancel_rx: watch::Receiver<bool>,
-) -> (Option<String>, String, String, Vec<(String, String, String)>, Vec<(String, String, String)>) {
+) -> (Option<String>, String, String, Vec<(String, String, String)>, Vec<(String, String, String)>, Option<u64>) {
     eprintln!("[process_sse_stream] Starting with session_key: {}", session_key);
     let mut current_tool_id: Option<String> = None;
     let mut current_tool_name: Option<String> = None;
@@ -898,6 +956,9 @@ async fn process_sse_stream(
     let mut tool_results: Vec<(String, String, String)> = Vec::new();
     let mut assistant_text = String::new();
     let mut assistant_thinking = String::new();
+
+    // Actual token count from API (last message_delta carries the total)
+    let mut actual_input_tokens: Option<u64> = None;
 
     // Cache usage tracking (prefix-based KV cache)
     let mut cache_hit_tokens: u64 = 0;
@@ -926,7 +987,7 @@ async fn process_sse_stream(
                 };
                 emit(&app, &session_key, ev);
             }
-            return (None, assistant_text, assistant_thinking, Vec::new(), Vec::new());
+            return (None, assistant_text, assistant_thinking, Vec::new(), Vec::new(), actual_input_tokens);
         }
 
         let item = tokio::select! {
@@ -940,7 +1001,7 @@ async fn process_sse_stream(
                         };
                         emit(&app, &session_key, ev);
                     }
-                    return (None, assistant_text, assistant_thinking, Vec::new(), Vec::new());
+                    return (None, assistant_text, assistant_thinking, Vec::new(), Vec::new(), actual_input_tokens);
                 }
                 continue;
             }
@@ -968,20 +1029,30 @@ async fn process_sse_stream(
                                     stop_reason = Some(reason);
                                 }
 
-                                // Capture cache usage from message_delta events
-                                if event["type"] == "message_delta" {
-                                    if let Some(usage) = event["usage"].as_object() {
+                                // Capture actual token count and cache usage from API events.
+                                // MiniMax: cumulative input_tokens in every message_delta.
+                                // Anthropic: input_tokens in message_start.message.usage.
+                                // OpenAI: prompt_tokens in final message_delta or a top-level usage object.
+                                let ev_type = event["type"].as_str().unwrap_or("");
+                                if ev_type == "message_start" || ev_type == "message_delta" || ev_type == "message_stop" {
+                                    // Try direct event.usage (MiniMax, OpenAI)
+                                    let usage = event["usage"].as_object()
+                                        // Anthropic: usage is nested under message_start.message.usage
+                                        .or_else(|| event["message"]["usage"].as_object());
+                                    if let Some(usage) = usage {
                                         let hit = usage.get("cache_read_input_tokens")
                                             .and_then(|v| v.as_u64()).unwrap_or(0);
                                         let create = usage.get("cache_creation_input_tokens")
                                             .and_then(|v| v.as_u64()).unwrap_or(0);
                                         let input = usage.get("input_tokens")
+                                            .or_else(|| usage.get("prompt_tokens"))
                                             .and_then(|v| v.as_u64()).unwrap_or(0);
                                         cache_hit_tokens += hit;
-                                        cache_miss_tokens += create + input;
+                                        cache_miss_tokens += create;
+                                        if input > 0 { actual_input_tokens = Some(input); }
                                         eprintln!(
-                                            "[cache] read={}, create={}, input={}, cumulative hit={} miss={}",
-                                            hit, create, input, cache_hit_tokens, cache_miss_tokens
+                                            "[usage] ev={}, input_tokens={}, cache_hit={}, cache_create={}",
+                                            ev_type, input, hit, create
                                         );
                                     }
                                 }
@@ -1100,7 +1171,7 @@ async fn process_sse_stream(
         // Check cancel before tool dispatch
         if *cancel_rx.borrow() {
             eprintln!("[process_sse_stream] Canceled before tool dispatch for session {}", session_id);
-            return (None, assistant_text, assistant_thinking, tool_uses, Vec::new());
+            return (None, assistant_text, assistant_thinking, tool_uses, Vec::new(), actual_input_tokens);
         }
 
         let mut idx = 0;
@@ -1186,7 +1257,7 @@ async fn process_sse_stream(
             }
         }
 
-    (stop_reason, assistant_text, assistant_thinking, tool_uses, tool_results)
+    (stop_reason, assistant_text, assistant_thinking, tool_uses, tool_results, actual_input_tokens)
 }
 
 fn handle_sse_event(
@@ -1486,2354 +1557,6 @@ async fn execute_tool(
     }
 
     truncate_tool_result(result)
-}
-
-/// Truncate tool output to prevent context explosion.
-/// Caps at 50KB or 2000 lines, preserves head+tail, injects marker.
-fn truncate_tool_result(output: String) -> String {
-    const MAX_BYTES: usize = 50 * 1024;   // 50 KB
-    const MAX_LINES: usize = 2000;
-    const TAIL_FRACTION: f64 = 0.15;
-
-    let bytes = output.len();
-    let lines: Vec<&str> = output.lines().collect();
-    let line_count = lines.len();
-
-    if bytes <= MAX_BYTES && line_count <= MAX_LINES {
-        return output;
-    }
-
-    let head_lines = ((MAX_LINES as f64) * (1.0 - TAIL_FRACTION)) as usize;
-    let tail_lines = (MAX_LINES as f64 * TAIL_FRACTION) as usize;
-
-    let head: String = lines.iter().take(head_lines).copied().collect::<Vec<_>>().join("\n");
-    let tail: String = lines.iter().rev().take(tail_lines).rev().copied().collect::<Vec<_>>().join("\n");
-    let skipped = bytes.saturating_sub(head.len() + tail.len());
-
-    format!(
-        "{}\n[...truncated {} bytes / {} lines ...]\n{}",
-        head, skipped, line_count.saturating_sub(head_lines + tail_lines), tail
-    )
-}
-
-// ========== Agent Communication ==========
-
-async fn tool_send_to_agent(
-    caller_session_id: i64,
-    params: &serde_json::Value,
-    api_key: String,
-    skill_service: Arc<SkillService>,
-    mcp_service: Arc<RwLock<McpService>>,
-    db: Arc<StdMutex<Connection>>,
-    lsp_manager: Arc<StdMutex<Option<LspManager>>>,
-    permission_service: Arc<StdMutex<PermissionService>>,
-    pending_asks: PendingAsks,
-    app_handle: AppHandle,
-    cancel_rx: watch::Receiver<bool>,
-) -> String {
-    let target_agent = params["target_agent"].as_str().unwrap_or("");
-    let message = params["message"].as_str().unwrap_or("");
-
-    if target_agent.is_empty() || message.is_empty() {
-        return json!({"error": "target_agent and message are required"}).to_string();
-    }
-
-    // Check parent cancel before spawning sub-agent
-    if *cancel_rx.borrow() {
-        return json!({"error": "Parent agent was aborted"}).to_string();
-    }
-
-    // Look up caller's agent type first
-    let caller_agent: String = {
-        let conn = db.lock().unwrap();
-        conn.query_row(
-            "SELECT agent_type FROM agent_session WHERE id = ?1",
-            [caller_session_id],
-            |row| row.get(0),
-        ).unwrap_or_else(|_| "unknown".to_string())
-    };
-    let tagged_for_db = format!("[来自 {}]\n\n{}", caller_agent, message);
-
-    // DB operations in spawn_blocking
-    let db_clone = db.clone();
-    let target_agent_owned = target_agent.to_string();
-
-    let db_result = tokio::task::spawn_blocking(move || -> Result<(i64, i64, Vec<Message>), String> {
-        let conn = db_clone.lock().unwrap();
-        let group_chat_id: i64 = conn
-            .query_row(
-                "SELECT group_chat_id FROM agent_session WHERE id = ?1",
-                rusqlite::params![caller_session_id],
-                |row| row.get(0),
-            )
-            .map_err(|e| format!("Failed to find caller session: {}", e))?;
-
-        let target_session_id: i64 = match conn
-            .query_row(
-                "SELECT id FROM agent_session WHERE group_chat_id = ?1 AND agent_type = ?2",
-                rusqlite::params![group_chat_id, target_agent_owned],
-                |row| row.get(0),
-            )
-            .ok()
-        {
-            Some(id) => id,
-            None => {
-                conn.execute(
-                    "INSERT INTO agent_session (group_chat_id, agent_type) VALUES (?1, ?2)",
-                    rusqlite::params![group_chat_id, target_agent_owned],
-                )
-                .map_err(|e| format!("Failed to create agent session: {}", e))?;
-                conn.last_insert_rowid()
-            }
-        };
-
-        conn.execute(
-            "INSERT INTO chat_message (session_id, role, content) VALUES (?1, 'user', ?2)",
-            rusqlite::params![target_session_id, tagged_for_db],
-        )
-        .map_err(|e| format!("Failed to save message: {}", e))?;
-
-        // Load full conversation history for the target agent
-        let mut stmt = conn.prepare(
-            "SELECT role, content, tool_calls, thinking, raw_json FROM chat_message WHERE session_id = ?1 ORDER BY created_at ASC"
-        ).map_err(|e| format!("Failed to prepare history query: {}", e))?;
-        let history: Vec<Message> = stmt.query_map(
-            rusqlite::params![target_session_id],
-            |row| Ok(Message {
-                role: row.get(0)?,
-                content: row.get(1)?,
-                tool_calls: row.get(2)?,
-                thinking: row.get(3)?,
-                raw_json: row.get(4)?,
-            }),
-        ).map_err(|e| format!("Failed to query history: {}", e))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("Failed to collect history: {}", e))?;
-
-        eprintln!("[send_to_agent] Loaded {} history messages for target session {}", history.len(), target_session_id);
-
-        Ok((group_chat_id, target_session_id, history))
-    })
-    .await;
-
-    match db_result {
-        Ok(Ok((group_chat_id, target_session_id, history))) => {
-            eprintln!("[send_to_agent] caller_session={}, target={}, target_session={}, group_chat={}, history_len={}",
-                caller_session_id, target_agent, target_session_id, group_chat_id, history.len());
-
-            // Emit agent_invoked FIRST so frontend can set up listeners before stream starts
-            let _ = app_handle.emit("agent_invoked", json!({
-                "target_agent": target_agent,
-                "session_id": target_session_id,
-                "group_chat_id": group_chat_id,
-                "message": message,
-            }));
-
-            // Small delay to let frontend listeners attach
-            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-
-            // Spawn the target agent stream in a dedicated thread
-            let agent_type = target_agent.to_string();
-            let app = app_handle.clone();
-            let handle = tokio::runtime::Handle::current();
-            let lm = lsp_manager.clone();
-            let pm = permission_service.clone();
-            let pa = pending_asks.clone();
-
-            // Read workspace + credentials (check per-agent config first)
-            let (workspace, api_url, messages_path, model, context_window, provider) = {
-                let conn = db.lock().unwrap();
-                let ws: Option<String> = conn.query_row("SELECT workspace FROM app_config", [], |row| row.get(0)).ok();
-
-                // Check per-agent config
-                let agent_cfg: Option<(String, String, usize)> = conn.query_row(
-                    "SELECT provider, model, context_window FROM agent_model_config WHERE agent_type = ?1",
-                    [&agent_type],
-                    |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,i64>(2)?.max(0) as usize)),
-                ).ok().filter(|(_, m, _)| !m.is_empty());
-
-                if let Some((ap, am, acw)) = agent_cfg {
-                    let (_key, url, path) = match ap.as_str() {
-                        "custom" => {
-                            let k: String = conn.query_row("SELECT custom_api_key FROM app_config", [], |row| row.get(0)).unwrap_or_default();
-                            let u: String = conn.query_row("SELECT custom_api_url FROM app_config", [], |row| row.get(0)).unwrap_or_default();
-                            (k, u, "/v1/messages".to_string())
-                        }
-                        _ => {
-                            let k: String = conn.query_row("SELECT api_key FROM minimax_api_key", [], |row| row.get(0)).unwrap_or_default();
-                            let u: String = conn.query_row("SELECT api_url FROM app_config", [], |row| row.get(0)).unwrap_or_else(|_| DEFAULT_API_URL.to_string());
-                            (k, u, "/anthropic/v1/messages".to_string())
-                        }
-                    };
-                    let cw = if acw > 0 { acw } else { 204800 };
-                    (ws, url, path, am, cw, ap)
-                } else {
-                    let p: String = conn.query_row("SELECT provider FROM app_config", [], |row| row.get(0)).unwrap_or_else(|_| "minimax".to_string());
-                    match p.as_str() {
-                        "custom" => {
-                            let u: String = conn.query_row("SELECT custom_api_url FROM app_config", [], |row| row.get(0)).unwrap_or_default();
-                            let m: String = conn.query_row("SELECT custom_model FROM app_config", [], |row| row.get(0)).unwrap_or_default();
-                            let c: i64 = conn.query_row("SELECT custom_context_window FROM app_config", [], |row| row.get(0)).unwrap_or(200000);
-                            (ws, u, "/v1/messages".to_string(), m, c.max(0) as usize, p)
-                        }
-                        _ => {
-                            let u: String = conn.query_row("SELECT api_url FROM app_config", [], |row| row.get(0)).unwrap_or_else(|_| DEFAULT_API_URL.to_string());
-                            let m: String = conn.query_row("SELECT model FROM app_config", [], |row| row.get(0)).unwrap_or_else(|_| "MiniMax-M2.7".to_string());
-                            let c: i64 = conn.query_row("SELECT context_window FROM app_config", [], |row| row.get(0)).unwrap_or(204800);
-                            (ws, u, "/anthropic/v1/messages".to_string(), m, c.max(0) as usize, p)
-                        }
-                    }
-                }
-            };
-
-            std::thread::spawn(move || {
-                handle.block_on(async move {
-                    let agent = AgentService::new(api_key, api_url, messages_path, model, context_window, provider, skill_service, mcp_service, db, lm, pm, pa);
-                    agent.stream_chat(&agent_type, history, None, workspace, app, target_session_id, cancel_rx).await;
-                });
-            });
-
-            json!({
-                "success": true,
-                "target_agent": target_agent,
-                "session_id": target_session_id,
-                "group_chat_id": group_chat_id,
-                "message": format!("已向 {} 发送消息", target_agent)
-            }).to_string()
-        }
-        Ok(Err(e)) => json!({"error": e}).to_string(),
-        Err(e) => json!({"error": format!("Task panicked: {}", e)}).to_string(),
-    }
-}
-
-// ========== Tool Implementations (Flat) ==========
-
-async fn tool_list_dir(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    let path = path.to_string();
-    tokio::task::spawn_blocking(move || {
-        match std::fs::read_dir(&path) {
-            Ok(entries) => {
-                let mut result: Vec<String> = entries
-                    .filter_map(|e| e.ok())
-                    .map(|e| {
-                        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                        let prefix = if is_dir { "[DIR]" } else { "[FILE]" };
-                        format!("{} {}", prefix, e.file_name().to_string_lossy())
-                    })
-                    .collect();
-                result.sort();
-                result.join("\n")
-            }
-            Err(e) => format!("Error: Cannot read directory '{}'", e),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-async fn tool_read_file(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or(""));
-    let offset = params["offset"].as_u64().unwrap_or(0) as usize;
-    let limit = params["limit"].as_u64().unwrap_or(0) as usize;
-
-    tokio::task::spawn_blocking(move || {
-        const MAX_SIZE: u64 = 2 * 1024 * 1024; // 2MB
-        const OUTLINE_SIZE: u64 = 64 * 1024; // 64KB
-        let meta = match std::fs::metadata(&path) {
-            Ok(m) => m,
-            Err(e) => return format!("Error reading {}: {}", path, e),
-        };
-        // Binary detection
-        if is_binary_file(&path) {
-            return format!("Binary file: {} ({} KB). Use a hex editor or specialized tool.", path, meta.len() / 1024);
-        }
-        // Large file: outline mode
-        if meta.len() > MAX_SIZE && offset == 0 && limit == 0 {
-            return format!(
-                "Large file: {} MB, {} lines. Too big to read entirely.\nUse offset/limit to read a range.\n\nFirst 300 lines for orientation:\n{}",
-                meta.len() / 1024 / 1024,
-                count_lines(&path),
-                read_line_range(&path, 1, 300)
-            );
-        }
-        // Read with offset/limit
-        if offset > 0 || limit > 0 {
-            let start = if offset > 0 { offset } else { 1 };
-            let end = if limit > 0 { start + limit - 1 } else { start + 200 };
-            let total = count_lines(&path);
-            let prefix = if meta.len() > OUTLINE_SIZE {
-                format!("[lines {}-{} of {}]\n", start, std::cmp::min(end, total), total)
-            } else {
-                String::new()
-            };
-            return format!("{}{}", prefix, read_line_range(&path, start, end));
-        }
-        // Normal read
-        let content = std::fs::read_to_string(&path)
-            .map_err(|e| format!("Error: {}", e))
-            .unwrap_or_else(|e| e);
-        if meta.len() > OUTLINE_SIZE {
-            format!("[{} lines, {} KB]\n{}", count_lines(&path), meta.len() / 1024, content)
-        } else {
-            content
-        }
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-fn is_binary_file(path: &str) -> bool {
-    use std::io::Read;
-    if let Ok(mut f) = std::fs::File::open(path) {
-        let mut buf = [0u8; 8192];
-        if let Ok(n) = f.read(&mut buf) {
-            buf[..n].iter().any(|&b| b == 0)
-        } else {
-            false
-        }
-    } else {
-        false
-    }
-}
-
-fn count_lines(path: &str) -> usize {
-    use std::io::{BufRead, BufReader};
-    if let Ok(f) = std::fs::File::open(path) {
-        BufReader::new(f).lines().count()
-    } else {
-        0
-    }
-}
-
-fn read_line_range(path: &str, start: usize, end: usize) -> String {
-    use std::io::{BufRead, BufReader};
-    if let Ok(f) = std::fs::File::open(path) {
-        BufReader::new(f).lines()
-            .enumerate()
-            .filter_map(|(i, l)| {
-                let line_num = i + 1;
-                if line_num >= start && line_num <= end {
-                    l.ok().map(|text| format!("{:>6}| {}", line_num, text))
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    } else {
-        "Error reading file".to_string()
-    }
-}
-
-async fn tool_read_files(params: &serde_json::Value) -> String {
-    if let Some(paths) = params["paths"].as_array() {
-        let results: Vec<String> = paths.iter()
-            .filter_map(|p| p.as_str())
-            .map(|path| {
-                let path = normalize_file_path(path);
-                std::fs::read_to_string(&path)
-                    .map(|c| format!("=== {} ===\n{}", path, c))
-                    .unwrap_or_else(|e| format!("=== {} ===\nError: {}", path, e))
-            })
-            .collect();
-        results.join("\n\n")
-    } else {
-        "Error: Invalid paths parameter".to_string()
-    }
-}
-
-async fn tool_git_status(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    tokio::task::spawn_blocking(move || {
-        match hidden_cmd("git")
-            .args(["-C", &path, "status", "--porcelain"])
-            .output()
-        {
-            Ok(o) => {
-                if o.status.success() {
-                    String::from_utf8_lossy(&o.stdout).to_string()
-                } else {
-                    String::from_utf8_lossy(&o.stderr).to_string()
-                }
-            }
-            Err(e) => format!("Error: {}", e),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-async fn tool_git_log(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    let count = params["count"].as_i64().unwrap_or(20) as usize;
-    let path = path.to_string();
-    tokio::task::spawn_blocking(move || {
-        match hidden_cmd("git")
-            .args(["-C", &path, "log", "--oneline", &format!("-{}", count)])
-            .output()
-        {
-            Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
-            Err(e) => format!("Error: {}", e),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-async fn tool_git_diff(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    let target = params["target"].as_str().unwrap_or("HEAD");
-    let path = path.to_string();
-    let target = target.to_string();
-    tokio::task::spawn_blocking(move || {
-        match hidden_cmd("git")
-            .args(["-C", &path, "diff", &target])
-            .output()
-        {
-            Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
-            Err(e) => format!("Error: {}", e),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-async fn tool_git_commit(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    let message = params["message"].as_str().unwrap_or("");
-    let path = path.to_string();
-    let message = message.to_string();
-    tokio::task::spawn_blocking(move || {
-        match hidden_cmd("git")
-            .args(["-C", &path, "commit", "-m", &message])
-            .output()
-        {
-            Ok(o) => {
-                if o.status.success() {
-                    String::from_utf8_lossy(&o.stdout).to_string()
-                } else {
-                    String::from_utf8_lossy(&o.stderr).to_string()
-                }
-            }
-            Err(e) => format!("Error: {}", e),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-async fn tool_git_branch(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    let path = path.to_string();
-    tokio::task::spawn_blocking(move || {
-        match hidden_cmd("git")
-            .args(["-C", &path, "branch", "-v"])
-            .output()
-        {
-            Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
-            Err(e) => format!("Error: {}", e),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-async fn tool_git_checkout(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    let branch = params["branch"].as_str().unwrap_or("");
-    let path = path.to_string();
-    let branch = branch.to_string();
-    tokio::task::spawn_blocking(move || {
-        match hidden_cmd("git")
-            .args(["-C", &path, "checkout", &branch])
-            .output()
-        {
-            Ok(o) => {
-                if o.status.success() {
-                    String::from_utf8_lossy(&o.stdout).to_string()
-                } else {
-                    String::from_utf8_lossy(&o.stderr).to_string()
-                }
-            }
-            Err(e) => format!("Error: {}", e),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-async fn tool_git_stash(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    let path = path.to_string();
-    tokio::task::spawn_blocking(move || {
-        match hidden_cmd("git")
-            .args(["-C", &path, "stash", "push", "-m", "auto-stash"])
-            .output()
-        {
-            Ok(o) => {
-                if o.status.success() {
-                    String::from_utf8_lossy(&o.stdout).to_string()
-                } else {
-                    String::from_utf8_lossy(&o.stderr).to_string()
-                }
-            }
-            Err(e) => format!("Error: {}", e),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-async fn tool_git_stash_pop(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    let path = path.to_string();
-    tokio::task::spawn_blocking(move || {
-        match hidden_cmd("git")
-            .args(["-C", &path, "stash", "pop"])
-            .output()
-        {
-            Ok(o) => {
-                if o.status.success() {
-                    String::from_utf8_lossy(&o.stdout).to_string()
-                } else {
-                    String::from_utf8_lossy(&o.stderr).to_string()
-                }
-            }
-            Err(e) => format!("Error: {}", e),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-async fn tool_search_in_dir(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    let pattern = params["pattern"].as_str().unwrap_or("").to_lowercase();
-    let path = path.to_string();
-    tokio::task::spawn_blocking(move || {
-        let mut matches = Vec::new();
-        search_recursive(&path, &pattern, 0, 10, &mut matches);
-        if matches.is_empty() {
-            "No matches found".to_string()
-        } else {
-            matches.iter()
-                .take(10)
-                .map(|(file, line_num, line)| format!("{}:{}: {}", file, line_num, line))
-                .collect::<Vec<_>>()
-                .join("\n")
-        }
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-async fn tool_get_env_info(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    let path = path.to_string();
-    tokio::task::spawn_blocking(move || get_env_info_sync(&path))
-        .await
-        .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-async fn tool_analyze_project_structure(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    let path = path.to_string();
-    tokio::task::spawn_blocking(move || analyze_project_sync(&path))
-        .await
-        .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-async fn tool_run_command(params: &serde_json::Value) -> String {
-    let command = params["command"].as_str().unwrap_or("").to_string();
-    let cwd = params["path"].as_str().map(|s| normalize_file_path(s));
-    let timeout_secs = params["timeout"].as_u64().unwrap_or(300);
-    tokio::task::spawn_blocking(move || {
-        let mut cmd = if cfg!(windows) {
-            let mut c = hidden_cmd("cmd");
-            c.args(["/d", "/s", "/c", &command]);
-            c
-        } else {
-            let mut c = hidden_cmd("sh");
-            c.args(["-c", &command]);
-            c
-        };
-        if let Some(dir) = &cwd {
-            cmd.current_dir(dir);
-        }
-        output_with_timeout(&mut cmd, timeout_secs)
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-async fn tool_write_file(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or(""));
-    let content = params["content"].as_str().unwrap_or("").to_string();
-    tokio::task::spawn_blocking(move || {
-        if let Some(parent) = std::path::Path::new(&path).parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                return format!("Error creating directory: {}", e);
-            }
-        }
-        std::fs::write(&path, &content)
-            .map_err(|e| format!("Error: {}", e))
-            .map(|_| format!("Written to {}", path))
-            .unwrap_or_else(|e| e)
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-async fn tool_write_files(params: &serde_json::Value) -> String {
-    if let Some(files) = params["files"].as_array() {
-        let results: Vec<String> = files.iter()
-            .filter_map(|f| f.as_object())
-            .map(|obj| {
-                let path = normalize_file_path(obj.get("path").and_then(|p| p.as_str()).unwrap_or(""));
-                let content = obj.get("content").and_then(|c| c.as_str()).unwrap_or("");
-                if path.is_empty() {
-                    return "Error: empty path".to_string();
-                }
-                if let Some(parent) = std::path::Path::new(&path).parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                match std::fs::write(&path, content) {
-                    Ok(_) => format!("Written: {}", path),
-                    Err(e) => format!("Error writing {}: {}", path, e),
-                }
-            })
-            .collect();
-        results.join("\n")
-    } else {
-        "Error: Invalid files parameter".to_string()
-    }
-}
-
-async fn tool_find_replace_in_files(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    let find = params["find"].as_str().unwrap_or("");
-    let replace = params["replace"].as_str().unwrap_or("");
-    let use_regex = params.get("use_regex").and_then(|b| b.as_bool()).unwrap_or(false);
-    let path = path.to_string();
-    let find = find.to_string();
-    let replace = replace.to_string();
-    tokio::task::spawn_blocking(move || {
-        let mut count = 0;
-        find_replace_recursive(&path, &find, &replace, use_regex, &mut count, 0, 10);
-        format!("Modified {} files", count)
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-async fn tool_modify_files(params: &serde_json::Value) -> String {
-    if let Some(files) = params["files"].as_array() {
-        let results: Vec<String> = files.iter()
-            .filter_map(|f| f.as_object())
-            .map(|obj| {
-                let path = normalize_file_path(obj.get("path").and_then(|p| p.as_str()).unwrap_or(""));
-                if path.is_empty() {
-                    return "Error: empty path".to_string();
-                }
-                let original = match std::fs::read_to_string(&path) {
-                    Ok(c) => c,
-                    Err(e) => return format!("Error reading {}: {}", path, e),
-                };
-                let mut content = original;
-                if let Some(replacements) = obj.get("replacements").and_then(|r| r.as_array()) {
-                    for rep in replacements.iter().filter_map(|r| r.as_object()) {
-                        let find = rep.get("find").and_then(|f| f.as_str()).unwrap_or("");
-                        let replace_with = rep.get("replace").and_then(|r| r.as_str()).unwrap_or("");
-                        content = content.replace(find, replace_with);
-                    }
-                }
-                if let Some(new_content) = obj.get("new_content").and_then(|c| c.as_str()) {
-                    content = new_content.to_string();
-                }
-                match std::fs::write(&path, &content) {
-                    Ok(_) => format!("Modified: {}", path),
-                    Err(e) => format!("Error modifying {}: {}", path, e),
-                }
-            })
-            .collect();
-        results.join("\n")
-    } else {
-        "Error: Invalid files parameter".to_string()
-    }
-}
-
-async fn tool_get_file_info(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or(""));
-    tokio::task::spawn_blocking(move || {
-        match std::fs::metadata(&path) {
-            Ok(meta) => {
-                let is_dir = meta.is_dir();
-                let size = meta.len();
-                let modified = meta.modified()
-                    .map(|t| format!("{:?}", t))
-                    .unwrap_or_else(|_| "unknown".to_string());
-                format!("Type: {}, Size: {} bytes, Modified: {}",
-                    if is_dir { "directory" } else { "file" }, size, modified)
-            }
-            Err(e) => format!("Error: {}", e),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-async fn tool_directory_tree(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    let max_depth = params["max_depth"].as_i64().unwrap_or(2) as usize;
-    let path = path.to_string();
-    tokio::task::spawn_blocking(move || {
-        let mut output = Vec::new();
-        let root = std::path::Path::new(&path);
-        if let Some(name) = root.file_name() {
-            output.push(name.to_string_lossy().to_string());
-        }
-        tree_recursive(root, "", max_depth, &mut output);
-        output.join("\n")
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-fn tree_recursive(dir: &std::path::Path, prefix: &str, max_depth: usize, output: &mut Vec<String>) {
-    if max_depth == 0 { return; }
-    let mut entries: Vec<_> = match std::fs::read_dir(dir) {
-        Ok(e) => e.filter_map(|e| e.ok()).collect(),
-        Err(_) => return,
-    };
-    entries.sort_by(|a, b| {
-        let a_dir = a.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        let b_dir = b.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        if a_dir && !b_dir { std::cmp::Ordering::Less }
-        else if !a_dir && b_dir { std::cmp::Ordering::Greater }
-        else { a.file_name().cmp(&b.file_name()) }
-    });
-    let skip = |name: &str| name.starts_with('.') || matches!(name, "node_modules" | "target" | ".git" | "dist" | "build" | ".next" | ".venv" | "__pycache__");
-    for (i, entry) in entries.iter().enumerate() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if skip(&name) { continue; }
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        let is_last = i == entries.len() - 1;
-        let branch = if is_last { "└── " } else { "├── " };
-        let child_prefix = if is_last { "    " } else { "│   " };
-        output.push(format!("{}{}{}{}", prefix, branch, name, if is_dir { "/" } else { "" }));
-        if is_dir {
-            let path = entry.path();
-            let new_prefix = format!("{}{}", prefix, child_prefix);
-            tree_recursive(&path, &new_prefix, max_depth - 1, output);
-        }
-    }
-}
-
-async fn tool_glob(params: &serde_json::Value) -> String {
-    let pattern = params["pattern"].as_str().unwrap_or("*").to_string();
-    let base_path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    let limit = params["limit"].as_i64().unwrap_or(200) as usize;
-    tokio::task::spawn_blocking(move || {
-        let mut results = Vec::new();
-        let skip_dirs = |name: &str| name.starts_with('.') || matches!(name, "node_modules" | "target" | ".git" | "dist" | "build" | ".next" | ".venv" | "__pycache__");
-        glob_recursive(&base_path, &pattern, &skip_dirs, &mut results, limit);
-        results.sort_by(|a, b| {
-            let ma = std::fs::metadata(a).and_then(|m| m.modified()).ok();
-            let mb = std::fs::metadata(b).and_then(|m| m.modified()).ok();
-            mb.cmp(&ma)
-        });
-        results.iter().map(|p| p.strip_prefix(&base_path).unwrap_or(p).to_string()).collect::<Vec<_>>().join("\n")
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-fn glob_recursive(dir: &str, pattern: &str, skip_dirs: &dyn Fn(&str) -> bool, results: &mut Vec<String>, limit: usize) {
-    if results.len() >= limit { return; }
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e.filter_map(|e| e.ok()).collect::<Vec<_>>(),
-        Err(_) => return,
-    };
-    for entry in entries {
-        if results.len() >= limit { break; }
-        let name = entry.file_name().to_string_lossy().to_string();
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        if is_dir {
-            if skip_dirs(&name) { continue; }
-            let path_str = entry.path().to_string_lossy().to_string();
-            glob_recursive(&path_str, pattern, skip_dirs, results, limit);
-        } else {
-            let matches = if pattern.contains('*') || pattern.contains('?') {
-                let re = glob_to_regex(&pattern);
-                regex::Regex::new(&re).map(|r| r.is_match(&name)).unwrap_or(false)
-            } else {
-                name.to_lowercase().contains(&pattern.to_lowercase())
-            };
-            if matches {
-                results.push(entry.path().to_string_lossy().to_string());
-            }
-        }
-    }
-}
-
-fn glob_to_regex(pattern: &str) -> String {
-    let mut re = String::from("^");
-    for ch in pattern.chars() {
-        match ch {
-            '*' => re.push_str(".*"),
-            '?' => re.push('.'),
-            '.' | '+' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|' | '\\' => {
-                re.push('\\');
-                re.push(ch);
-            }
-            _ => re.push(ch),
-        }
-    }
-    re.push('$');
-    re
-}
-
-async fn tool_search_files(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    let pattern = params["pattern"].as_str().unwrap_or("");
-    let path = path.to_string();
-    let pattern = pattern.to_lowercase();
-    tokio::task::spawn_blocking(move || {
-        let mut results = Vec::new();
-        search_files_recursive(&path, &pattern, &mut results, 100);
-        if results.is_empty() { "No files found".to_string() } else { results.join("\n") }
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-fn search_files_recursive(dir: &str, pattern: &str, results: &mut Vec<String>, limit: usize) {
-    if results.len() >= limit { return; }
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e.filter_map(|e| e.ok()).collect::<Vec<_>>(),
-        Err(_) => return,
-    };
-    for entry in entries {
-        if results.len() >= limit { break; }
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') || matches!(name.as_str(), "node_modules" | "target" | ".git" | "dist" | "build") { continue; }
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        let path_str = entry.path().to_string_lossy().to_string();
-        if is_dir {
-            search_files_recursive(&path_str, pattern, results, limit);
-        } else if name.to_lowercase().contains(pattern) {
-            results.push(path_str);
-        }
-    }
-}
-
-async fn tool_edit_file(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or(""));
-    let search = params["search"].as_str().unwrap_or("").to_string();
-    let replace = params["replace"].as_str().unwrap_or("").to_string();
-
-    if search.is_empty() {
-        return "Error: search cannot be empty".to_string();
-    }
-
-    tokio::task::spawn_blocking(move || {
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(e) => return format!("Error reading {}: {}", path, e),
-        };
-
-        // Auto-detect line endings and normalize search/replace to match
-        let line_ending = if content.contains("\r\n") { "\r\n" } else { "\n" };
-        let search = search.replace("\r\n", "\n").replace('\n', line_ending);
-        let replace = replace.replace("\r\n", "\n").replace('\n', line_ending);
-
-        let count = content.matches(&search).count();
-        if count == 0 {
-            return format!(
-                "Error: 未找到要替换的文本。文件可能已被修改，请先 read_file 确认当前内容。\n文件: {}\n查找: {}",
-                path, truncate_str(&search, 200)
-            );
-        }
-        if count > 1 {
-            return format!(
-                "Error: 找到 {} 处匹配，不够唯一。请增加更多上下文（前后各 3-5 行）使匹配唯一。", count
-            );
-        }
-
-        let new_content = content.replacen(&search, &replace, 1);
-
-        match std::fs::write(&path, &new_content) {
-            Ok(_) => {
-                let diff = compute_diff(&content, &new_content);
-                format!("edited {} ({})\n{}", path, count_chars(&content, &new_content), diff)
-            }
-            Err(e) => format!("Error writing {}: {}", path, e),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-fn count_chars(old: &str, new: &str) -> String {
-    let old_len = old.len();
-    let new_len = new.len();
-    if new_len >= old_len {
-        format!("{}->{} chars, +{}", old_len, new_len, new_len - old_len)
-    } else {
-        format!("{}->{} chars, -{}", old_len, new_len, old_len - new_len)
-    }
-}
-
-fn compute_diff(old: &str, new: &str) -> String {
-    let old_lines: Vec<&str> = old.lines().collect();
-    let new_lines: Vec<&str> = new.lines().collect();
-    let mut result = String::new();
-    // Find changed region: first diff line to last diff line
-    let mut first_diff = 0;
-    while first_diff < old_lines.len() && first_diff < new_lines.len()
-        && old_lines[first_diff] == new_lines[first_diff] {
-        first_diff += 1;
-    }
-    let mut old_end = old_lines.len();
-    let mut new_end = new_lines.len();
-    while old_end > first_diff && new_end > first_diff
-        && old_lines[old_end - 1] == new_lines[new_end - 1] {
-        old_end -= 1;
-        new_end -= 1;
-    }
-    // Show context (1 line before)
-    let ctx_start = if first_diff > 0 { first_diff - 1 } else { 0 };
-    result.push_str(&format!("@@ -{},{} +{},{} @@\n",
-        ctx_start + 1, old_end - ctx_start, ctx_start + 1, new_end - ctx_start));
-    for i in ctx_start..old_end {
-        if i < old_lines.len() {
-            result.push_str(&format!("-{}\n", old_lines[i]));
-        }
-    }
-    for i in ctx_start..new_end {
-        if i < new_lines.len() {
-            result.push_str(&format!("+{}\n", new_lines[i]));
-        }
-    }
-    result
-}
-
-fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() <= max { s.to_string() } else { format!("{}...", &s[..max]) }
-}
-
-async fn tool_edit_lines(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or(""));
-    let start_line = params["start_line"].as_u64().unwrap_or(0) as usize;
-    let end_line = params["end_line"].as_u64().map(|v| v as usize);
-    let content = params["content"].as_str().map(|s| s.to_string());
-
-    if path.is_empty() || start_line == 0 {
-        return "Error: path and start_line are required".to_string();
-    }
-
-    tokio::task::spawn_blocking(move || {
-        let file_content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(e) => return format!("Error reading {}: {}", path, e),
-        };
-        let lines: Vec<&str> = file_content.lines().collect();
-        let total = lines.len();
-
-        if start_line > total + 1 {
-            return format!("Error: start_line {} out of range (file has {} lines)", start_line, total);
-        }
-
-        let end = end_line.unwrap_or(start_line).min(total);
-        let old_lines: Vec<String> = lines[start_line - 1..end].iter().map(|l| l.to_string()).collect();
-
-        match (content.as_ref(), end_line) {
-            (Some(text), Some(_)) => {
-                // Replace: remove lines [start_line, end_line], insert content
-                let new_lines: Vec<&str> = text.lines().collect();
-                let mut result: Vec<String> = lines[..start_line - 1].iter().map(|l| l.to_string()).collect();
-                result.extend(new_lines.iter().map(|l| l.to_string()));
-                result.extend(lines[end..].iter().map(|l| l.to_string()));
-                let new_content = result.join("\n");
-                match std::fs::write(&path, &new_content) {
-                    Ok(_) => format!("edit_lines {}: replaced lines {}-{} with {} lines\n-{}\n+{}",
-                        path, start_line, end, new_lines.len(),
-                        old_lines.join("\n-"),
-                        text.lines().collect::<Vec<_>>().join("\n+")),
-                    Err(e) => format!("Error: {}", e),
-                }
-            }
-            (Some(text), None) => {
-                // Insert: insert content before start_line
-                let new_lines: Vec<&str> = text.lines().collect();
-                let mut result: Vec<String> = lines[..start_line - 1].iter().map(|l| l.to_string()).collect();
-                result.extend(new_lines.iter().map(|l| l.to_string()));
-                result.extend(lines[start_line - 1..].iter().map(|l| l.to_string()));
-                let new_content = result.join("\n");
-                match std::fs::write(&path, &new_content) {
-                    Ok(_) => format!("edit_lines {}: inserted {} lines at line {}", path, new_lines.len(), start_line),
-                    Err(e) => format!("Error: {}", e),
-                }
-            }
-            (None, Some(_)) => {
-                // Delete: remove lines [start_line, end_line]
-                let mut result: Vec<String> = lines[..start_line - 1].iter().map(|l| l.to_string()).collect();
-                result.extend(lines[end..].iter().map(|l| l.to_string()));
-                let new_content = result.join("\n");
-                match std::fs::write(&path, &new_content) {
-                    Ok(_) => format!("edit_lines {}: deleted lines {}-{}\n-{}",
-                        path, start_line, end,
-                        old_lines.join("\n-")),
-                    Err(e) => format!("Error: {}", e),
-                }
-            }
-            (None, None) => {
-                format!("Error: either end_line or content must be provided")
-            }
-        }
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-async fn tool_multi_edit(params: &serde_json::Value) -> String {
-    let edits: Vec<(String, String, String)> = match params["edits"].as_array() {
-        Some(arr) => arr.iter().map(|e| (
-            e["path"].as_str().unwrap_or("").to_string(),
-            e["search"].as_str().unwrap_or("").to_string(),
-            e["replace"].as_str().unwrap_or("").to_string(),
-        )).collect(),
-        None => return r#"{"error": "edits array is required"}"#.to_string(),
-    };
-
-    tokio::task::spawn_blocking(move || {
-        // Phase 1: Validate all edits
-        let mut validated: Vec<(String, String, String, String)> = Vec::new();
-        for (i, (path, search, replace)) in edits.iter().enumerate() {
-            let path = path.clone();
-            let search = search.clone();
-            let replace = replace.clone();
-            if path.is_empty() || search.is_empty() {
-                return format!("Error: edit #{} has empty path or search", i + 1);
-            }
-            let content = match std::fs::read_to_string(&path) {
-                Ok(c) => c,
-                Err(e) => return format!("Error reading {}: {}", path, e),
-            };
-            let count = content.matches(&search).count();
-            if count == 0 {
-                return format!(
-                    "multi_edit: edit #{} failed — search text not found in {}. No files were modified.",
-                    i + 1, path
-                );
-            }
-            if count > 1 {
-                return format!(
-                    "multi_edit: edit #{} failed — search appears {} times in {}. Include more context. No files modified.",
-                    i + 1, count, path
-                );
-            }
-            validated.push((path, search, replace, content));
-        }
-
-        // Phase 2: Apply all edits
-        let mut results = Vec::new();
-        let mut original_contents: Vec<(String, String)> = Vec::new();
-        for (path, search, replace, _) in &validated {
-            let content = std::fs::read_to_string(path)
-                .unwrap_or_default();
-            original_contents.push((path.clone(), content.clone()));
-            let new_content = content.replacen(search, replace, 1);
-            match std::fs::write(path, &new_content) {
-                Ok(_) => results.push(format!("{}: applied", path)),
-                Err(e) => {
-                    // Rollback
-                    for (rb_path, rb_content) in &original_contents {
-                        let _ = std::fs::write(rb_path, rb_content);
-                    }
-                    return format!("multi_edit: write failed for {}: {}. All files rolled back.", path, e);
-                }
-            }
-        }
-        format!("multi_edit: {} edits applied across {} files\n{}",
-            validated.len(),
-            validated.iter().map(|(p,_,_,_)| p).collect::<std::collections::HashSet<_>>().len(),
-            results.join("\n"))
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-async fn tool_create_directory(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or(""));
-    tokio::task::spawn_blocking(move || {
-        match std::fs::create_dir_all(&path) {
-            Ok(_) => format!("Created directory: {}", path),
-            Err(e) => format!("Error: {}", e),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-async fn tool_move_file(params: &serde_json::Value) -> String {
-    let source = normalize_file_path(params["source"].as_str().unwrap_or(""));
-    let destination = normalize_file_path(params["destination"].as_str().unwrap_or(""));
-    tokio::task::spawn_blocking(move || {
-        match std::fs::rename(&source, &destination) {
-            Ok(_) => format!("Moved: {} -> {}", source, destination),
-            Err(e) => format!("Error: {}", e),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-async fn tool_delete_file(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or(""));
-    tokio::task::spawn_blocking(move || {
-        if let Ok(meta) = std::fs::metadata(&path) {
-            if meta.is_dir() {
-                return "Error: is a directory. Use a different tool to delete directories.".to_string();
-            }
-        }
-        match std::fs::remove_file(&path) {
-            Ok(_) => format!("Deleted: {}", path),
-            Err(e) => format!("Error: {}", e),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-async fn tool_copy_file_fn(params: &serde_json::Value) -> String {
-    let source = normalize_file_path(params["source"].as_str().unwrap_or(""));
-    let destination = normalize_file_path(params["destination"].as_str().unwrap_or(""));
-    tokio::task::spawn_blocking(move || {
-        copy_recursive(&source, &destination)
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-fn copy_recursive(src: &str, dst: &str) -> String {
-    let src_path = std::path::Path::new(src);
-    if !src_path.exists() {
-        return format!("Error: source '{}' does not exist", src);
-    }
-    if src_path.is_dir() {
-        match std::fs::create_dir_all(dst) {
-            Ok(_) => {},
-            Err(e) => return format!("Error: {}", e),
-        }
-        let entries = match std::fs::read_dir(src) {
-            Ok(e) => e,
-            Err(e) => return format!("Error: {}", e),
-        };
-        for entry in entries.filter_map(|e| e.ok()) {
-            let name = entry.file_name();
-            let sub_src = src_path.join(&name);
-            let sub_dst = std::path::Path::new(dst).join(&name);
-            let result = copy_recursive(&sub_src.to_string_lossy(), &sub_dst.to_string_lossy());
-            if result.starts_with("Error") { return result; }
-        }
-        format!("Copied directory: {} -> {}", src, dst)
-    } else {
-        match std::fs::copy(src, dst) {
-            Ok(_) => format!("Copied: {} -> {}", src, dst),
-            Err(e) => format!("Error: {}", e),
-        }
-    }
-}
-
-async fn tool_web_fetch(params: serde_json::Value) -> String {
-    let url = params["url"].as_str().unwrap_or("");
-    if url.is_empty() {
-        return "Error: url is required".to_string();
-    }
-    let url = url.to_string();
-    tokio::task::spawn_blocking(move || {
-        match reqwest::blocking::get(&url) {
-            Ok(resp) => {
-                match resp.text() {
-                    Ok(html) => {
-                        let text = html_to_text(&html);
-                        if text.len() > 32000 {
-                            format!("{}...\n[truncated at 32K chars]", &text[..32000])
-                        } else {
-                            text
-                        }
-                    }
-                    Err(e) => format!("Error reading response: {}", e),
-                }
-            }
-            Err(e) => format!("Error fetching URL: {}", e),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-fn html_to_text(html: &str) -> String {
-    // Strip script and style tags
-    let mut text = html.to_string();
-    while let Some(start) = text.find("<script") {
-        if let Some(end) = text[start..].find("</script>") {
-            text.replace_range(start..start + end + 9, " ");
-        } else { break; }
-    }
-    while let Some(start) = text.find("<style") {
-        if let Some(end) = text[start..].find("</style>") {
-            text.replace_range(start..start + end + 8, " ");
-        } else { break; }
-    }
-    // Strip all HTML tags
-    let mut result = String::new();
-    let mut in_tag = false;
-    for ch in text.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => result.push(ch),
-            _ => {}
-        }
-    }
-    // Collapse whitespace
-    let lines: Vec<&str> = result.lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
-        .collect();
-    lines.join("\n")
-}
-
-async fn tool_run_background(params: &serde_json::Value) -> String {
-    let command = params["command"].as_str().unwrap_or("");
-    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    let wait_sec = params["wait_sec"].as_i64().unwrap_or(3) as u64;
-    if command.is_empty() {
-        return "Error: command is required".to_string();
-    }
-    eprintln!("[run_background] Spawning: {} (cwd: {})", command, path);
-
-    // Temp dir for output capture
-    let tmp_dir = user_home_dir().join(".minimaxcode").join("tmp");
-    let _ = std::fs::create_dir_all(&tmp_dir);
-    let out_file = tmp_dir.join(format!("bg_out_{}.txt", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()));
-    let err_file = tmp_dir.join(format!("bg_err_{}.txt", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() + 1));
-
-    let out_file_clone = out_file.clone();
-    let err_file_clone = err_file.clone();
-
-    let mut cmd = if cfg!(windows) {
-        let mut c = hidden_cmd("cmd");
-        c.args(["/C", command]);
-        c
-    } else {
-        let mut c = hidden_cmd("sh");
-        c.args(["-c", command]);
-        c
-    };
-    cmd.current_dir(path);
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-    match cmd.spawn() {
-        Ok(mut child) => {
-            let pid = child.id();
-            let child_stdout = child.stdout.take();
-            let child_stderr = child.stderr.take();
-
-            // Spawn threads to capture output to files in real-time
-            if let Some(stdout) = child_stdout {
-                let out_path = out_file_clone.clone();
-                std::thread::spawn(move || {
-                    use std::io::{BufRead, BufReader, Write};
-                    let reader = BufReader::new(stdout);
-                    let mut file = std::fs::File::create(&out_path).unwrap();
-                    for line in reader.lines() {
-                        if let Ok(line) = line {
-                            let _ = writeln!(file, "{}", line);
-                            let _ = file.flush();
-                        }
-                    }
-                });
-            }
-            if let Some(stderr) = child_stderr {
-                let err_path = err_file_clone;
-                std::thread::spawn(move || {
-                    use std::io::{BufRead, BufReader, Write};
-                    let reader = BufReader::new(stderr);
-                    let mut file = std::fs::File::create(&err_path).unwrap();
-                    for line in reader.lines() {
-                        if let Ok(line) = line {
-                            let _ = writeln!(file, "{}", line);
-                            let _ = file.flush();
-                        }
-                    }
-                });
-            }
-
-            // Small wait for initial output
-            std::thread::sleep(std::time::Duration::from_secs(wait_sec));
-            let startup = std::fs::read_to_string(&out_file_clone).unwrap_or_default();
-
-            // Spawn reaper to write exit status when process ends
-            let out_reap = out_file_clone.clone();
-            std::thread::spawn(move || {
-                let status = child.wait(); // blocks until process exits
-                if let Ok(ref f) = std::fs::OpenOptions::new().append(true).open(&out_reap) {
-                    use std::io::Write;
-                    let mut f_ref = f;
-                    let _ = writeln!(f_ref, "\n--- 进程退出码: {:?} ---", status.as_ref().ok().and_then(|s| s.code()));
-                }
-            });
-
-            json!({
-                "success": true,
-                "pid": pid,
-                "out_file": out_file.to_string_lossy().to_string(),
-                "err_file": err_file.to_string_lossy().to_string(),
-                "startup_output": startup,
-                "message": format!("后台进程已启动，PID: {}, 输出文件: {}", pid, out_file.to_string_lossy())
-            }).to_string()
-        }
-        Err(e) => json!({"error": format!("Failed to spawn: {}", e)}).to_string(),
-    }
-}
-
-async fn tool_job_output(params: &serde_json::Value) -> String {
-    let pid = params["job_id"].as_i64().unwrap_or(0) as u32;
-    let tail = params["tail_lines"].as_i64().unwrap_or(200) as usize;
-    // Allow reading output from file directly (preferred over PID for live output)
-    let out_file = params["out_file"].as_str().unwrap_or("");
-
-    if !out_file.is_empty() && std::path::Path::new(out_file).exists() {
-        let content = match std::fs::read_to_string(out_file) {
-            Ok(c) => c,
-            Err(e) => return format!("读取输出文件失败: {}", e),
-        };
-        let lines: Vec<&str> = content.lines().collect();
-        let total = lines.len();
-        let tail_start = if total > tail { total - tail } else { 0 };
-        let tail_text: String = lines[tail_start..].iter()
-            .map(|l| l.to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        // Check if process is still running
-        let status = if cfg!(windows) {
-            hidden_cmd("tasklist")
-                .args(["/FI", &format!("PID eq {}", pid)])
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
-                .unwrap_or(false)
-        } else {
-            hidden_cmd("ps")
-                .args(["-p", &pid.to_string()])
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
-                .unwrap_or(false)
-        };
-
-        return format!("{} ({} / {} lines)\n{}",
-            if status { "运行中" } else { "已结束" },
-            tail_text.lines().count(),
-            total,
-            tail_text.trim());
-    }
-
-    if pid == 0 {
-        return "Error: 需要 job_id 或 out_file 参数".to_string();
-    }
-    // Legacy: try to get process info via tasklist/ps
-    if cfg!(windows) {
-        let output = hidden_cmd("tasklist")
-            .args(["/FI", &format!("PID eq {}", pid)])
-            .output();
-        match output {
-            Ok(o) => {
-                let text = String::from_utf8_lossy(&o.stdout).to_string();
-                if text.contains(&pid.to_string()) {
-                    format!("Process {} is running.\n{}", pid, text)
-                } else {
-                    format!("Process {} is not running. 如果之前返回了 out_file，请用 out_file 参数读取输出。", pid)
-                }
-            }
-            Err(_) => format!("Process {} status unknown.", pid),
-        }
-    } else {
-        let output = hidden_cmd("ps")
-            .args(["-p", &pid.to_string(), "-o", "pid,stat,command"])
-            .output();
-        match output {
-            Ok(o) => {
-                let text = String::from_utf8_lossy(&o.stdout).to_string();
-                if text.contains(&pid.to_string()) {
-                    format!("Process {} is running:\n{}", pid, text)
-                } else {
-                    format!("Process {} is not running. 如果之前返回了 out_file，请用 out_file 参数读取输出。", pid)
-                }
-            }
-            Err(_) => format!("Process {} status unknown.", pid),
-        }
-    }
-}
-
-async fn tool_list_jobs(_params: &serde_json::Value) -> String {
-    if cfg!(windows) {
-        match hidden_cmd("tasklist")
-            .args(["/FO", "CSV", "/NH"])
-            .output()
-        {
-            Ok(o) => {
-                let text = String::from_utf8_lossy(&o.stdout).to_string();
-                if text.trim().is_empty() {
-                    "No running processes detected.".to_string()
-                } else {
-                    format!("Running processes:\n{}", text.lines().take(50).collect::<Vec<_>>().join("\n"))
-                }
-            }
-            Err(e) => format!("Error: {}", e),
-        }
-    } else {
-        match hidden_cmd("ps").args(["-eo", "pid,comm,stat"]).output() {
-            Ok(o) => {
-                let text = String::from_utf8_lossy(&o.stdout).to_string();
-                if text.trim().is_empty() {
-                    "No running processes detected.".to_string()
-                } else {
-                    format!("Running processes:\n{}", text.lines().take(50).collect::<Vec<_>>().join("\n"))
-                }
-            }
-            Err(e) => format!("Error: {}", e),
-        }
-    }
-}
-
-async fn tool_run_tests(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    let framework = params["test_framework"].as_str().unwrap_or("npm");
-    let path = path.to_string();
-    let framework = framework.to_string();
-    tokio::task::spawn_blocking(move || {
-        let (cmd, args) = match framework.as_str() {
-            "jest" => ("npm", vec!["test", "--", "--coverage=false"]),
-            "pytest" => ("python", vec!["-m", "pytest", "--tb=short", "-q"]),
-            "cargo" => ("cargo", vec!["test", "--", "--nocapture"]),
-            "npm" => ("npm", vec!["test", "--", "--coverage=false"]),
-            _ => return format!("Unknown test framework: {}", framework),
-        };
-        let mut process = hidden_cmd(cmd);
-        if framework == "pytest" || framework == "cargo" {
-            process.current_dir(&path);
-        }
-        process.args(&args);
-        output_with_timeout(&mut process, 300)
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-async fn tool_spawn_process(params: &serde_json::Value) -> String {
-    let command = params["command"].as_str().unwrap_or("");
-    let cwd = params.get("path").and_then(|p| p.as_str());
-    let command = command.to_string();
-    let cwd = cwd.map(|s| s.to_string());
-    tokio::task::spawn_blocking(move || {
-        let mut cmd = if cfg!(windows) {
-            let mut c = hidden_cmd("cmd");
-            c.args(["/C", "start", "/B", &command]);
-            c
-        } else {
-            let mut c = hidden_cmd("sh");
-            c.args(["-c", &format!("{} &", command)]);
-            c
-        };
-        if let Some(dir) = &cwd {
-            cmd.current_dir(dir);
-        }
-        match cmd.spawn() {
-            Ok(child) => format!("Process started with PID: {}", child.id()),
-            Err(e) => format!("Error: {}", e),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-async fn tool_kill_process(params: &serde_json::Value) -> String {
-    let pid = params["pid"].as_i64().unwrap_or(0) as u32;
-    tokio::task::spawn_blocking(move || {
-        let output = if cfg!(windows) {
-            hidden_cmd("taskkill")
-                .args(["/F", "/PID", &pid.to_string()])
-                .output()
-        } else {
-            hidden_cmd("kill")
-                .args(["-9", &pid.to_string()])
-                .output()
-        };
-        match output {
-            Ok(o) => {
-                if o.status.success() {
-                    "Process killed".to_string()
-                } else {
-                    String::from_utf8_lossy(&o.stderr).to_string()
-                }
-            }
-            Err(e) => format!("Error: {}", e),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-/// Vision analysis using Anthropic Messages API for custom providers.
-async fn vision_anthropic(prompt: &str, image_url: &str, api_key: &str, api_url: &str, model: &str) -> String {
-    let (mime, base64_data) = match resolve_image_base64(image_url) {
-        Ok((m, b)) => (m, b),
-        Err(e) => return format!(r#"{{"success": false, "error": "Failed to load image: {}"}}"#, e),
-    };
-
-    let request_body = serde_json::json!({
-        "model": model,
-        "max_tokens": 2048,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": mime,
-                        "data": base64_data
-                    }
-                },
-                {
-                    "type": "text",
-                    "text": prompt
-                }
-            ]
-        }]
-    });
-
-    let client = reqwest::Client::new();
-    let messages_path = format!("{}/v1/messages", api_url.trim_end_matches('/'));
-    match client.post(&messages_path)
-        .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header("Content-Type", "application/json")
-        .json(&request_body)
-        .timeout(std::time::Duration::from_secs(60))
-        .send()
-        .await
-    {
-        Ok(resp) => {
-            match resp.json::<serde_json::Value>().await {
-                Ok(data) => {
-                    let text = data["content"].as_array()
-                        .and_then(|arr| arr.iter().find(|b| b["type"] == "text"))
-                        .and_then(|b| b["text"].as_str())
-                        .unwrap_or("");
-                    serde_json::to_string(&serde_json::json!({
-                        "success": true,
-                        "content": text
-                    })).unwrap_or_default()
-                }
-                Err(e) => format!(r#"{{"success": false, "error": "{}"}}"#, e),
-            }
-        }
-        Err(e) => format!(r#"{{"success": false, "error": "{}"}}"#, e),
-    }
-}
-
-fn resolve_image_base64(image_url: &str) -> Result<(String, String), String> {
-    let data = if image_url.starts_with("http://") || image_url.starts_with("https://") {
-        reqwest::blocking::get(image_url)
-            .map_err(|e| e.to_string())?
-            .bytes()
-            .map_err(|e| e.to_string())?
-            .to_vec()
-    } else {
-        std::fs::read(image_url).map_err(|e| format!("Cannot read {}: {}", image_url, e))?
-    };
-    let mime = if data.len() >= 3 && &data[0..3] == b"\xFF\xD8\xFF" { "image/jpeg" }
-        else if data.len() >= 4 && &data[0..4] == b"\x89PNG" { "image/png" }
-        else if data.len() >= 4 && &data[0..4] == b"RIFF" { "image/webp" }
-        else { "image/png" };
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
-    Ok((mime.to_string(), b64))
-}
-
-async fn tool_web_search(params: serde_json::Value, api_key: String, api_url: String, provider: String) -> String {
-    let query = params["query"].as_str().unwrap_or("").to_string();
-    if query.is_empty() {
-        return r#"{"success": false, "error": "query is required"}"#.to_string();
-    }
-
-    // Custom providers don't have web_search registered (agent uses MCP tool instead).
-    // If we reach here with a custom provider, something went wrong — guide agent to MCP.
-    if provider == "custom" {
-        return r#"{"success": false, "error": "Web search is not available for this provider. Connect an MCP search tool to enable it."}"#.to_string();
-    }
-
-    // MiniMax provider: use MiniMax's built-in search API
-    let search_url = format!("{}/v1/coding_plan/search", api_url);
-    tokio::task::spawn_blocking(move || {
-        let client = reqwest::blocking::Client::new();
-        let resp = client.post(&search_url)
-            .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", api_key))
-            .json(&serde_json::json!({ "q": query }))
-            .timeout(std::time::Duration::from_secs(SEARCH_TIMEOUT_SECS))
-            .send();
-
-        match resp {
-            Ok(response) => {
-                match response.json::<serde_json::Value>() {
-                    Ok(data) => {
-                        let results = data.get("organic")
-                            .and_then(|r| r.as_array())
-                            .map(|arr| {
-                                arr.iter().take(10).map(|item| {
-                                    serde_json::json!({
-                                        "title": item.get("title").unwrap_or(&serde_json::Value::String("".to_string())),
-                                        "link": item.get("link").unwrap_or(&serde_json::Value::String("".to_string())),
-                                        "snippet": item.get("snippet").unwrap_or(&serde_json::Value::String("".to_string())),
-                                        "date": item.get("date").unwrap_or(&serde_json::Value::String("".to_string()))
-                                    })
-                                }).collect::<Vec<_>>()
-                            })
-                            .unwrap_or_default();
-                        serde_json::to_string(&serde_json::json!({
-                            "success": true,
-                            "results": results,
-                            "related_searches": data.get("related_searches").cloned().unwrap_or(serde_json::Value::Array(vec![]))
-                        })).unwrap_or_else(|_| r#"{"success": false, "error": "JSON serialization failed"}"#.to_string())
-                    }
-                    Err(e) => serde_json::to_string(&serde_json::json!({
-                        "success": false,
-                        "error": format!("Failed to parse response: {}", e)
-                    })).unwrap()
-                }
-            }
-            Err(e) => serde_json::to_string(&serde_json::json!({
-                "success": false,
-                "error": format!("Request failed: {}", e)
-            })).unwrap()
-        }
-    })
-    .await
-    .unwrap_or_else(|_| r#"{"success": false, "error": "Task cancelled"}"#.to_string())
-}
-
-async fn tool_understand_image(params: serde_json::Value, api_key: String, api_url: String, model: String, provider: String) -> String {
-    let prompt = params["prompt"].as_str().unwrap_or("").to_string();
-    let image_url = params["image_url"].as_str().unwrap_or("").to_string();
-
-    if prompt.is_empty() || image_url.is_empty() {
-        return r#"{"success": false, "error": "prompt and image_url are required"}"#.to_string();
-    }
-
-    if provider == "custom" {
-        return vision_anthropic(&prompt, &image_url, &api_key, &api_url, &model).await;
-    }
-
-    // MiniMax provider: use MiniMax vision API
-    tokio::task::spawn_blocking(move || {
-        let image_data = resolve_image(&image_url);
-
-        let client = reqwest::blocking::Client::new();
-        let resp = client.post(format!("{}/v1/coding_plan/vlm", DEFAULT_API_URL))
-            .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", api_key))
-            .json(&serde_json::json!({
-                "prompt": prompt,
-                "image_url": image_data
-            }))
-            .timeout(std::time::Duration::from_secs(VLM_TIMEOUT_SECS))
-            .send();
-
-        match resp {
-            Ok(response) => {
-                match response.json::<serde_json::Value>() {
-                    Ok(data) => {
-                        let description = data.get("content")
-                            .and_then(|c| c.as_str())
-                            .unwrap_or("No description available");
-                        serde_json::to_string(&serde_json::json!({
-                            "success": true,
-                            "description": description
-                        })).unwrap_or_else(|_| r#"{"success": false, "error": "JSON serialization failed"}"#.to_string())
-                    }
-                    Err(e) => serde_json::to_string(&serde_json::json!({
-                        "success": false,
-                        "error": format!("Failed to parse response: {}", e)
-                    })).unwrap()
-                }
-            }
-            Err(e) => serde_json::to_string(&serde_json::json!({
-                "success": false,
-                "error": format!("Request failed: {}", e)
-            })).unwrap()
-        }
-    })
-    .await
-    .unwrap_or_else(|_| r#"{"success": false, "error": "Task cancelled"}"#.to_string())
-}
-
-async fn tool_mcp_reload(
-    _params: &serde_json::Value,
-    mcp_service: Arc<RwLock<McpService>>,
-    skill_service: Arc<SkillService>,
-    db: Arc<StdMutex<Connection>>,
-) -> String {
-    skill_service.load_all_skills().await;
-    let workspace: Option<String> = {
-        if let Ok(conn) = db.lock() {
-            conn.query_row("SELECT workspace FROM app_config", [], |row| row.get(0)).ok()
-        } else {
-            None
-        }
-    };
-    let mcp = mcp_service.read().await;
-    let statuses = mcp.reload(workspace.as_deref()).await;
-    let tool_count = mcp.get_all_tools().await.len();
-    let config_info = if let Some(ref ws) = workspace {
-        format!("全局 + 项目 ({})", ws)
-    } else {
-        "全局".to_string()
-    };
-    let connected = statuses.iter().filter(|s| s.status == "connected").count();
-    let failed: Vec<_> = statuses.iter().filter(|s| s.status == "failed").collect();
-    let disabled: Vec<_> = statuses.iter().filter(|s| s.status == "disabled").collect();
-    let mut result = serde_json::json!({
-        "success": true,
-        "message": format!("MCP 配置已重载 ({}): {} 个服务器连接成功，{} 个工具可用", config_info, connected, tool_count)
-    });
-    if !failed.is_empty() {
-        result["failed"] = serde_json::Value::Array(
-            failed.iter().map(|s| serde_json::json!({"name": s.name, "error": s.error})).collect()
-        );
-    }
-    if !disabled.is_empty() {
-        result["disabled"] = serde_json::Value::Array(
-            disabled.iter().map(|s| serde_json::json!({"name": s.name})).collect()
-        );
-    }
-    serde_json::to_string(&result).unwrap_or_default()
-}
-
-async fn tool_skill(_tool_name: &str, params: &serde_json::Value, skill_service: Arc<SkillService>) -> String {
-    let name = params["name"].as_str().unwrap_or("");
-    if name.is_empty() {
-        return r#"{"success": false, "error": "Skill name is required"}"#.to_string();
-    }
-
-    match skill_service.get_skill_content(name).await {
-        Some(content) => {
-            let skill = skill_service.get_skill(name).await;
-            format!(r#"{{"success": true, "skill": {{"name": "{}", "content": {}, "allowed_tools": {:?}}}, "scripts": {:?}, "references": {:?}}}"#,
-                name,
-                serde_json::to_string(&content).unwrap_or_default(),
-                skill.as_ref().map(|s| s.allowed_tools.clone()).unwrap_or_default(),
-                skill.as_ref().map(|s| s.scripts.clone()).unwrap_or_default(),
-                skill.as_ref().map(|s| s.references.clone()).unwrap_or_default())
-        }
-        None => format!(r#"{{"success": false, "error": "Skill '{}' not found"}}"#, name),
-    }
-}
-
-async fn tool_list_builtin_skills(_tool_name: &str, _params: &serde_json::Value, skill_service: Arc<SkillService>) -> String {
-    let skills = skill_service.list_skills(Some("builtin")).await;
-    serde_json::to_string(&skills).unwrap_or_else(|_| "[]".to_string())
-}
-
-async fn tool_list_user_skills(_tool_name: &str, _params: &serde_json::Value, skill_service: Arc<SkillService>) -> String {
-    // List external skills: user skills + project skills
-    let user_skills = skill_service.list_skills(Some("user")).await;
-    let project_skills = skill_service.list_skills(Some("project")).await;
-    let mut all = Vec::new();
-    all.extend(user_skills);
-    all.extend(project_skills);
-    serde_json::to_string(&all).unwrap_or_else(|_| "[]".to_string())
-}
-
-async fn tool_match_skills(_tool_name: &str, params: &serde_json::Value, skill_service: Arc<SkillService>) -> String {
-    let query = params["query"].as_str().unwrap_or("");
-    let top_k = params.get("top_k").and_then(|k| k.as_u64()).unwrap_or(3) as usize;
-    let mut matches = skill_service.match_skills(query, top_k * 2).await;
-    // Prioritize external (user/project) skills: boost their score by 1.5x
-    for m in &mut matches {
-        if m.source != "builtin" {
-            m.score *= 1.5;
-        }
-    }
-    matches.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-    matches.truncate(top_k);
-    serde_json::to_string(&matches).unwrap_or_else(|_| "[]".to_string())
-}
-
-async fn tool_execute_skill(_tool_name: &str, params: &serde_json::Value, skill_service: Arc<SkillService>) -> String {
-    let name = params["name"].as_str().unwrap_or("");
-    let script = params.get("script").and_then(|s| s.as_str());
-    if name.is_empty() {
-        return r#"{"success": false, "error": "Skill name is required"}"#.to_string();
-    }
-    match skill_service.execute_skill(name, script).await {
-        Ok(output) => format!(r#"{{"success": true, "output": {}}}"#, serde_json::to_string(&output).unwrap_or_default()),
-        Err(e) => format!(r#"{{"success": false, "error": "{}"}}"#, e),
-    }
-}
-
-async fn tool_read_knowledge(params: &serde_json::Value) -> String {
-    let file_name = params["file_name"].as_str().unwrap_or("");
-
-    if file_name.is_empty() {
-        return r#"{"success": false, "error": "file_name is required"}"#.to_string();
-    }
-
-    let base = user_home_dir();
-    // Read workspace from DB to derive project name
-    let project_name = get_project_name();
-    let path = base.join(".minimaxcode").join("project mem").join(&project_name).join("knowledge").join(file_name);
-
-    match std::fs::read_to_string(&path) {
-        Ok(content) => format!(r#"{{"success": true, "content": {}}}"#, serde_json::to_string(&content).unwrap_or_default()),
-        Err(e) => format!(r#"{{"success": false, "error": "{}"}}"#, e),
-    }
-}
-
-async fn tool_write_knowledge(params: &serde_json::Value) -> String {
-    let file_name = params["file_name"].as_str().unwrap_or("");
-    let content = params["content"].as_str().unwrap_or("");
-
-    if file_name.is_empty() {
-        return r#"{"success": false, "error": "file_name is required"}"#.to_string();
-    }
-
-    let base = user_home_dir();
-    let project_name = get_project_name();
-    let dir = base.join(".minimaxcode").join("project mem").join(&project_name).join("knowledge");
-    let path = dir.join(file_name);
-
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-
-    match std::fs::write(&path, content) {
-        Ok(_) => format!(r#"{{"success": true, "path": "{}"}}"#, path.display()),
-        Err(e) => format!(r#"{{"success": false, "error": "{}"}}"#, e),
-    }
-}
-
-async fn tool_list_knowledge() -> String {
-    tokio::task::spawn_blocking(|| {
-        let base = user_home_dir();
-        let project_name = get_project_name();
-        let dir = base.join(".minimaxcode").join("project mem").join(&project_name).join("knowledge");
-
-        let mut files = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                if let Ok(meta) = entry.metadata() {
-                    if meta.is_file() {
-                        let name = entry.file_name().to_string_lossy().to_string();
-                        let size = meta.len();
-                        let modified = meta.modified()
-                            .map(|t| format!("{:?}", t))
-                            .unwrap_or_default();
-                        files.push(serde_json::json!({
-                            "name": name,
-                            "size": size,
-                            "modified": modified
-                        }));
-                    }
-                }
-            }
-        }
-        serde_json::to_string(&serde_json::json!({
-            "success": true,
-            "files": files
-        })).unwrap_or_else(|_| r#"{"success": false, "error": "serialization error"}"#.to_string())
-    })
-    .await
-    .unwrap_or_else(|_| r#"{"success": false, "error": "Task cancelled"}"#.to_string())
-}
-
-// ========== Helper Functions ==========
-
-fn search_recursive(path: &str, pattern: &str, depth: usize, max_depth: usize, results: &mut Vec<(String, i32, String)>) {
-    if depth > max_depth {
-        return;
-    }
-
-    let entries = match std::fs::read_dir(path) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-
-    for entry in entries.filter_map(|e| e.ok()) {
-        let file_path = entry.path();
-        let file_name = file_path.file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-
-        if file_name.starts_with('.') || file_name == "node_modules" || file_name == "target" {
-            continue;
-        }
-
-        if file_path.is_dir() {
-            search_recursive(&file_path.to_string_lossy(), pattern, depth + 1, max_depth, results);
-        } else if file_path.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&file_path) {
-                for (i, line) in content.lines().enumerate() {
-                    if line.to_lowercase().contains(pattern) {
-                        results.push((
-                            file_path.to_string_lossy().to_string(),
-                            (i + 1) as i32,
-                            line.trim().to_string(),
-                        ));
-                        if results.len() >= 50 {
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn find_replace_recursive(path: &str, find: &str, replace: &str, use_regex: bool, count: &mut usize, depth: usize, max_depth: usize) {
-    if depth > max_depth {
-        return;
-    }
-
-    let entries = match std::fs::read_dir(path) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-
-    for entry in entries.filter_map(|e| e.ok()) {
-        let file_path = entry.path();
-        let file_name = file_path.file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-
-        if file_name.starts_with('.') || file_name == "node_modules" || file_name == "target" {
-            continue;
-        }
-
-        if file_path.is_dir() {
-            find_replace_recursive(&file_path.to_string_lossy(), find, replace, use_regex, count, depth + 1, max_depth);
-        } else if file_path.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&file_path) {
-                let new_content = if use_regex {
-                    match regex::Regex::new(find) {
-                        Ok(re) => re.replace_all(&content, replace).to_string(),
-                        Err(_) => content.replace(find, replace),
-                    }
-                } else {
-                    content.replace(find, replace)
-                };
-                if new_content != content {
-                    if std::fs::write(&file_path, &new_content).is_ok() {
-                        *count += 1;
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn get_env_info_sync(repo_path: &str) -> String {
-    let mut info = Vec::new();
-    let proj_path = std::path::Path::new(repo_path);
-
-    if proj_path.join("package.json").exists() {
-        info.push("Project: Node.js/npm".to_string());
-    }
-    if proj_path.join("Cargo.toml").exists() {
-        info.push("Project: Rust/Cargo".to_string());
-    }
-    if proj_path.join("requirements.txt").exists() || proj_path.join("pyproject.toml").exists() {
-        info.push("Project: Python".to_string());
-    }
-
-    let output = hidden_cmd("git")
-        .args(["-C", repo_path, "status", "--porcelain"])
-        .output();
-    if let Ok(o) = output {
-        let lines = String::from_utf8_lossy(&o.stdout);
-        if lines.trim().is_empty() {
-            info.push("Git: Clean".to_string());
-        } else {
-            info.push("Git: Modified".to_string());
-        }
-    }
-
-    info.join("\n")
-}
-
-fn analyze_project_sync(repo_path: &str) -> String {
-    let path = std::path::Path::new(repo_path);
-    let mut info = Vec::new();
-
-    if let Ok(entries) = std::fs::read_dir(path) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if entry.path().is_dir() {
-                info.push(format!("[DIR] {}", name));
-            } else {
-                info.push(format!("[FILE] {}", name));
-            }
-        }
-    }
-
-    info.join("\n")
-}
-
-// ========== Tool Definitions ==========
-
-fn resolve_image(image_url: &str) -> String {
-    // Already a data URI — pass through
-    if image_url.starts_with("data:") {
-        return image_url.to_string();
-    }
-
-    // Local file path — read and encode
-    let path = std::path::Path::new(image_url);
-    if path.exists() {
-        if let Ok(bytes) = std::fs::read(path) {
-            if bytes.len() > 50 * 1024 * 1024 {
-                return String::new(); // Too large (>50MB)
-            }
-            let ext = path.extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("png")
-                .to_lowercase();
-            let mime = match ext.as_str() {
-                "jpg" | "jpeg" => "image/jpeg",
-                "png" => "image/png",
-                "webp" => "image/webp",
-                _ => "image/png",
-            };
-            return format!("data:{};base64,{}", mime, base64_encode(&bytes));
-        }
-    }
-
-    // HTTP URL — fetch and encode
-    if image_url.starts_with("http://") || image_url.starts_with("https://") {
-        if let Ok(resp) = reqwest::blocking::get(image_url) {
-            if let Ok(bytes) = resp.bytes() {
-                if bytes.len() > 50 * 1024 * 1024 {
-                    return String::new();
-                }
-                let mime = "image/jpeg"; // default
-                return format!("data:{};base64,{}", mime, base64_encode(&bytes));
-            }
-        }
-    }
-
-    // Fallback: pass as-is
-    image_url.to_string()
-}
-
-fn base64_encode(bytes: &[u8]) -> String {
-    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::new();
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
-        let val = (b0 << 16) | (b1 << 8) | b2;
-        result.push(CHARS[((val >> 18) & 0x3F) as usize] as char);
-        result.push(CHARS[((val >> 12) & 0x3F) as usize] as char);
-        if chunk.len() > 1 {
-            result.push(CHARS[((val >> 6) & 0x3F) as usize] as char);
-        } else {
-            result.push('=');
-        }
-        if chunk.len() > 2 {
-            result.push(CHARS[(val & 0x3F) as usize] as char);
-        } else {
-            result.push('=');
-        }
-    }
-    result
-}
-
-fn user_home_dir() -> std::path::PathBuf {
-    if cfg!(windows) {
-        std::env::var("USERPROFILE")
-            .or_else(|_| std::env::var("HOMEDRIVE").and_then(|hd| std::env::var("HOMEPATH").map(|hp| format!("{}{}", hd, hp))))
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-    } else {
-        std::env::var("HOME").map(std::path::PathBuf::from).unwrap_or_else(|_| std::path::PathBuf::from("."))
-    }
-}
-
-/// Normalize a file path for the current OS.
-/// - On Windows: converts Unix-style `/X/path` to `X:/path` and normalizes separators
-/// - Handles both backslash and forward-slash paths
-/// - Resolves `~` to home directory
-fn normalize_file_path(raw: &str) -> String {
-    let trimmed = raw.trim().trim_matches('"').trim_matches('\'');
-
-    // Expand ~ to home directory
-    let expanded = if trimmed.starts_with('~') {
-        let home = user_home_dir();
-        home.join(trimmed.trim_start_matches('~').trim_start_matches('/').trim_start_matches('\\'))
-            .to_string_lossy()
-            .to_string()
-    } else {
-        trimmed.to_string()
-    };
-
-    if cfg!(windows) {
-        // Convert Unix-style /X/path to X:/path (e.g. /e/foo → E:/foo)
-        let normalized = if expanded.len() >= 2
-            && expanded.starts_with('/')
-            && expanded.as_bytes().get(1).map_or(false, |b| b.is_ascii_alphabetic())
-            && expanded.as_bytes().get(2).map_or(true, |b| *b == b'/' || *b == b'\\')
-        {
-            let drive = (expanded.as_bytes()[1] as char).to_ascii_uppercase();
-            format!("{}:/{}", drive, &expanded[3..])
-        } else {
-            expanded
-        };
-        // Normalize separators to backslash for Windows
-        normalized.replace('/', "\\")
-    } else {
-        // On Unix: normalize backslashes to forward slashes
-        expanded.replace('\\', "/")
-    }
-}
-
-fn get_project_name() -> String {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-
-    // Try to find a project root marker nearby
-    let markers = [
-        "package.json", "Cargo.toml", "go.mod", "pyproject.toml", "setup.py",
-        "Gemfile", "pom.xml", "build.gradle", "build.gradle.kts", "CMakeLists.txt",
-        "Makefile",
-        // .git last — avoid hijacking by a parent repo (e.g. dotfiles)
-        ".git",
-    ];
-    let project_root = find_project_root(&cwd, &markers);
-
-    project_root
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "unknown".to_string())
-        .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .collect()
-}
-
-fn find_project_root(start: &std::path::Path, markers: &[&str]) -> std::path::PathBuf {
-    let mut current = if start.is_dir() { start.to_path_buf() } else { start.parent().map(|p| p.to_path_buf()).unwrap_or_default() };
-    loop {
-        for marker in markers {
-            if current.join(marker).exists() {
-                return current;
-            }
-        }
-        if let Some(parent) = current.parent() {
-            if parent == current { break; }
-            current = parent.to_path_buf();
-        } else {
-            break;
-        }
-    }
-    // Fallback: use the start directory
-    if start.is_dir() { start.to_path_buf() } else { start.parent().map(|p| p.to_path_buf()).unwrap_or_default() }
-}
-
-fn tool_reason(tool: &str, file: Option<&str>, cmd: Option<&str>) -> String {
-    match tool {
-        "run_command" | "run_tests" | "run_background" => {
-            format!("Run: {}", cmd.unwrap_or("unknown command"))
-        }
-        "write_file" | "write_files" | "edit_file" => {
-            format!("Edit: {}", file.unwrap_or("unknown file"))
-        }
-        "delete_file" => {
-            format!("Delete: {}", file.unwrap_or("unknown file"))
-        }
-        "git_commit" => "Git commit".to_string(),
-        "send_to_agent" => "Send message to agent".to_string(),
-        _ => format!("Execute: {}", tool),
-    }
-}
-
-fn is_parallel_safe(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        // Read-only file inspection
-        "read_file" | "read_files" | "list_dir" | "directory_tree" | "get_file_info"
-        // Search & analysis
-        | "search_in_dir" | "search_files" | "glob" | "analyze_project_structure"
-        // Git read-only
-        | "git_status" | "git_log" | "git_diff"
-        // Web
-        | "web_search" | "web_fetch"
-        // Knowledge read
-        | "read_knowledge"
-        // Skill inspection
-        | "list_builtin_skills" | "list_user_skills" | "match_skills"
-        | "mcp_reload"
-        // Job inspection
-        | "job_output" | "list_jobs"
-        // Env
-        | "get_env_info"
-        // Background spawn (returns immediately)
-        | "run_background" | "spawn_process"
-    )
-}
-
-fn make_tool(name: &str, desc: &str, schema: serde_json::Value) -> serde_json::Value {
-    json!({"name": name, "description": desc, "input_schema": schema})
-}
-
-fn schema_obj(props: serde_json::Value, required: &[&str]) -> serde_json::Value {
-    let mut s = json!({"type": "object", "properties": props});
-    if !required.is_empty() {
-        s["required"] = json!(required);
-    }
-    s
-}
-
-async fn tool_read_lints(
-    params: &serde_json::Value,
-    lsp_manager: Arc<StdMutex<Option<LspManager>>>,
-    db: Arc<StdMutex<Connection>>,
-) -> String {
-    let path: Option<String> = params["path"].as_str().map(|s| normalize_file_path(s));
-
-    tokio::task::spawn_blocking(move || {
-        let workspace = {
-            let conn = db.lock().unwrap();
-            conn.query_row("SELECT workspace FROM app_config", [], |row| {
-                row.get::<_, String>(0)
-            })
-            .ok()
-            .filter(|w: &String| !w.is_empty())
-        };
-
-        let result = if let Some(ref ws) = workspace {
-            let mut mgr_guard = lsp_manager.lock().unwrap();
-            let needs_init = mgr_guard.is_none();
-            if needs_init {
-                *mgr_guard = Some(LspManager::new(ws));
-            }
-            if let Some(ref mgr) = *mgr_guard {
-                let diags = mgr.read_lints(path.as_deref());
-                format_lints_result(&diags)
-            } else {
-                json!({"success": false, "error": "Failed to initialize LSP manager"}).to_string()
-            }
-        } else {
-            json!({"success": false, "error": "No workspace set"}).to_string()
-        };
-
-        result
-    })
-    .await
-    .unwrap_or_else(|_| json!({"success": false, "error": "Task cancelled"}).to_string())
-}
-
-async fn tool_touch_file(
-    params: &serde_json::Value,
-    lsp_manager: Arc<StdMutex<Option<LspManager>>>,
-    db: Arc<StdMutex<Connection>>,
-) -> String {
-    let file_path: String = normalize_file_path(params["file_path"].as_str().unwrap_or(""));
-
-    tokio::task::spawn_blocking(move || {
-        let workspace = {
-            let conn = db.lock().unwrap();
-            conn.query_row("SELECT workspace FROM app_config", [], |row| {
-                row.get::<_, String>(0)
-            })
-            .ok()
-            .filter(|w: &String| !w.is_empty())
-        };
-
-        if let Some(ref ws) = workspace {
-            let mut mgr_guard = lsp_manager.lock().unwrap();
-            if mgr_guard.is_none() {
-                *mgr_guard = Some(LspManager::new(ws));
-            }
-            if let Some(ref mut mgr) = *mgr_guard {
-                match mgr.touch_file(&file_path) {
-                    Ok(diags) => {
-                        if diags.is_empty() {
-                            json!({"success": true, "diagnostics": []}).to_string()
-                        } else {
-                            json!({"success": true, "diagnostics": diags}).to_string()
-                        }
-                    }
-                    Err(e) => json!({"success": false, "error": e}).to_string(),
-                }
-            } else {
-                json!({"success": false, "error": "LSP manager init failed"}).to_string()
-            }
-        } else {
-            json!({"success": false, "error": "No workspace set"}).to_string()
-        }
-    })
-    .await
-    .unwrap_or_else(|_| json!({"success": false, "error": "Task cancelled"}).to_string())
-}
-
-async fn tool_ask_choice(
-    params: &serde_json::Value,
-    session_id: i64,
-    agent_type: &str,
-    pending_asks: PendingAsks,
-    app_handle: AppHandle,
-) -> String {
-    let questions: serde_json::Value = params.get("questions").cloned().unwrap_or(json!([]));
-    let ask_id = format!("ask_{}", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos());
-
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    pending_asks.lock().unwrap().insert(ask_id.clone(), tx);
-
-    let _ = app_handle.emit("ask_choice", json!({
-        "id": ask_id,
-        "session_id": session_id,
-        "agent_type": agent_type,
-        "questions": questions
-    }));
-
-    match rx.await {
-        Ok(answers) => answers,
-        Err(_) => json!({"cancelled": true}).to_string(),
-    }
-}
-
-fn format_lints_result(diags: &[crate::lsp_types::FileDiagnostics]) -> String {
-    if diags.is_empty() || diags.iter().all(|d| d.diagnostics.is_empty()) {
-        return json!({"success": true, "message": "No linter errors found"}).to_string();
-    }
-
-    let mut output = String::from("Linter diagnostics:\n\n");
-    for file_diag in diags {
-        if file_diag.diagnostics.is_empty() { continue; }
-        output.push_str(&format!("## {}\n", file_diag.file));
-        output.push_str(&format_diagnostics(&file_diag.diagnostics));
-        output.push_str("\n\n");
-    }
-
-    json!({"success": true, "diagnostics": output}).to_string()
 }
 
 fn get_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {

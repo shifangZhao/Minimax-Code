@@ -1,4 +1,5 @@
 mod agent_service;
+mod agent_tools;
 use agent_service::restore_snapshot_file;
 mod context_compressor;
 mod lsp_client;
@@ -298,6 +299,20 @@ fn set_minimax_api_key(state: State<AppState>, api_key: String) -> Result<(), St
     Ok(())
 }
 
+fn mask_api_key(key: &str) -> String {
+    let len = key.chars().count();
+    if len <= 6 {
+        return "****".to_string();
+    }
+    let head: String = key.chars().take(4).collect();
+    let tail: String = key.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+    format!("{}****{}", head, tail)
+}
+
+fn is_masked_key(s: &str) -> bool {
+    s.contains("****") && s.len() <= 16
+}
+
 #[tauri::command]
 fn get_minimax_api_key(state: State<AppState>) -> Result<Option<String>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
@@ -306,7 +321,18 @@ fn get_minimax_api_key(state: State<AppState>) -> Result<Option<String>, String>
         [],
         |row| row.get(0)
     ).ok();
-    Ok(result)
+    Ok(result.map(|k| mask_api_key(&k)))
+}
+
+#[tauri::command]
+fn has_minimax_api_key(state: State<AppState>) -> Result<bool, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let exists: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM minimax_api_key",
+        [],
+        |row| row.get(0)
+    ).unwrap_or(false);
+    Ok(exists)
 }
 
 #[tauri::command]
@@ -424,26 +450,40 @@ fn get_provider_config(state: State<AppState>) -> Result<ProviderConfig, String>
         custom_context_window: 200000,
     });
 
-    // Also load minimax API key
+    // Return masked API keys only — never the full key to frontend
     let minimax_key = conn.query_row(
-        "SELECT api_key FROM minimax_api_key", [], |row| row.get(0)
-    ).unwrap_or_default();
+        "SELECT api_key FROM minimax_api_key", [], |row| row.get::<_, String>(0)
+    ).map(|k| mask_api_key(&k)).unwrap_or_default();
 
-    Ok(ProviderConfig { minimax_api_key: minimax_key, ..config })
+    let custom_key = config.custom_api_key.clone();
+    let custom_key_masked = if custom_key.is_empty() { String::new() } else { mask_api_key(&custom_key) };
+
+    Ok(ProviderConfig { minimax_api_key: minimax_key, custom_api_key: custom_key_masked, ..config })
 }
 
 #[tauri::command]
 fn set_provider_config(state: State<AppState>, config: ProviderConfig) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+
+    // If custom_api_key is masked, preserve the existing key
+    let custom_key = if is_masked_key(&config.custom_api_key) {
+        conn.query_row(
+            "SELECT custom_api_key FROM app_config WHERE id = 1", [],
+            |row| row.get::<_, String>(0)
+        ).unwrap_or_default()
+    } else {
+        config.custom_api_key.clone()
+    };
+
     conn.execute(
         "INSERT INTO app_config (id, provider, model, api_url, context_window, custom_api_url, custom_api_key, custom_model, custom_context_window)
          VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(id) DO UPDATE SET provider=?1, model=?2, api_url=?3, context_window=?4, custom_api_url=?5, custom_api_key=?6, custom_model=?7, custom_context_window=?8",
         rusqlite::params![config.provider, config.model, config.api_url, config.context_window as i64,
-            config.custom_api_url, config.custom_api_key, config.custom_model, config.custom_context_window as i64],
+            config.custom_api_url, custom_key, config.custom_model, config.custom_context_window as i64],
     ).map_err(|e| e.to_string())?;
-    // Also save minimax API key separately
-    if !config.minimax_api_key.is_empty() {
+    // Only update API key if a new (non-masked) value was provided
+    if !config.minimax_api_key.is_empty() && !is_masked_key(&config.minimax_api_key) {
         conn.execute("DELETE FROM minimax_api_key", []).map_err(|e| e.to_string())?;
         conn.execute("INSERT INTO minimax_api_key (api_key) VALUES (?1)", [&config.minimax_api_key])
             .map_err(|e| e.to_string())?;
@@ -796,56 +836,52 @@ async fn mcp_call_tool_any(state: State<'_, AppState>, tool_name: String, args: 
 
 #[tauri::command]
 fn git_status(repo_path: String) -> Result<CommandOutput, String> {
-    run_git_command(&repo_path, "status --porcelain")
+    run_git_command(&repo_path, &["status", "--porcelain"])
 }
 
 #[tauri::command]
 fn git_log(repo_path: String, count: Option<i32>) -> Result<CommandOutput, String> {
     let n = count.unwrap_or(20);
-    run_git_command(&repo_path, &format!("log --oneline -{}", n))
+    let n_str = format!("-{}", n);
+    run_git_command(&repo_path, &["log", "--oneline", &n_str])
 }
 
 #[tauri::command]
 fn git_diff(repo_path: String, target: Option<String>) -> Result<CommandOutput, String> {
     let t = target.unwrap_or_else(|| "HEAD".to_string());
-    run_git_command(&repo_path, &format!("diff {}", t))
+    run_git_command(&repo_path, &["diff", &t])
 }
 
 #[tauri::command]
 fn git_branch(repo_path: String) -> Result<CommandOutput, String> {
-    run_git_command(&repo_path, "branch -v")
+    run_git_command(&repo_path, &["branch", "-v"])
 }
 
 #[tauri::command]
 fn git_checkout(repo_path: String, branch: String) -> Result<CommandOutput, String> {
-    run_git_command(&repo_path, &format!("checkout {}", branch))
+    run_git_command(&repo_path, &["checkout", &branch])
 }
 
 #[tauri::command]
 fn git_commit(repo_path: String, message: String) -> Result<CommandOutput, String> {
-    run_git_command(&repo_path, &format!("commit -m \"{}\"", message))
+    run_git_command(&repo_path, &["commit", "-m", &message])
 }
 
 #[tauri::command]
 fn git_stash(repo_path: String) -> Result<CommandOutput, String> {
-    run_git_command(&repo_path, "stash push -m \"auto-stash\"")
+    run_git_command(&repo_path, &["stash", "push", "-m", "auto-stash"])
 }
 
 #[tauri::command]
 fn git_stash_pop(repo_path: String) -> Result<CommandOutput, String> {
-    run_git_command(&repo_path, "stash pop")
+    run_git_command(&repo_path, &["stash", "pop"])
 }
 
-fn run_git_command(repo_path: &str, args: &str) -> Result<CommandOutput, String> {
-    let escaped_path = std::path::Path::new(repo_path).display().to_string();
-    let (cmd, shell_args) = if cfg!(windows) {
-        ("powershell", vec!["-NoProfile".to_string(), "-NonInteractive".to_string(), "-Command".to_string(), format!("git -C \"{}\" {}", escaped_path, args)])
-    } else {
-        ("sh", vec!["-c".to_string(), format!("git -C \"{}\" {}", repo_path, args)])
-    };
-
-    let output = hidden_cmd(cmd)
-        .args(&shell_args[1..])
+fn run_git_command(repo_path: &str, args: &[&str]) -> Result<CommandOutput, String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(args)
         .output()
         .map_err(|e| format!("Failed to run git command: {}", e))?;
     Ok(CommandOutput {
@@ -1618,81 +1654,41 @@ async fn mcp_reload(state: State<'_, AppState>) -> Result<String, String> {
     Ok(serde_json::to_string(&statuses).unwrap_or_default())
 }
 
-#[tauri::command]
-async fn compact_session(state: State<'_, AppState>, session_id: i64) -> Result<String, String> {
-    use crate::context_compressor::compress_context;
-    use crate::context_compressor::estimate_tokens;
-    use crate::context_compressor::summarize_with_model;
+/// Shared helper: summarize → compress → persist to DB.
+/// Used by both automatic compression (stream_chat) and manual /compact command.
+/// Returns (token_count_before, token_count_after).
+pub(crate) async fn compact_messages(
+    db: &Arc<Mutex<Connection>>,
+    session_id: i64,
+    agent_type: &str,
+    api_messages: &mut Vec<serde_json::Value>,
+    api_key: &str,
+    api_url: &str,
+    messages_path: &str,
+    model: &str,
+) -> Result<(usize, usize), String> {
+    use crate::context_compressor::{compress_context, estimate_tokens, summarize_with_model};
 
-    let (agent_type, context_window, api_key, api_url, model): (String, usize, String, String, String) = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        let at: String = conn.query_row(
-            "SELECT agent_type FROM agent_session WHERE id = ?1",
-            rusqlite::params![session_id],
-            |row| row.get(0),
-        ).map_err(|e| format!("Session not found: {}", e))?;
-        let ak: String = conn.query_row("SELECT api_key FROM app_config", [], |row| row.get(0)).unwrap_or_default();
-        let au: String = conn.query_row("SELECT api_url FROM app_config", [], |row| row.get(0)).unwrap_or_default();
-        let md: String = conn.query_row("SELECT model FROM app_config", [], |row| row.get(0)).unwrap_or_default();
-        let provider: String = conn.query_row(
-            "SELECT provider FROM app_config", [], |row| row.get(0)
-        ).unwrap_or_else(|_| "minimax".to_string());
-        let cw: i64 = match provider.as_str() {
-            "custom" => conn.query_row("SELECT custom_context_window FROM app_config", [], |row| row.get(0)).unwrap_or(200000),
-            _ => conn.query_row("SELECT context_window FROM app_config", [], |row| row.get(0)).unwrap_or(204800),
-        };
-        (at, cw.max(0) as usize, ak, au, md)
-    };
+    let token_before = estimate_tokens(api_messages);
 
-    // Phase 1: read all messages (release DB lock before async model call)
-    let (token_before, mut api_messages) = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn.prepare(
-            "SELECT role, content, tool_calls, thinking, raw_json FROM chat_message WHERE session_id = ?1 ORDER BY created_at ASC"
-        ).map_err(|e| e.to_string())?;
+    // Model call — no DB lock held
+    let summary = summarize_with_model(agent_type, api_messages, api_key, api_url, messages_path, model).await;
+    eprintln!("[compact] Model summary: {} chars, messages: {} → ",
+        summary.len(), api_messages.len());
+    compress_context(agent_type, api_messages, summary);
 
-        #[derive(Debug)]
-        struct RawMsg { role: String, content: String, _tool_calls: Option<String>, _thinking: Option<String>, raw_json: Option<String> }
+    let token_after = estimate_tokens(api_messages);
+    eprintln!("[compact] Compressed: {} → {} tokens, {} messages",
+        token_before, token_after, api_messages.len());
 
-        let rows: Vec<RawMsg> = stmt.query_map(rusqlite::params![session_id], |row| Ok(RawMsg {
-            role: row.get(0)?, content: row.get(1)?, _tool_calls: row.get(2)?, _thinking: row.get(3)?, raw_json: row.get(4)?,
-        })).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
-
-        drop(stmt);
-
-        let tb = estimate_tokens(&rows.iter().map(|m| {
-            let content_val = match m.raw_json {
-                Some(ref raw) => serde_json::from_str(raw).unwrap_or(serde_json::json!(m.content)),
-                None => serde_json::json!(m.content),
-            };
-            serde_json::json!({"role": m.role, "content": content_val})
-        }).collect::<Vec<_>>());
-
-        let msgs: Vec<serde_json::Value> = rows.iter().map(|m| {
-            let content_val = match m.raw_json {
-                Some(ref raw) => serde_json::from_str(raw).unwrap_or(serde_json::json!(m.content)),
-                None => serde_json::json!(m.content),
-            };
-            serde_json::json!({"role": m.role, "content": content_val})
-        }).collect();
-
-        (tb, msgs)
-    };
-    // conn is released here — safe to await
-
-    // Phase 2: model-driven summarization (async, no timeout)
-    let summary = summarize_with_model(&agent_type, &api_messages, &api_key, &api_url, &model).await;
-    eprintln!("[compact_session] Model summary: {} chars", summary.len());
-    compress_context(&agent_type, &mut api_messages, context_window, true, summary);
-
-    let token_after = estimate_tokens(&api_messages);
-
-    // Phase 3: save compressed messages (re-acquire DB lock)
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    // Persist to DB: compressed messages replace originals, old snapshots are stale
+    let conn = db.lock().map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM chat_message WHERE session_id = ?1", rusqlite::params![session_id])
         .map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM file_snapshot WHERE session_id = ?1", rusqlite::params![session_id])
+        .map_err(|e| e.to_string())?;
 
-    for msg in &api_messages {
+    for msg in api_messages.iter() {
         let role = msg["role"].as_str().unwrap_or("user");
         let content_val = &msg["content"];
         let display_text: String = if let Some(s) = content_val.as_str() {
@@ -1713,9 +1709,64 @@ async fn compact_session(state: State<'_, AppState>, session_id: i64) -> Result<
         ).map_err(|e| e.to_string())?;
     }
 
+    Ok((token_before, token_after))
+}
+
+#[tauri::command]
+async fn compact_session(state: State<'_, AppState>, session_id: i64) -> Result<String, String> {
+    let (agent_type, api_key, api_url, messages_path, model): (String, String, String, String, String) = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let at: String = conn.query_row(
+            "SELECT agent_type FROM agent_session WHERE id = ?1",
+            rusqlite::params![session_id],
+            |row| row.get(0),
+        ).map_err(|e| format!("Session not found: {}", e))?;
+        let ak: String = conn.query_row("SELECT api_key FROM app_config", [], |row| row.get(0)).unwrap_or_default();
+        let au: String = conn.query_row("SELECT api_url FROM app_config", [], |row| row.get(0)).unwrap_or_default();
+        let md: String = conn.query_row("SELECT model FROM app_config", [], |row| row.get(0)).unwrap_or_default();
+        let provider: String = conn.query_row(
+            "SELECT provider FROM app_config", [], |row| row.get(0)
+        ).unwrap_or_else(|_| "minimax".to_string());
+        let mp = match provider.as_str() {
+            "custom" => "/v1/messages".to_string(),
+            _ => "/anthropic/v1/messages".to_string(),
+        };
+        (at, ak, au, mp, md)
+    };
+
+    // Read all messages (release DB lock before async model call)
+    let mut api_messages = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT role, content, tool_calls, thinking, raw_json FROM chat_message WHERE session_id = ?1 ORDER BY created_at ASC"
+        ).map_err(|e| e.to_string())?;
+
+        let rows: Vec<(String, String, Option<String>, Option<String>, Option<String>)> = stmt.query_map(
+            rusqlite::params![session_id],
+            |row| Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        ).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
+        drop(stmt);
+
+        rows.iter().map(|(role, content, _tc, _th, raw_json)| {
+            let content_val = match raw_json {
+                Some(ref raw) => serde_json::from_str(raw).unwrap_or(serde_json::json!(content)),
+                None => serde_json::json!(content),
+            };
+            serde_json::json!({"role": role, "content": content_val})
+        }).collect::<Vec<_>>()
+    };
+
+    let (before, after) = compact_messages(&state.db, session_id, &agent_type, &mut api_messages, &api_key, &api_url, &messages_path, &model).await?;
+
     Ok(serde_json::to_string(&serde_json::json!({
-        "before": token_before,
-        "after": token_after,
+        "before": before,
+        "after": after,
         "messages": api_messages.len(),
     })).unwrap_or_default())
 }
@@ -2000,12 +2051,14 @@ fn rewind_conversation(state: State<AppState>, session_id: i64, message_id: i64)
         |row| row.get(0)
     ).map_err(|_| "Message not found".to_string())?;
 
-    // 2. Collect and restore file snapshots before deleting them
+    // 2. Collect and restore file snapshots: for each file, restore the most recent
+    // version taken before the rewound-to message (snapshots have id < message id
+    // because they are saved before the tool-result message is persisted).
     let snapshots: Vec<(String, Option<String>)> = {
         let mut stmt = conn.prepare(
-            "SELECT file_path, original_content FROM file_snapshot WHERE session_id = ?1 ORDER BY id ASC"
+            "SELECT file_path, original_content FROM file_snapshot WHERE session_id = ?1 AND id < ?2 ORDER BY version DESC"
         ).map_err(|e| e.to_string())?;
-        let rows = stmt.query_map([session_id], |row| {
+        let rows = stmt.query_map(rusqlite::params![session_id, message_id], |row| {
             Ok((row.get(0)?, row.get(1)?))
         }).map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
@@ -2013,7 +2066,7 @@ fn rewind_conversation(state: State<AppState>, session_id: i64, message_id: i64)
         rows
     };
 
-    // Restore each file to its earliest known state (before any modifications in this session)
+    // Restore each file to the most recent pre-rewind version (highest version first)
     let mut restored: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (file_path, original_content) in &snapshots {
         if restored.contains(file_path) { continue; }
@@ -2153,26 +2206,15 @@ pub fn run() {
     conn.execute("DROP TABLE IF EXISTS chat_history", [])
         .expect("Failed to drop old chat_history table");
 
+    // ── Base tables (idempotent: CREATE IF NOT EXISTS) ──────────────────
+
     conn.execute(
         "CREATE TABLE IF NOT EXISTS group_chat (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             mode TEXT NOT NULL DEFAULT 'team',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )",
-        [],
-    ).expect("Failed to create group_chat table");
-
-    // Migration: add mode column for existing group_chat tables
-    let has_mode: bool = conn.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('group_chat') WHERE name='mode'",
-        [],
-        |row| row.get::<_, i32>(0)
-    ).unwrap_or(0) > 0;
-    if !has_mode {
-        conn.execute("ALTER TABLE group_chat ADD COLUMN mode TEXT NOT NULL DEFAULT 'team'", [])
-            .expect("Failed to add mode column to group_chat");
-    }
+        )", [], ).expect("Failed to create group_chat table");
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS agent_session (
@@ -2181,9 +2223,7 @@ pub fn run() {
             agent_type TEXT NOT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (group_chat_id) REFERENCES group_chat(id)
-        )",
-        [],
-    ).expect("Failed to create agent_session table");
+        )", [], ).expect("Failed to create agent_session table");
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS chat_message (
@@ -2195,68 +2235,19 @@ pub fn run() {
             thinking TEXT DEFAULT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (session_id) REFERENCES agent_session(id)
-        )",
-        [],
-    ).expect("Failed to create chat_message table");
+        )", [], ).expect("Failed to create chat_message table");
 
-    // Migration: add tool_calls column if it doesn't exist (for existing databases)
-    let has_tool_calls: bool = conn.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('chat_message') WHERE name='tool_calls'",
-        [],
-        |row| row.get::<_, i32>(0)
-    ).unwrap_or(0) > 0;
-    if !has_tool_calls {
-        conn.execute("ALTER TABLE chat_message ADD COLUMN tool_calls TEXT DEFAULT NULL", [])
-            .expect("Failed to add tool_calls column");
-    }
-
-    // Migration: add thinking column if it doesn't exist
-    let has_thinking: bool = conn.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('chat_message') WHERE name='thinking'",
-        [],
-        |row| row.get::<_, i32>(0)
-    ).unwrap_or(0) > 0;
-    if !has_thinking {
-        conn.execute("ALTER TABLE chat_message ADD COLUMN thinking TEXT DEFAULT NULL", [])
-            .expect("Failed to add thinking column");
-    }
-
-    // Migration: add attachments column for image/file metadata
-    let has_attachments: bool = conn.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('chat_message') WHERE name='attachments'",
-        [],
-        |row| row.get::<_, i32>(0)
-    ).unwrap_or(0) > 0;
-    if !has_attachments {
-        conn.execute("ALTER TABLE chat_message ADD COLUMN attachments TEXT DEFAULT NULL", [])
-            .expect("Failed to add attachments column");
-    }
-
-    // Migration: add raw_json column for cache-aware interleaved message reconstruction
-    let has_raw_json: bool = conn.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('chat_message') WHERE name='raw_json'",
-        [],
-        |row| row.get::<_, i32>(0)
-    ).unwrap_or(0) > 0;
-    if !has_raw_json {
-        conn.execute("ALTER TABLE chat_message ADD COLUMN raw_json TEXT DEFAULT NULL", [])
-            .expect("Failed to add raw_json column");
-    }
-
-    // File snapshots for edit undo — saves original content before agent modifications
     conn.execute(
         "CREATE TABLE IF NOT EXISTS file_snapshot (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id INTEGER NOT NULL,
             file_path TEXT NOT NULL,
             original_content TEXT,
+            version INTEGER NOT NULL DEFAULT 1,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (session_id) REFERENCES agent_session(id)
-        )",
-        [],
-    ).expect("Failed to create file_snapshot table");
+        )", [], ).expect("Failed to create file_snapshot table");
 
-    // Conversation bookmarks for checkpoint/restore — full state snapshots
     conn.execute(
         "CREATE TABLE IF NOT EXISTS conversation_bookmark (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2267,17 +2258,13 @@ pub fn run() {
             total_bytes INTEGER NOT NULL DEFAULT 0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (session_id) REFERENCES agent_session(id)
-        )",
-        [],
-    ).expect("Failed to create conversation_bookmark table");
+        )", [], ).expect("Failed to create conversation_bookmark table");
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS minimax_api_key (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             api_key TEXT NOT NULL
-        )",
-        [],
-    ).expect("Failed to create minimax_api_key table");
+        )", [], ).expect("Failed to create minimax_api_key table");
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS custom_model_config (
@@ -2288,19 +2275,7 @@ pub fn run() {
             model TEXT NOT NULL,
             context_window INTEGER NOT NULL DEFAULT 200000,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )",
-        [],
-    ).expect("Failed to create custom_model_config table");
-
-    // Migration: add context_window column for existing custom_model_config tables
-    let has_cw: bool = conn.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('custom_model_config') WHERE name='context_window'",
-        [],
-        |row| row.get::<_, i32>(0)
-    ).unwrap_or(0) > 0;
-    if !has_cw {
-        let _ = conn.execute("ALTER TABLE custom_model_config ADD COLUMN context_window INTEGER NOT NULL DEFAULT 200000", []);
-    }
+        )", [], ).expect("Failed to create custom_model_config table");
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS agent_model_config (
@@ -2308,9 +2283,7 @@ pub fn run() {
             provider TEXT NOT NULL DEFAULT 'minimax',
             model TEXT NOT NULL DEFAULT '',
             context_window INTEGER NOT NULL DEFAULT 0
-        )",
-        [],
-    ).expect("Failed to create agent_model_config table");
+        )", [], ).expect("Failed to create agent_model_config table");
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS app_config (
@@ -2323,19 +2296,89 @@ pub fn run() {
             custom_api_url TEXT NOT NULL DEFAULT '',
             custom_api_key TEXT NOT NULL DEFAULT '',
             custom_model TEXT NOT NULL DEFAULT ''
-        )",
-        [],
-    ).expect("Failed to create app_config table");
+        )", [], ).expect("Failed to create app_config table");
 
-    // Migration: add columns if upgrading from older schema
-    let _ = conn.execute("ALTER TABLE app_config ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'normal'", []);
-    let _ = conn.execute("ALTER TABLE app_config ADD COLUMN api_url TEXT NOT NULL DEFAULT 'https://api.minimaxi.com'", []);
-    let _ = conn.execute("ALTER TABLE app_config ADD COLUMN provider TEXT NOT NULL DEFAULT 'minimax'", []);
-    let _ = conn.execute("ALTER TABLE app_config ADD COLUMN custom_api_url TEXT NOT NULL DEFAULT ''", []);
-    let _ = conn.execute("ALTER TABLE app_config ADD COLUMN custom_api_key TEXT NOT NULL DEFAULT ''", []);
-    let _ = conn.execute("ALTER TABLE app_config ADD COLUMN custom_model TEXT NOT NULL DEFAULT ''", []);
-    let _ = conn.execute("ALTER TABLE app_config ADD COLUMN context_window INTEGER NOT NULL DEFAULT 204800", []);
-    let _ = conn.execute("ALTER TABLE app_config ADD COLUMN custom_context_window INTEGER NOT NULL DEFAULT 200000", []);
+    // ── Schema version tracking ─────────────────────────────────────────
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS schema_version (
+            version INTEGER PRIMARY KEY,
+            description TEXT NOT NULL,
+            applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )", [], ).expect("Failed to create schema_version table");
+
+    let current_version: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_version", [],
+        |row| row.get(0)
+    ).unwrap_or(0);
+
+    // Apply migrations in order. Each step checks its own precondition (e.g.
+    // column existence) so idempotent re-runs are safe, and the version is
+    // only recorded after success.
+    struct Migration { version: i64, desc: &'static str, sql: &'static str, cond: &'static str }
+
+    let migrations: &[Migration] = &[
+        // V1: group_chat mode column
+        Migration { version: 1, desc: "group_chat.mode",
+            cond: "SELECT COUNT(*) FROM pragma_table_info('group_chat') WHERE name='mode'",
+            sql: "ALTER TABLE group_chat ADD COLUMN mode TEXT NOT NULL DEFAULT 'team'" },
+        // V2: chat_message tool_calls
+        Migration { version: 2, desc: "chat_message.tool_calls",
+            cond: "SELECT COUNT(*) FROM pragma_table_info('chat_message') WHERE name='tool_calls'",
+            sql: "ALTER TABLE chat_message ADD COLUMN tool_calls TEXT DEFAULT NULL" },
+        // V3: chat_message thinking
+        Migration { version: 3, desc: "chat_message.thinking",
+            cond: "SELECT COUNT(*) FROM pragma_table_info('chat_message') WHERE name='thinking'",
+            sql: "ALTER TABLE chat_message ADD COLUMN thinking TEXT DEFAULT NULL" },
+        // V4: chat_message attachments
+        Migration { version: 4, desc: "chat_message.attachments",
+            cond: "SELECT COUNT(*) FROM pragma_table_info('chat_message') WHERE name='attachments'",
+            sql: "ALTER TABLE chat_message ADD COLUMN attachments TEXT DEFAULT NULL" },
+        // V5: chat_message raw_json
+        Migration { version: 5, desc: "chat_message.raw_json",
+            cond: "SELECT COUNT(*) FROM pragma_table_info('chat_message') WHERE name='raw_json'",
+            sql: "ALTER TABLE chat_message ADD COLUMN raw_json TEXT DEFAULT NULL" },
+        // V6: custom_model_config context_window
+        Migration { version: 6, desc: "custom_model_config.context_window",
+            cond: "SELECT COUNT(*) FROM pragma_table_info('custom_model_config') WHERE name='context_window'",
+            sql: "ALTER TABLE custom_model_config ADD COLUMN context_window INTEGER NOT NULL DEFAULT 200000" },
+        // V7: app_config expansion columns (batch)
+        Migration { version: 7, desc: "app_config expansions",
+            cond: "SELECT COUNT(*) FROM pragma_table_info('app_config') WHERE name='context_window'",
+            sql: "ALTER TABLE app_config ADD COLUMN context_window INTEGER NOT NULL DEFAULT 204800" },
+        // V8: file_snapshot version column
+        Migration { version: 8, desc: "file_snapshot.version",
+            cond: "SELECT COUNT(*) FROM pragma_table_info('file_snapshot') WHERE name='version'",
+            sql: "ALTER TABLE file_snapshot ADD COLUMN version INTEGER NOT NULL DEFAULT 1" },
+    ];
+
+    for m in migrations {
+        if m.version <= current_version { continue; }
+        // Check whether the migration is needed (column exists → skip)
+        let needed: bool = conn.query_row(m.cond, [], |row| {
+            let v: i32 = row.get(0)?;
+            Ok(v == 0)
+        }).unwrap_or(true);
+        if needed {
+            if let Err(e) = conn.execute(m.sql, []) {
+                eprintln!("[schema] v{} {} FAILED: {}", m.version, m.desc, e);
+            }
+        }
+        conn.execute("INSERT OR REPLACE INTO schema_version (version, description) VALUES (?1, ?2)",
+            rusqlite::params![m.version, m.desc]
+        ).ok();
+    }
+
+    // V7 supplemental: app_config columns added piecemeal before versioning existed
+    if current_version < 7 {
+        let _ = conn.execute("ALTER TABLE app_config ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'normal'", []);
+        let _ = conn.execute("ALTER TABLE app_config ADD COLUMN api_url TEXT NOT NULL DEFAULT 'https://api.minimaxi.com'", []);
+        let _ = conn.execute("ALTER TABLE app_config ADD COLUMN provider TEXT NOT NULL DEFAULT 'minimax'", []);
+        let _ = conn.execute("ALTER TABLE app_config ADD COLUMN custom_api_url TEXT NOT NULL DEFAULT ''", []);
+        let _ = conn.execute("ALTER TABLE app_config ADD COLUMN custom_api_key TEXT NOT NULL DEFAULT ''", []);
+        let _ = conn.execute("ALTER TABLE app_config ADD COLUMN custom_model TEXT NOT NULL DEFAULT ''", []);
+        let _ = conn.execute("ALTER TABLE app_config ADD COLUMN custom_context_window INTEGER NOT NULL DEFAULT 200000", []);
+    }
 
     // Load permission mode from DB
     let perm_mode: String = conn
@@ -2405,6 +2448,7 @@ pub fn run() {
             mcp_reload,
             set_minimax_api_key,
             get_minimax_api_key,
+            has_minimax_api_key,
             set_workspace,
             get_workspace,
             save_temp_file,

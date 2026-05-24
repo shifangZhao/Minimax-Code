@@ -93,15 +93,38 @@ const DANGEROUS_ARGS: &[&str] = &[
 ];
 
 const SENSITIVE_PATTERNS: &[&str] = &[
+    // Secrets & credentials
     "*.env", "*.env.*", ".env.*", ".envrc",
     "*.key", "*.pem", "*.p12", "*.pfx",
     "id_rsa*", "id_ed25519*", "id_ecdsa*",
     "*credentials*", "*credential*", "*secret*", "*token*",
     "*password*", "*passwd*",
+    // Unix home-dir sensitive
     "~/.ssh", "~/.aws", "~/.gcloud", "~/.azure",
     "~/.kube", "~/.docker", "~/.github",
+    // Unix system files
     "/etc/shadow", "/etc/sudoers", "/etc/passwd",
+    "/etc/group", "/etc/hosts", "/etc/resolv.conf",
     "*.git/config", "*.git/credentials",
+    // Windows system directories
+    "c:/windows/system32", "c:/windows/syswow64",
+    "c:/windows/system", "c:/windows/security",
+    "c:/windows/registration", "c:/windows/win.ini",
+    "c:/windows/system.ini",
+    "c:/program files", "c:/program files (x86)",
+    "c:/programdata", "c:/users/all users",
+    "c:/boot", "c:/efi",
+    // Windows registry & SAM
+    "c:/windows/system32/config/sam",
+    "c:/windows/system32/config/security",
+    "c:/windows/system32/config/system",
+    "c:/windows/system32/config/software",
+    // Windows credential stores
+    "*\\microsoft\\credentials*", "*\\microsoft\\protect*",
+    // SSH keys on Windows
+    "*/.ssh/id_*",
+    // Common sensitive locations
+    "/root/", "/var/log/", "/proc/", "/sys/",
 ];
 
 // ---- Service ----
@@ -336,11 +359,33 @@ fn is_write_tool(tool: &str) -> bool {
     !is_read_only_tool(tool)
 }
 
+fn normalize_path_for_check(path: &str) -> String {
+    // Strip NTFS alternate data streams (e.g. file.txt:Zone.Identifier → file.txt)
+    let without_stream = match path.find(':') {
+        Some(pos) if cfg!(windows) => {
+            let before_colon = &path[..pos];
+            // Only strip if it looks like an ADS (not a drive letter like C:)
+            if before_colon.len() > 2 { before_colon.to_string() } else { path.to_string() }
+        }
+        _ => path.to_string(),
+    };
+    // Normalize separators and lowercase
+    let s = without_stream.replace('\\', "/").to_lowercase();
+    // Collapse "." and ".." components
+    let parts: Vec<&str> = s.split('/').collect();
+    let mut out: Vec<&str> = Vec::new();
+    for p in parts {
+        if p == "." || p.is_empty() { continue; }
+        if p == ".." { out.pop(); continue; }
+        out.push(p);
+    }
+    out.join("/")
+}
+
 fn is_sensitive_path(path: &str) -> bool {
-    let normalized = path.replace('\\', "/").to_lowercase();
+    let normalized = normalize_path_for_check(path);
     SENSITIVE_PATTERNS.iter().any(|&p| {
         let pattern = p.replace('\\', "/").to_lowercase();
-        // Simple wildcard match
         if pattern.contains('*') {
             let re_pattern = pattern
                 .replace('.', r"\.")
@@ -350,7 +395,11 @@ fn is_sensitive_path(path: &str) -> bool {
                 .map(|re| re.is_match(&normalized))
                 .unwrap_or(false)
         } else {
-            normalized.contains(&pattern)
+            // Anchor match to path components to avoid false positives
+            // e.g. "/etc/passwd" should match "/etc/passwd" but not "my_etc/passwd_file"
+            normalized.contains(&format!("/{}", pattern))
+                || normalized.starts_with(&pattern)
+                || normalized == pattern
         }
     })
 }

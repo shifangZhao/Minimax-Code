@@ -21,6 +21,32 @@
   --font-mono: 'Consolas', 'Monaco', 'Courier New', monospace;
 }
 
+[data-theme="light"] {
+  --bg-primary: #f5f5f5;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #eeeeee;
+  --bg-input: #e8e8e8;
+  --text-primary: #333333;
+  --text-secondary: #666666;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --border-color: #d4d4d4;
+  --shadow: rgba(0, 0, 0, 0.1);
+}
+
+[data-theme="warm"] {
+  --bg-primary: #3d2e18;
+  --bg-secondary: #453620;
+  --bg-tertiary: #4e3e28;
+  --bg-input: #574630;
+  --text-primary: #ffe8d0;
+  --text-secondary: #d09050;
+  --accent: #f59e0b;
+  --accent-hover: #fbbf24;
+  --border-color: #5a4830;
+  --shadow: rgba(245, 158, 11, 0.10);
+}
+
 * {
   margin: 0;
   padding: 0;

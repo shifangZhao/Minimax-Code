@@ -67,7 +67,7 @@
         :key="i"
         :class="['message', msg.role]"
       >
-        <div v-if="msg.role !== 'tool'" class="avatar">{{ msg.role === 'user' ? 'U' : 'A' }}</div>
+        <div v-if="msg.role !== 'tool' && msg.role !== 'system'" class="avatar">{{ msg.role === 'user' ? 'U' : 'A' }}</div>
         <div class="content">
           <div v-if="msg.thinking && msg.role === 'assistant'" class="thinking-block">
             <div class="thinking-toggle" :class="{ collapsed: !isThinkingExpanded(i) }" @click="toggleThinking(i)">
@@ -98,6 +98,7 @@
           <div v-else-if="msg.role === 'tool'" class="tool-msg">
             <ToolCard v-if="getToolCardInfo(msg)" :toolInfo="getToolCardInfo(msg)!" />
           </div>
+          <div v-else-if="msg.role === 'system'" class="system-msg">{{ msg.content }}</div>
           <div v-else class="text" v-html="formatContent(msg.content)"></div>
           <div class="time" v-if="msg.created_at">{{ formatTime(msg.created_at) }}</div>
         </div>
@@ -138,11 +139,6 @@
       :visible="showUndoToast"
       :message="lastUndone ? `已撤销: ${lastUndone}` : ''"
       @close="showUndoToast = false"
-    />
-    <ToastBar
-      :visible="showCompactToast"
-      :message="compactToastMsg"
-      @close="showCompactToast = false"
     />
     <AskDialog
       v-if="pendingAsk"
@@ -194,6 +190,7 @@
         v-model="inputText"
         :placeholder="inputPlaceholder"
         @keydown.enter.exact="onSendKey"
+        @keydown.ctrl.enter.exact="onNewline"
         @paste="onPaste"
         @input="autoResize"
         rows="1"
@@ -262,13 +259,12 @@ const {
   clearConversation,
   tokenUsage,
   loadMessages,
+  displayMessages,
 } = useAgentConversation(props.agentType)
 
-const { globalStreamingStates } = useGlobalStreaming()
+const { sessions } = useGlobalStreaming()
 const { permRequests, respond: respondPerm } = usePermissions()
 const { recentEdits, lastUndone, showUndoToast, loadEdits, undoLast } = useUndoHistory()
-const showCompactToast = ref(false)
-const compactToastMsg = ref('')
 const { bookmarks, showBookmarkPanel, showSaveInput, bookmarkName, loadBookmarks, saveBookmark, restoreBookmark, deleteBookmark } = useBookmarks()
 
 const messagesEl = ref<HTMLElement>()
@@ -346,97 +342,15 @@ const inputPlaceholder = computed(() => {
 })
 
 const currentStreaming = computed(() => {
-  const state = globalStreamingStates.value.get(streamKey.value)
-  if (!state) return { text: '', thinking: '', done: true, toolCallCount: 0 }
-  return state
+  const entry = sessions.value.get(streamKey.value)
+  if (!entry?.state) return { text: '', thinking: '', done: true, toolCallCount: 0 }
+  return entry.state
 })
 
 
 const showLoading = computed(() => {
   const cs = currentStreaming.value
   return loading.value && cs && !cs.done && !cs.text && !cs.thinking
-})
-
-function isInternalCacheMessage(msg: any): boolean {
-  // Hide built-in skill reference messages (internal, not shown to user)
-  if (msg.role === 'user' && msg.content?.startsWith('## 内置参考资料')) return true
-  // Check raw_json for internal API messages that should not be displayed
-  if (msg.raw_json) {
-    try {
-      const blocks = JSON.parse(msg.raw_json)
-      if (Array.isArray(blocks)) {
-        // Hide user-role tool_result messages — internal API communication
-        if (msg.role === 'user' && blocks.some((b: any) => b.type === 'tool_result')) return true
-        // Hide assistant messages that are pure tool_use (no text or thinking) —
-        // the tool call is shown via toolEvents, and the final response has the full answer.
-        // But keep messages that have actual text/thinking content.
-        if (msg.role === 'assistant' && blocks.some((b: any) => b.type === 'tool_use')) {
-          const hasText = blocks.some((b: any) => b.type === 'text' && b.text?.trim())
-          const hasThinking = blocks.some((b: any) => b.type === 'thinking')
-          const hasOnlyThinking = !hasText && hasThinking
-          if (!hasText && !hasOnlyThinking) return true
-        }
-      }
-    } catch {}
-  }
-  // Hide empty user messages (skill context, etc.)
-  if (msg.role === 'user' && !msg.content?.trim()) return true
-  // Hide skill/match_skills/list_skills tool results (exposed in tool call display)
-  if (msg.tool_calls) {
-    try {
-      const tc = JSON.parse(msg.tool_calls)
-      if (Array.isArray(tc) && tc.some((t: any) =>
-        ['skill', 'match_skills', 'list_skills'].includes(t.function?.name)
-      )) return true
-    } catch {}
-  }
-  return false
-}
-
-const displayMessages = computed(() => {
-  const result: any[] = []
-
-  // Iterate ALL messages in chronological order. Tool cards are emitted after
-  // their parent assistant message (even if the parent is hidden as pure tool_use).
-  for (const m of messages.value) {
-    const hidden = isInternalCacheMessage(m)
-
-    if (!hidden) {
-      if (m.content && m.content.startsWith('💭')) {
-        const parts = m.content.split('\n\n')
-        result.push({
-          ...m,
-          thinking: parts[0].replace('💭 ', ''),
-          content: parts.slice(1).join('\n\n'),
-        })
-      } else {
-        result.push({
-          ...m,
-          thinking: (m as any).thinking,
-        })
-      }
-    }
-
-    // Emit tool cards after this message (whether hidden or not)
-    if (m.role === 'assistant' && (m as any).tool_calls) {
-      try {
-        const calls = JSON.parse((m as any).tool_calls)
-        if (Array.isArray(calls)) {
-          for (const tc of calls) {
-            result.push({
-              id: `tool-${tc.id}`,
-              role: 'tool',
-              tool_calls: JSON.stringify([tc]),
-              content: '',
-              created_at: m.created_at,
-            } as any)
-          }
-        }
-      } catch {}
-    }
-  }
-
-  return result
 })
 
 function formatContent(text: string, streaming?: boolean): string {
@@ -638,6 +552,18 @@ function onSendKey(e: KeyboardEvent) {
   }
 }
 
+function onNewline(e: KeyboardEvent) {
+  e.preventDefault()
+  const el = e.target as HTMLTextAreaElement
+  const start = el.selectionStart
+  const end = el.selectionEnd
+  inputText.value = inputText.value.slice(0, start) + '\n' + inputText.value.slice(end)
+  // Move cursor after the inserted newline
+  requestAnimationFrame(() => {
+    el.selectionStart = el.selectionEnd = start + 1
+  })
+}
+
 function autoResize(e: Event) {
   const el = e.target as HTMLTextAreaElement
   el.style.height = 'auto'
@@ -648,47 +574,75 @@ function autoResize(e: Event) {
 function stopStream() {
   if (sessionId.value === null) return
   stopClicked.value = true
-  const state = globalStreamingStates.value.get(streamKey.value)
-  if (state?.abort) {
-    state.abort()
+  const entry = sessions.value.get(streamKey.value)
+  if (entry?.state?.abort) {
+    entry.state.abort()
   }
 }
 
 async function onSend() {
   const text = inputText.value.trim()
 
-  // Slash commands
-  if (text === '/mcp reload') {
+  // Slash commands — show as system messages, not sent to API
+  if ((text === '/mcp reload' || text === '/compact') && sessionId.value) {
     inputText.value = ''
-    try {
-      const msg = await invoke<string>('mcp_reload')
-      compactToastMsg.value = `MCP 重载 — ${msg}`
-      showCompactToast.value = true
-    } catch (e) {
-      console.error('MCP reload failed:', e)
-      compactToastMsg.value = 'MCP 重载失败'
-      showCompactToast.value = true
-    }
-    return
-  }
+    const now = new Date().toISOString()
+    // Push command message to UI and DB (system role — excluded from API context)
+    const cmdMsg = {
+      id: Date.now(),
+      session_id: sessionId.value,
+      role: 'system' as const,
+      content: `$ ${text}`,
+      created_at: now,
+    } as any
+    messages.value.push(cmdMsg)
+    await db.addMessage(sessionId.value, 'system', `$ ${text}`)
+    scrollToBottom(true)
 
-  if (text === '/compact' && sessionId.value) {
-    inputText.value = ''
     try {
-      const result = await db.compactSession(sessionId.value)
-      const freed = result.before - result.after
-      const freedKb = (freed / 1024).toFixed(1)
-      const beforeK = formatTokens(result.before)
-      const afterK = formatTokens(result.after)
-      const pct = result.before > 0 ? Math.round((freed / result.before) * 100) : 0
-      compactToastMsg.value = `压缩完成: ${beforeK} → ${afterK} tokens, 释放 ${freedKb}K (${pct}%)`
-      showCompactToast.value = true
-      await loadMessages()
-    } catch (e) {
-      console.error('Compact failed:', e)
-      compactToastMsg.value = '压缩失败'
-      showCompactToast.value = true
+      if (text === '/compact') {
+        const result = await db.compactSession(sessionId.value)
+        const freed = result.before - result.after
+        const freedKb = (freed / 1024).toFixed(1)
+        const beforeK = formatTokens(result.before)
+        const afterK = formatTokens(result.after)
+        const pct = result.before > 0 ? Math.round((freed / result.before) * 100) : 0
+        const resultMsg = {
+          id: Date.now() + 1,
+          session_id: sessionId.value,
+          role: 'system' as const,
+          content: `✅ 压缩完成: ${beforeK} → ${afterK} tokens, 释放 ${freedKb}K (${pct}%)`,
+          created_at: new Date().toISOString(),
+        } as any
+        messages.value.push(resultMsg)
+        await db.addMessage(sessionId.value, 'system', resultMsg.content)
+        await loadMessages()
+      } else {
+        const msg = await invoke<string>('mcp_reload')
+        const resultMsg = {
+          id: Date.now() + 1,
+          session_id: sessionId.value,
+          role: 'system' as const,
+          content: `✅ MCP 重载 — ${msg}`,
+          created_at: new Date().toISOString(),
+        } as any
+        messages.value.push(resultMsg)
+        await db.addMessage(sessionId.value, 'system', resultMsg.content)
+      }
+    } catch (e: any) {
+      const err = typeof e === 'string' ? e : (e?.message || '未知错误')
+      const failMsg = {
+        id: Date.now() + 1,
+        session_id: sessionId.value,
+        role: 'system' as const,
+        content: `❌ 命令失败: ${err}`,
+        created_at: new Date().toISOString(),
+      } as any
+      messages.value.push(failMsg)
+      await db.addMessage(sessionId.value, 'system', failMsg.content)
+      console.error(`[${text}] failed:`, e)
     }
+    scrollToBottom(true)
     return
   }
 
@@ -974,6 +928,24 @@ onDeactivated(() => {
 .message.tool {
   align-self: flex-start;
   width: 100%;
+}
+
+.message.system {
+  align-self: center;
+  max-width: 480px;
+  padding: 0 16px;
+}
+
+.system-msg {
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 0.82em;
+  line-height: 1.5;
+  padding: 6px 14px;
+  background: var(--bg-tertiary);
+  border-radius: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .tool-msg {
