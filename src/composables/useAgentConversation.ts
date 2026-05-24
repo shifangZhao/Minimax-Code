@@ -36,9 +36,11 @@ export interface TokenUsage {
   usage_pct: number
 }
 
-// Module-level cache: persists across composable instances so token counts
-// survive tab switches and are never lost between composable re-creations.
+// Module-level caches: persist across composable instances so session state
+// survives tab switches. This enables multi-session parallel execution —
+// each session's messages and token counts live independently.
 const sessionTokenUsage = new Map<number, TokenUsage>()
+const sessionMessages = new Map<number, ChatMessage[]>()
 
 export function useAgentConversation(agentType: string) {
   const messages = ref<ChatMessage[]>([])
@@ -100,6 +102,8 @@ export function useAgentConversation(agentType: string) {
 
   async function initSession(groupChatId: number) {
     if (groupChatId < 0) {
+      // Save current messages before switching to temp chat
+      if (sessionId.value) sessionMessages.set(sessionId.value, [...messages.value])
       currentGroupChatId.value = groupChatId
       sessionId.value = null
       messages.value = []
@@ -108,6 +112,7 @@ export function useAgentConversation(agentType: string) {
       return
     }
 
+    const prevSessionId = sessionId.value
     currentGroupChatId.value = groupChatId
 
     const sessions = await db.getAgentSessions(groupChatId, agentType)
@@ -115,38 +120,55 @@ export function useAgentConversation(agentType: string) {
 
     const newSessionId = session ? session.id : await db.createAgentSession(groupChatId, agentType)
 
-    // Clean up stale stream listener from previous session to prevent
-    // events from old session leaking into the new session's stream state.
-    if (sessionId.value !== null && sessionId.value !== newSessionId) {
-      teardownListener(sessionId.value)
-      loadingSessions.delete(sessionId.value)
-      loading.value = loadingSessions.size > 0
-      clearStreamState(sessionId.value)
+    // Cache current messages and token usage before switching
+    if (prevSessionId !== null && prevSessionId !== newSessionId) {
+      sessionMessages.set(prevSessionId, [...messages.value])
+      // Keep the old stream listener alive — background sessions continue running
     }
 
     sessionId.value = newSessionId
-    await loadMessages()
+
+    // Restore from cache or load from DB
+    const cached = sessionMessages.get(newSessionId)
+    if (cached) {
+      messages.value = cached
+      const tu = sessionTokenUsage.get(newSessionId)
+      if (tu) tokenUsage.value = tu
+      loading.value = loadingSessions.has(newSessionId)
+    } else {
+      await loadMessages()
+    }
   }
 
-  async function loadMessages() {
-    if (!sessionId.value) {
+  async function loadMessages(targetSessionId?: number) {
+    const sid = targetSessionId ?? sessionId.value
+    if (!sid) {
       tokenUsage.value = { estimated_tokens: 0, context_window: 200000, usage_pct: 0 }
       return
     }
-    const msgs = await db.getMessages(sessionId.value)
-    messages.value = msgs
-    // Restore cached token usage (server-reported) or keep current display
-    const cached = sessionTokenUsage.get(sessionId.value)
-    if (cached) {
-      tokenUsage.value = cached
-    } else if (msgs.length > 0) {
-      // Rough fallback — only used before first server response in a session
+    const msgs = await db.getMessages(sid)
+    sessionMessages.set(sid, msgs)
+    // Only update reactive state if loading for the currently viewed session
+    if (sid === sessionId.value) {
+      messages.value = msgs
+      const cached = sessionTokenUsage.get(sid)
+      if (cached) {
+        tokenUsage.value = cached
+      } else if (msgs.length > 0) {
+        const totalChars = msgs.reduce((sum, m) => sum + (m.content?.length || 0) + ((m as any).thinking?.length || 0), 0)
+        const est = Math.max(1, Math.round(totalChars / 3))
+        const cw = tokenUsage.value.context_window
+        tokenUsage.value = { estimated_tokens: est, context_window: cw, usage_pct: Math.min((est / cw) * 100, 99) }
+      } else {
+        tokenUsage.value = { estimated_tokens: 0, context_window: 200000, usage_pct: 0 }
+      }
+    }
+    // Always update token cache for the loaded session
+    const tu = sessionTokenUsage.get(sid)
+    if (!tu && msgs.length > 0) {
       const totalChars = msgs.reduce((sum, m) => sum + (m.content?.length || 0) + ((m as any).thinking?.length || 0), 0)
-      const est = Math.max(1, Math.round(totalChars / 3))  // closer to real token ratio
-      const cw = tokenUsage.value.context_window
-      tokenUsage.value = { estimated_tokens: est, context_window: cw, usage_pct: Math.min((est / cw) * 100, 99) }
-    } else {
-      tokenUsage.value = { estimated_tokens: 0, context_window: 200000, usage_pct: 0 }
+      const est = Math.max(1, Math.round(totalChars / 3))
+      sessionTokenUsage.set(sid, { estimated_tokens: est, context_window: 200000, usage_pct: 0 })
     }
   }
 
@@ -341,8 +363,7 @@ export function useAgentConversation(agentType: string) {
           )
           break
         case 'token_usage':
-          // Never let the displayed token count decrease within a session —
-          // the API-reported cumulative count should be monotonic.
+          // Never let the displayed token count decrease within a session.
           const cached = sessionTokenUsage.get(finalSessionId)
           const est = ev.estimated_tokens || 0
           const tu = {
@@ -350,8 +371,11 @@ export function useAgentConversation(agentType: string) {
             context_window: ev.context_window || 200000,
             usage_pct: ev.usage_pct || 0
           }
-          tokenUsage.value = tu
           sessionTokenUsage.set(finalSessionId, tu)
+          // Only update reactive display if user is viewing this session
+          if (finalSessionId === sessionId.value) {
+            tokenUsage.value = tu
+          }
           break
         case 'error':
           resolveStream?.()
@@ -394,8 +418,8 @@ export function useAgentConversation(agentType: string) {
         toolCallCount
       })
 
-      // Reload from DB to pick up backend-persisted messages
-      await loadMessages()
+      // Reload messages for this specific session (not current view)
+      await loadMessages(finalSessionId)
 
       // Clear streaming display after DB messages are available
       updateStreamState(finalSessionId, {
@@ -403,16 +427,14 @@ export function useAgentConversation(agentType: string) {
       })
 
       // Fallback: if no new messages appeared in DB, push stream buffer
-      // so the user always sees the output. Checking message count is more
-      // reliable than checking the last message's role (multi-turn tool_use
-      // messages can cause false positives).
+      // into the session cache so the user sees output even after tab switches.
       if (fullText || fullThinking) {
-        const msgCountAfter = messages.value.length
-        if (msgCountAfter <= msgCountBefore) {
+        const cachedMsgs = sessionMessages.get(finalSessionId) || []
+        if (cachedMsgs.length <= msgCountBefore) {
           const fallbackContent = fullThinking
             ? `💭 ${fullThinking}\n\n${fullText}`
             : fullText
-          messages.value.push({
+          const fallbackMsg = {
             id: Date.now() + 1,
             session_id: finalSessionId,
             role: 'assistant',
@@ -420,7 +442,13 @@ export function useAgentConversation(agentType: string) {
             thinking: fullThinking || undefined,
             tool_calls: collectedToolCalls.length > 0 ? JSON.stringify(collectedToolCalls) : undefined,
             created_at: new Date().toISOString(),
-          } as ChatMessage)
+          } as ChatMessage
+          cachedMsgs.push(fallbackMsg)
+          sessionMessages.set(finalSessionId, cachedMsgs)
+          // If user is still viewing this session, update the reactive array too
+          if (finalSessionId === sessionId.value) {
+            messages.value.push(fallbackMsg)
+          }
         }
       }
 
@@ -435,10 +463,11 @@ export function useAgentConversation(agentType: string) {
         toolCallCount
       })
       await db.addMessage(finalSessionId, 'assistant', errorMsg)
-      await loadMessages()
+      await loadMessages(finalSessionId)
     } finally {
       loadingSessions.delete(finalSessionId)
-      loading.value = loadingSessions.size > 0
+      // Only show loading state if the current session is still streaming
+      loading.value = loadingSessions.has(sessionId.value!)
       teardownListener(finalSessionId)
     }
   }
@@ -502,6 +531,7 @@ export function useAgentConversation(agentType: string) {
       clearStreamState(sessionId.value)
       await db.clearSessionHistory(sessionId.value)
       messages.value = []
+      sessionMessages.delete(sessionId.value)
       toolEvents.value = []
       tokenUsage.value = { estimated_tokens: 0, context_window: 200000, usage_pct: 0 }
       sessionTokenUsage.delete(sessionId.value)

@@ -1673,13 +1673,13 @@ pub(crate) async fn compact_messages(
 
     // Model call — no DB lock held
     let summary = summarize_with_model(agent_type, api_messages, api_key, api_url, messages_path, model).await;
-    eprintln!("[compact] Model summary: {} chars, messages: {} → ",
-        summary.len(), api_messages.len());
+    let summary_len = summary.len();
+    let msg_before = api_messages.len();
     compress_context(agent_type, api_messages, summary);
 
     let token_after = estimate_tokens(api_messages);
-    eprintln!("[compact] Compressed: {} → {} tokens, {} messages",
-        token_before, token_after, api_messages.len());
+    eprintln!("[compact] {}: {} → {} messages, {} → {} tokens, summary {} chars",
+        agent_type, msg_before, api_messages.len(), token_before, token_after, summary_len);
 
     // Persist to DB: compressed messages replace originals, old snapshots are stale
     let conn = db.lock().map_err(|e| e.to_string())?;
@@ -1721,12 +1721,22 @@ async fn compact_session(state: State<'_, AppState>, session_id: i64) -> Result<
             rusqlite::params![session_id],
             |row| row.get(0),
         ).map_err(|e| format!("Session not found: {}", e))?;
-        let ak: String = conn.query_row("SELECT api_key FROM app_config", [], |row| row.get(0)).unwrap_or_default();
-        let au: String = conn.query_row("SELECT api_url FROM app_config", [], |row| row.get(0)).unwrap_or_default();
-        let md: String = conn.query_row("SELECT model FROM app_config", [], |row| row.get(0)).unwrap_or_default();
         let provider: String = conn.query_row(
             "SELECT provider FROM app_config", [], |row| row.get(0)
         ).unwrap_or_else(|_| "minimax".to_string());
+        // Read API key from correct table — MiniMax uses minimax_api_key, custom uses app_config.custom_api_key
+        let ak: String = match provider.as_str() {
+            "custom" => conn.query_row("SELECT custom_api_key FROM app_config", [], |row| row.get::<_,String>(0)).unwrap_or_default(),
+            _ => conn.query_row("SELECT api_key FROM minimax_api_key", [], |row| row.get::<_,String>(0)).unwrap_or_default(),
+        };
+        let au: String = match provider.as_str() {
+            "custom" => conn.query_row("SELECT custom_api_url FROM app_config", [], |row| row.get(0)).unwrap_or_default(),
+            _ => conn.query_row("SELECT api_url FROM app_config", [], |row| row.get(0)).unwrap_or_else(|_| DEFAULT_API_URL.to_string()),
+        };
+        let md: String = match provider.as_str() {
+            "custom" => conn.query_row("SELECT custom_model FROM app_config", [], |row| row.get(0)).unwrap_or_default(),
+            _ => conn.query_row("SELECT model FROM app_config", [], |row| row.get(0)).unwrap_or_default(),
+        };
         let mp = match provider.as_str() {
             "custom" => "/v1/messages".to_string(),
             _ => "/anthropic/v1/messages".to_string(),

@@ -438,7 +438,9 @@ impl AgentService {
         system_text.push_str(&format!("\n\n当前运行模型: {}", self.model));
 
         // System prompt as top-level `system` field (Anthropic format).
-        // cache_control only for MiniMax (KV cache). Custom providers may reject it.
+        // cache_control on system ensures it can be independently re-cached if
+        // evicted (5 min TTL). Per MiniMax docs, mark_last_message_for_cache
+        // handles incremental conversation caching on top of this.
         let system_block = if self.provider == "custom" {
             json!({"type": "text", "text": system_text})
         } else {
@@ -605,10 +607,10 @@ impl AgentService {
         // Mark last message's last content block with cache_control for incremental
         // multi-turn caching. Per MiniMax docs, this caches the entire conversation prefix.
         // Only done once before the loop — subsequent loop iterations benefit from prefix cache.
-        // Skip for custom providers that may reject cache_control.
-        if self.provider != "custom" {
-            mark_last_message_for_cache(&mut api_messages);
-        }
+        // Mark last message's last content block with cache_control for incremental
+        // multi-turn caching. Per MiniMax docs, this caches the entire conversation prefix.
+        // Only done once before the loop — subsequent loop iterations benefit from prefix cache.
+        mark_last_message_for_cache(&mut api_messages);
 
         // Accumulate thinking across tool-use turns — only attach to the final message
         // so the UI shows one combined thinking block instead of one per turn.
@@ -958,7 +960,7 @@ async fn process_sse_stream(
     let mut assistant_thinking = String::new();
 
     // Actual token count from API (last message_delta carries the total)
-    let mut actual_input_tokens: Option<u64> = None;
+    let actual_input_tokens: Option<u64> = None;
 
     // Cache usage tracking (prefix-based KV cache)
     let mut cache_hit_tokens: u64 = 0;
@@ -1029,30 +1031,23 @@ async fn process_sse_stream(
                                     stop_reason = Some(reason);
                                 }
 
-                                // Capture actual token count and cache usage from API events.
-                                // MiniMax: cumulative input_tokens in every message_delta.
-                                // Anthropic: input_tokens in message_start.message.usage.
-                                // OpenAI: prompt_tokens in final message_delta or a top-level usage object.
-                                let ev_type = event["type"].as_str().unwrap_or("");
-                                if ev_type == "message_start" || ev_type == "message_delta" || ev_type == "message_stop" {
-                                    // Try direct event.usage (MiniMax, OpenAI)
-                                    let usage = event["usage"].as_object()
-                                        // Anthropic: usage is nested under message_start.message.usage
-                                        .or_else(|| event["message"]["usage"].as_object());
-                                    if let Some(usage) = usage {
+                                // Capture cache usage from message_delta events.
+                                // MiniMax fields: cache_read (hit), cache_creation (write), input_tokens (post-breakpoint)
+                                if event["type"] == "message_delta" {
+                                    if let Some(usage) = event["usage"].as_object() {
                                         let hit = usage.get("cache_read_input_tokens")
                                             .and_then(|v| v.as_u64()).unwrap_or(0);
                                         let create = usage.get("cache_creation_input_tokens")
                                             .and_then(|v| v.as_u64()).unwrap_or(0);
                                         let input = usage.get("input_tokens")
-                                            .or_else(|| usage.get("prompt_tokens"))
                                             .and_then(|v| v.as_u64()).unwrap_or(0);
+                                        // cache_read = existing cache reused
+                                        // cache_creation + input_tokens = tokens not cached (just written + post-breakpoint)
                                         cache_hit_tokens += hit;
-                                        cache_miss_tokens += create;
-                                        if input > 0 { actual_input_tokens = Some(input); }
+                                        cache_miss_tokens += create + input;
                                         eprintln!(
-                                            "[usage] ev={}, input_tokens={}, cache_hit={}, cache_create={}",
-                                            ev_type, input, hit, create
+                                            "[cache] read={}, create={}, input={}, cumulative hit={} miss={}",
+                                            hit, create, input, cache_hit_tokens, cache_miss_tokens
                                         );
                                     }
                                 }
@@ -1113,7 +1108,7 @@ async fn process_sse_stream(
     if cache_hit_tokens > 0 || cache_miss_tokens > 0 {
         let total = cache_hit_tokens + cache_miss_tokens;
         let ratio = if total > 0 { cache_hit_tokens as f64 / total as f64 } else { 0.0 };
-        emit(&app, &session_key, StreamEvent::CacheUsage {
+        let _ = app.emit(&session_key, StreamEvent::CacheUsage {
             cache_hit_tokens,
             cache_miss_tokens,
             cache_hit_ratio: ratio,

@@ -54,7 +54,7 @@ pub async fn summarize_with_model(
 
     let body = serde_json::json!({
         "model": model,
-        "system": SUMMARIZE_SYSTEM,
+        "system": [{"type": "text", "text": SUMMARIZE_SYSTEM}],
         "messages": [{"role": "user", "content": user_content}],
         "max_tokens": 2048,
         "temperature": 0.3,
@@ -74,9 +74,12 @@ pub async fn summarize_with_model(
         Ok(r) if r.status().is_success() => {
             match r.json::<Value>().await {
                 Ok(json) => {
-                    // Anthropic format: content[0].text
-                    let summary = json["content"][0]["text"]
-                        .as_str()
+                    // Anthropic interleaved-thinking: content may have thinking+text blocks.
+                    // Find the first text-type block, fall back to OpenAI format.
+                    let summary = json["content"]
+                        .as_array()
+                        .and_then(|blocks| blocks.iter().find(|b| b["type"] == "text"))
+                        .and_then(|b| b["text"].as_str())
                         .or_else(|| json["choices"][0]["message"]["content"].as_str())
                         .unwrap_or("")
                         .to_string();

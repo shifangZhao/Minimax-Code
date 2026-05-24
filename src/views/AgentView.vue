@@ -98,7 +98,12 @@
           <div v-else-if="msg.role === 'tool'" class="tool-msg">
             <ToolCard v-if="getToolCardInfo(msg)" :toolInfo="getToolCardInfo(msg)!" />
           </div>
-          <div v-else-if="msg.role === 'system'" class="system-msg">{{ msg.content }}</div>
+          <div v-else-if="msg.role === 'system'" class="system-msg">
+            <template v-if="msg.loading">
+              <span class="cmd-spinner"></span> {{ msg.content }}
+            </template>
+            <template v-else>{{ msg.content }}</template>
+          </div>
           <div v-else class="text" v-html="formatContent(msg.content)"></div>
           <div class="time" v-if="msg.created_at">{{ formatTime(msg.created_at) }}</div>
         </div>
@@ -587,9 +592,10 @@ async function onSend() {
   if ((text === '/mcp reload' || text === '/compact') && sessionId.value) {
     inputText.value = ''
     const now = new Date().toISOString()
+    const cmdId = Date.now()
     // Push command message to UI and DB (system role — excluded from API context)
     const cmdMsg = {
-      id: Date.now(),
+      id: cmdId,
       session_id: sessionId.value,
       role: 'system' as const,
       content: `$ ${text}`,
@@ -597,9 +603,26 @@ async function onSend() {
     } as any
     messages.value.push(cmdMsg)
     await db.addMessage(sessionId.value, 'system', `$ ${text}`)
+
+    // Push a loading spinner placeholder
+    const loadingId = cmdId + 1
+    const loadingMsg = {
+      id: loadingId,
+      session_id: sessionId.value,
+      role: 'system' as const,
+      content: '⏳',
+      loading: true,
+      created_at: now,
+    } as any
+    messages.value.push(loadingMsg)
     scrollToBottom(true)
 
+    const removeLoading = () => {
+      messages.value = messages.value.filter(m => (m as any).id !== loadingId)
+    }
+
     try {
+      let resultContent: string
       if (text === '/compact') {
         const result = await db.compactSession(sessionId.value)
         const freed = result.before - result.after
@@ -607,39 +630,41 @@ async function onSend() {
         const beforeK = formatTokens(result.before)
         const afterK = formatTokens(result.after)
         const pct = result.before > 0 ? Math.round((freed / result.before) * 100) : 0
-        const resultMsg = {
-          id: Date.now() + 1,
+        resultContent = `✅ 压缩完成: ${beforeK} → ${afterK} tokens, 释放 ${freedKb}K (${pct}%)`
+        removeLoading()
+        messages.value.push({
+          id: Date.now(),
           session_id: sessionId.value,
           role: 'system' as const,
-          content: `✅ 压缩完成: ${beforeK} → ${afterK} tokens, 释放 ${freedKb}K (${pct}%)`,
+          content: resultContent,
           created_at: new Date().toISOString(),
-        } as any
-        messages.value.push(resultMsg)
-        await db.addMessage(sessionId.value, 'system', resultMsg.content)
+        } as any)
+        await db.addMessage(sessionId.value, 'system', resultContent)
         await loadMessages()
       } else {
-        const msg = await invoke<string>('mcp_reload')
-        const resultMsg = {
-          id: Date.now() + 1,
+        const mcpResult = await invoke<string>('mcp_reload')
+        resultContent = `✅ MCP 重载 — ${mcpResult}`
+        removeLoading()
+        messages.value.push({
+          id: Date.now(),
           session_id: sessionId.value,
           role: 'system' as const,
-          content: `✅ MCP 重载 — ${msg}`,
+          content: resultContent,
           created_at: new Date().toISOString(),
-        } as any
-        messages.value.push(resultMsg)
-        await db.addMessage(sessionId.value, 'system', resultMsg.content)
+        } as any)
+        await db.addMessage(sessionId.value, 'system', resultContent)
       }
     } catch (e: any) {
+      removeLoading()
       const err = typeof e === 'string' ? e : (e?.message || '未知错误')
-      const failMsg = {
-        id: Date.now() + 1,
+      messages.value.push({
+        id: Date.now(),
         session_id: sessionId.value,
         role: 'system' as const,
         content: `❌ 命令失败: ${err}`,
         created_at: new Date().toISOString(),
-      } as any
-      messages.value.push(failMsg)
-      await db.addMessage(sessionId.value, 'system', failMsg.content)
+      } as any)
+      await db.addMessage(sessionId.value, 'system', `❌ 命令失败: ${err}`)
       console.error(`[${text}] failed:`, e)
     }
     scrollToBottom(true)
@@ -1937,5 +1962,23 @@ onDeactivated(() => {
 
 .confirm-danger:hover {
   background: #c82333;
+}
+
+/* Spinner for slash command loading state */
+@keyframes cmd-spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.cmd-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border-color);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: cmd-spin 0.7s linear infinite;
+  vertical-align: middle;
+  margin-right: 4px;
 }
 </style>
