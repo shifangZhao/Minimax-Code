@@ -1,28 +1,28 @@
 ---
 name: kotlin-patterns
-description: Idiomatic Kotlin patterns, best practices, and conventions for building robust, efficient, and maintainable Kotlin applications with coroutines, null safety, and DSL builders.
+description: 用于构建健壮、高效和可维护 Kotlin 应用程序的惯用 Kotlin 模式、最佳实践和约定，包括协程、空安全、DSL 构建器和不可变数据类。
 origin: ECC
 ---
 
-# Kotlin Development Patterns
+# Kotlin 开发模式
 
-Idiomatic Kotlin patterns and best practices for building robust, efficient, and maintainable applications.
+用于构建健壮、高效和可维护应用程序的惯用 Kotlin 模式和最佳实践。
 
-## When to Use
+## 何时使用
 
-- Writing new Kotlin code
-- Reviewing Kotlin code
-- Refactoring existing Kotlin code
-- Designing Kotlin modules or libraries
-- Configuring Gradle Kotlin DSL builds
+- 编写新的 Kotlin 代码
+- 审查 Kotlin 代码
+- 重构现有 Kotlin 代码
+- 设计 Kotlin 模块或库
+- 配置 Gradle Kotlin DSL 构建
 
-## How It Works
+## 工作原理
 
-This skill enforces idiomatic Kotlin conventions across seven key areas: null safety using the type system and safe-call operators, immutability via `val` and `copy()` on data classes, sealed classes and interfaces for exhaustive type hierarchies, structured concurrency with coroutines and `Flow`, extension functions for adding behaviour without inheritance, type-safe DSL builders using `@DslMarker` and lambda receivers, and Gradle Kotlin DSL for build configuration.
+此技能在七个关键领域强制执行惯用 Kotlin 约定：使用类型系统和安全调用操作符的空安全、使用 `val` 和数据类的 `copy()` 的不可变性、用于穷举类型层次结构的密封类和使用协程和 `Flow` 的结构化并发、用于在不继承的情况下添加行为的扩展函数、使用 `@DslMarker` 和 lambda 接收器的类型安全 DSL 构建器，以及用于构建配置的 Gradle Kotlin DSL。
 
-## Examples
+## 示例
 
-**Null safety with Elvis operator:**
+**空安全与 Elvis 操作符：**
 ```kotlin
 fun getUserEmail(userId: String): String {
     val user = userRepository.findById(userId)
@@ -30,7 +30,7 @@ fun getUserEmail(userId: String): String {
 }
 ```
 
-**Sealed class for exhaustive results:**
+**用于穷举结果的密封类：**
 ```kotlin
 sealed class Result<out T> {
     data class Success<T>(val data: T) : Result<T>()
@@ -39,7 +39,7 @@ sealed class Result<out T> {
 }
 ```
 
-**Structured concurrency with async/await:**
+**使用 async/await 的结构化并发：**
 ```kotlin
 suspend fun fetchUserWithPosts(userId: String): UserProfile =
     coroutineScope {
@@ -49,63 +49,63 @@ suspend fun fetchUserWithPosts(userId: String): UserProfile =
     }
 ```
 
-## Core Principles
+## 核心原则
 
-### 1. Null Safety
+### 1. 空安全
 
-Kotlin's type system distinguishes nullable and non-nullable types. Leverage it fully.
+Kotlin 的类型系统区分可空和不可空类型。充分利用它。
 
 ```kotlin
-// Good: Use non-nullable types by default
+// 好：默认使用不可空类型
 fun getUser(id: String): User {
     return userRepository.findById(id)
         ?: throw UserNotFoundException("User $id not found")
 }
 
-// Good: Safe calls and Elvis operator
+// 好：安全调用和 Elvis 操作符
 fun getUserEmail(userId: String): String {
     val user = userRepository.findById(userId)
     return user?.email ?: "unknown@example.com"
 }
 
-// Bad: Force-unwrapping nullable types
+// 坏：强制解包可空类型
 fun getUserEmail(userId: String): String {
     val user = userRepository.findById(userId)
-    return user!!.email // Throws NPE if null
+    return user!!.email // 如果为 null 则抛出 NPE
 }
 ```
 
-### 2. Immutability by Default
+### 2. 默认不可变
 
-Prefer `val` over `var`, immutable collections over mutable ones.
+优先 `val` 而非 `var`，不可变集合而非可变集合。
 
 ```kotlin
-// Good: Immutable data
+// 好：不可变数据
 data class User(
     val id: String,
     val name: String,
     val email: String,
 )
 
-// Good: Transform with copy()
+// 好：使用 copy() 转换
 fun updateEmail(user: User, newEmail: String): User =
     user.copy(email = newEmail)
 
-// Good: Immutable collections
+// 好：不可变集合
 val users: List<User> = listOf(user1, user2)
 val filtered = users.filter { it.email.isNotBlank() }
 
-// Bad: Mutable state
-var currentUser: User? = null // Avoid mutable global state
-val mutableUsers = mutableListOf<User>() // Avoid unless truly needed
+// 坏：可变状态
+var currentUser: User? = null // 避免可变全局状态
+val mutableUsers = mutableListOf<User>() // 除非真正需要否则避免
 ```
 
-### 3. Expression Bodies and Single-Expression Functions
+### 3. 表达式体和单表达式函数
 
-Use expression bodies for concise, readable functions.
+对简洁、可读的函数使用表达式体。
 
 ```kotlin
-// Good: Expression body
+// 好：表达式体
 fun isAdult(age: Int): Boolean = age >= 18
 
 fun formatFullName(first: String, last: String): String =
@@ -114,7 +114,7 @@ fun formatFullName(first: String, last: String): String =
 fun User.displayName(): String =
     name.ifBlank { email.substringBefore('@') }
 
-// Good: When as expression
+// 好：when 作为表达式
 fun statusMessage(code: Int): String = when (code) {
     200 -> "OK"
     404 -> "Not Found"
@@ -122,25 +122,25 @@ fun statusMessage(code: Int): String = when (code) {
     else -> "Unknown status: $code"
 }
 
-// Bad: Unnecessary block body
+// 坏：不必要的块体
 fun isAdult(age: Int): Boolean {
     return age >= 18
 }
 ```
 
-### 4. Data Classes for Value Objects
+### 4. 数据类用于值对象
 
-Use data classes for types that primarily hold data.
+对主要持有数据的类型使用数据类。
 
 ```kotlin
-// Good: Data class with copy, equals, hashCode, toString
+// 好：带 copy、equals、hashCode、toString 的数据类
 data class CreateUserRequest(
     val name: String,
     val email: String,
     val role: Role = Role.USER,
 )
 
-// Good: Value class for type safety (zero overhead at runtime)
+// 好：用于类型安全包装器的值类（运行时零开销）
 @JvmInline
 value class UserId(val value: String) {
     init {
@@ -158,12 +158,12 @@ value class Email(val value: String) {
 fun getUser(id: UserId): User = userRepository.findById(id)
 ```
 
-## Sealed Classes and Interfaces
+## 密封类和接口
 
-### Modeling Restricted Hierarchies
+### 建模受限层次结构
 
 ```kotlin
-// Good: Sealed class for exhaustive when
+// 好：用于穷举 when 的密封类
 sealed class Result<out T> {
     data class Success<T>(val data: T) : Result<T>()
     data class Failure(val error: AppError) : Result<Nothing>()
@@ -183,7 +183,7 @@ fun <T> Result<T>.getOrThrow(): T = when (this) {
 }
 ```
 
-### Sealed Interfaces for API Responses
+### 用于 API 响应的密封接口
 
 ```kotlin
 sealed interface ApiError {
@@ -209,30 +209,30 @@ fun ApiError.toStatusCode(): Int = when (this) {
 }
 ```
 
-## Scope Functions
+## 作用域函数
 
-### When to Use Each
+### 何时使用每个
 
 ```kotlin
-// let: Transform nullable or scoped result
+// let：转换可空或作用域结果
 val length: Int? = name?.let { it.trim().length }
 
-// apply: Configure an object (returns the object)
+// apply：配置对象（返回对象本身）
 val user = User().apply {
     name = "Alice"
     email = "alice@example.com"
 }
 
-// also: Side effects (returns the object)
+// also：副作用（返回对象本身）
 val user = createUser(request).also { logger.info("Created user: ${it.id}") }
 
-// run: Execute a block with receiver (returns result)
+// run：使用接收器执行块（返回结果）
 val result = connection.run {
     prepareStatement(sql)
     executeQuery()
 }
 
-// with: Non-extension form of run
+// with：非扩展形式的 run
 val csv = with(StringBuilder()) {
     appendLine("name,email")
     users.forEach { appendLine("${it.name},${it.email}") }
@@ -240,29 +240,29 @@ val csv = with(StringBuilder()) {
 }
 ```
 
-### Anti-Patterns
+### 反模式
 
 ```kotlin
-// Bad: Nesting scope functions
+// 坏：嵌套作用域函数
 user?.let { u ->
     u.address?.let { addr ->
         addr.city?.let { city ->
-            println(city) // Hard to read
+            println(city) // 难读
         }
     }
 }
 
-// Good: Chain safe calls instead
+// 好：链接安全调用
 val city = user?.address?.city
 city?.let { println(it) }
 ```
 
-## Extension Functions
+## 扩展函数
 
-### Adding Functionality Without Inheritance
+### 在不继承的情况下添加功能
 
 ```kotlin
-// Good: Domain-specific extensions
+// 好：特定领域的扩展
 fun String.toSlug(): String =
     lowercase()
         .replace(Regex("[^a-z0-9\\s-]"), "")
@@ -272,12 +272,12 @@ fun String.toSlug(): String =
 fun Instant.toLocalDate(zone: ZoneId = ZoneId.systemDefault()): LocalDate =
     atZone(zone).toLocalDate()
 
-// Good: Collection extensions
+// 好：集合扩展
 fun <T> List<T>.second(): T = this[1]
 
 fun <T> List<T>.secondOrNull(): T? = getOrNull(1)
 
-// Good: Scoped extensions (not polluting global namespace)
+// 好：作用域扩展（不污染全局命名空间）
 class UserService {
     private fun User.isActive(): Boolean =
         status == Status.ACTIVE && lastLogin.isAfter(Instant.now().minus(30, ChronoUnit.DAYS))
@@ -286,12 +286,12 @@ class UserService {
 }
 ```
 
-## Coroutines
+## 协程
 
-### Structured Concurrency
+### 结构化并发
 
 ```kotlin
-// Good: Structured concurrency with coroutineScope
+// 好：使用 coroutineScope 的结构化并发
 suspend fun fetchUserWithPosts(userId: String): UserProfile =
     coroutineScope {
         val userDeferred = async { userService.getUser(userId) }
@@ -303,7 +303,7 @@ suspend fun fetchUserWithPosts(userId: String): UserProfile =
         )
     }
 
-// Good: supervisorScope when children can fail independently
+// 好：当子项可以独立失败时使用 supervisorScope
 suspend fun fetchDashboard(userId: String): Dashboard =
     supervisorScope {
         val user = async { userService.getUser(userId) }
@@ -330,10 +330,10 @@ suspend fun fetchDashboard(userId: String): Dashboard =
     }
 ```
 
-### Flow for Reactive Streams
+### Flow 用于响应式流
 
 ```kotlin
-// Good: Cold flow with proper error handling
+// 好：带适当错误处理的冷流
 fun observeUsers(): Flow<List<User>> = flow {
     while (currentCoroutineContext().isActive) {
         val users = userRepository.findAll()
@@ -345,7 +345,7 @@ fun observeUsers(): Flow<List<User>> = flow {
     emit(emptyList())
 }
 
-// Good: Flow operators
+// 好：Flow 操作符
 fun searchUsers(query: Flow<String>): Flow<List<User>> =
     query
         .debounce(300.milliseconds)
@@ -355,46 +355,46 @@ fun searchUsers(query: Flow<String>): Flow<List<User>> =
         .catch { emit(emptyList()) }
 ```
 
-### Cancellation and Cleanup
+### 取消和清理
 
 ```kotlin
-// Good: Respect cancellation
+// 好：尊重取消
 suspend fun processItems(items: List<Item>) {
     items.forEach { item ->
-        ensureActive() // Check cancellation before expensive work
+        ensureActive() // 在昂贵工作前检查取消
         processItem(item)
     }
 }
 
-// Good: Cleanup with try/finally
+// 好：使用 try/finally 清理
 suspend fun acquireAndProcess() {
     val resource = acquireResource()
     try {
         resource.process()
     } finally {
         withContext(NonCancellable) {
-            resource.release() // Always release, even on cancellation
+            resource.release() // 即使取消也始终释放
         }
     }
 }
 ```
 
-## Delegation
+## 委托
 
-### Property Delegation
+### 属性委托
 
 ```kotlin
-// Lazy initialization
+// 惰性初始化
 val expensiveData: List<User> by lazy {
     userRepository.findAll()
 }
 
-// Observable property
+// 可观察属性
 var name: String by Delegates.observable("initial") { _, old, new ->
     logger.info("Name changed from '$old' to '$new'")
 }
 
-// Map-backed properties
+// Map 支持的属性
 class Config(private val map: Map<String, Any?>) {
     val host: String by map
     val port: Int by map
@@ -404,15 +404,15 @@ class Config(private val map: Map<String, Any?>) {
 val config = Config(mapOf("host" to "localhost", "port" to 8080, "debug" to true))
 ```
 
-### Interface Delegation
+### 接口委托
 
 ```kotlin
-// Good: Delegate interface implementation
+// 好：委托接口实现
 class LoggingUserRepository(
     private val delegate: UserRepository,
     private val logger: Logger,
 ) : UserRepository by delegate {
-    // Only override what you need to add logging to
+    // 只覆盖需要添加日志的内容
     override suspend fun findById(id: String): User? {
         logger.info("Finding user by id: $id")
         return delegate.findById(id).also {
@@ -422,12 +422,12 @@ class LoggingUserRepository(
 }
 ```
 
-## DSL Builders
+## DSL 构建器
 
-### Type-Safe Builders
+### 类型安全构建器
 
 ```kotlin
-// Good: DSL with @DslMarker
+// 好：带 @DslMarker 的 DSL
 @DslMarker
 annotation class HtmlDsl
 
@@ -448,7 +448,7 @@ class HTML {
 
 fun html(init: HTML.() -> Unit): HTML = HTML().apply(init)
 
-// Usage
+// 使用
 val page = html {
     head { title("My Page") }
     body {
@@ -458,7 +458,7 @@ val page = html {
 }
 ```
 
-### Configuration DSL
+### 配置 DSL
 
 ```kotlin
 data class ServerConfig(
@@ -491,7 +491,7 @@ class ServerConfigBuilder {
 fun serverConfig(init: ServerConfigBuilder.() -> Unit): ServerConfig =
     ServerConfigBuilder().apply(init).build()
 
-// Usage
+// 使用
 val config = serverConfig {
     host = "0.0.0.0"
     port = 443
@@ -500,10 +500,10 @@ val config = serverConfig {
 }
 ```
 
-## Sequences for Lazy Evaluation
+## 用于惰性求值的序列
 
 ```kotlin
-// Good: Use sequences for large collections with multiple operations
+// 好：对具有多个操作的大型集合使用序列
 val result = users.asSequence()
     .filter { it.isActive }
     .map { it.email }
@@ -511,7 +511,7 @@ val result = users.asSequence()
     .take(10)
     .toList()
 
-// Good: Generate infinite sequences
+// 好：生成无限序列
 val fibonacci: Sequence<Long> = sequence {
     var a = 0L
     var b = 1L
@@ -528,10 +528,10 @@ val first20 = fibonacci.take(20).toList()
 
 ## Gradle Kotlin DSL
 
-### build.gradle.kts Configuration
+### build.gradle.kts 配置
 
 ```kotlin
-// Check for latest versions: https://kotlinlang.org/docs/releases.html
+// 检查最新版本：https://kotlinlang.org/docs/releases.html
 plugins {
     kotlin("jvm") version "2.3.10"
     kotlin("plugin.serialization") version "2.3.10"
@@ -585,12 +585,12 @@ detekt {
 }
 ```
 
-## Error Handling Patterns
+## 错误处理模式
 
-### Result Type for Domain Operations
+### 用于领域操作的 Result 类型
 
 ```kotlin
-// Good: Use Kotlin's Result or a custom sealed class
+// 好：使用 Kotlin 的 Result 或自定义密封类
 suspend fun createUser(request: CreateUserRequest): Result<User> = runCatching {
     require(request.name.isNotBlank()) { "Name cannot be blank" }
     require('@' in request.email) { "Invalid email format" }
@@ -604,16 +604,16 @@ suspend fun createUser(request: CreateUserRequest): Result<User> = runCatching {
     user
 }
 
-// Good: Chain results
+// 好：链式结果
 val displayName = createUser(request)
     .map { it.name }
     .getOrElse { "Unknown" }
 ```
 
-### require, check, error
+### require、check、error
 
 ```kotlin
-// Good: Preconditions with clear messages
+// 好：带清晰消息的前置条件
 fun withdraw(account: Account, amount: Money): Account {
     require(amount.value > 0) { "Amount must be positive: $amount" }
     check(account.balance >= amount) { "Insufficient balance: ${account.balance} < $amount" }
@@ -622,152 +622,151 @@ fun withdraw(account: Account, amount: Money): Account {
 }
 ```
 
-## Collection Operations
+## 集合操作
 
-### Idiomatic Collection Processing
+### 惯用集合处理
 
 ```kotlin
-// Good: Chained operations
+// 好：链式操作
 val activeAdminEmails: List<String> = users
     .filter { it.role == Role.ADMIN && it.isActive }
     .sortedBy { it.name }
     .map { it.email }
 
-// Good: Grouping and aggregation
+// 好：分组和聚合
 val usersByRole: Map<Role, List<User>> = users.groupBy { it.role }
 
 val oldestByRole: Map<Role, User?> = users.groupBy { it.role }
     .mapValues { (_, users) -> users.minByOrNull { it.createdAt } }
 
-// Good: Associate for map creation
+// 好：associate 用于创建映射
 val usersById: Map<UserId, User> = users.associateBy { it.id }
 
-// Good: Partition for splitting
+// 好：Partition 用于分割
 val (active, inactive) = users.partition { it.isActive }
 ```
 
-## Quick Reference: Kotlin Idioms
+## 快速参考：Kotlin 惯用语法
 
-| Idiom | Description |
+| 惯用语法 | 描述 |
 |-------|-------------|
-| `val` over `var` | Prefer immutable variables |
-| `data class` | For value objects with equals/hashCode/copy |
-| `sealed class/interface` | For restricted type hierarchies |
-| `value class` | For type-safe wrappers with zero overhead |
-| Expression `when` | Exhaustive pattern matching |
-| Safe call `?.` | Null-safe member access |
-| Elvis `?:` | Default value for nullables |
-| `let`/`apply`/`also`/`run`/`with` | Scope functions for clean code |
-| Extension functions | Add behavior without inheritance |
-| `copy()` | Immutable updates on data classes |
-| `require`/`check` | Precondition assertions |
-| Coroutine `async`/`await` | Structured concurrent execution |
-| `Flow` | Cold reactive streams |
-| `sequence` | Lazy evaluation |
-| Delegation `by` | Reuse implementation without inheritance |
+| `val` over `var` | 优先不可变变量 |
+| `data class` | 用于带 equals/hashCode/copy 的值对象 |
+| `sealed class/interface` | 用于受限类型层次结构 |
+| `value class` | 用于零开销的类型安全包装器 |
+| Expression `when` | 穷举模式匹配 |
+| Safe call `?.` | 空安全成员访问 |
+| Elvis `?:` | 可空的默认值 |
+| `let`/`apply`/`also`/`run`/`with` | 用于清晰代码的作用域函数 |
+| Extension functions | 不继承而添加行为 |
+| `copy()` | 数据类的不可变更新 |
+| `require`/`check` | 前置条件断言 |
+| Coroutine `async`/`await` | 结构化并发执行 |
+| `Flow` | 冷响应式流 |
+| `sequence` | 惰性求值 |
+| Delegation `by` | 不继承而重用实现 |
 
-## Anti-Patterns to Avoid
+## 应避免的反模式
 
 ```kotlin
-// Bad: Force-unwrapping nullable types
+// 坏：强制解包可空类型
 val name = user!!.name
 
-// Bad: Platform type leakage from Java
-fun getLength(s: String) = s.length // Safe
-fun getLength(s: String?) = s?.length ?: 0 // Handle nulls from Java
+// 坏：来自 Java 的平台类型泄漏
+fun getLength(s: String) = s.length // 安全
+fun getLength(s: String?) = s?.length ?: 0 // 处理来自 Java 的 null
 
-// Bad: Mutable data classes
+// 坏：可变数据类
 data class MutableUser(var name: String, var email: String)
 
-// Bad: Using exceptions for control flow
+// 坏：使用异常进行控制流
 try {
     val user = findUser(id)
 } catch (e: NotFoundException) {
-    // Don't use exceptions for expected cases
+    // 不要对预期情况使用异常
 }
 
-// Good: Use nullable return or Result
+// 好：使用可空返回或 Result
 val user: User? = findUserOrNull(id)
 
-// Bad: Ignoring coroutine scope
-GlobalScope.launch { /* Avoid GlobalScope */ }
+// 坏：忽略协程作用域
+GlobalScope.launch { /* 避免 GlobalScope */ }
 
-// Good: Use structured concurrency
+// 好：使用结构化并发
 coroutineScope {
-    launch { /* Properly scoped */ }
+    launch { /* 正确作用域 */ }
 }
 
-// Bad: Deeply nested scope functions
+// 坏：深层嵌套作用域函数
 user?.let { u ->
     u.address?.let { a ->
         a.city?.let { c -> process(c) }
     }
 }
 
-// Good: Direct null-safe chain
+// 好：直接空安全链
 user?.address?.city?.let { process(it) }
 ```
 
-**Remember**: Kotlin code should be concise but readable. Leverage the type system for safety, prefer immutability, and use coroutines for concurrency. When in doubt, let the compiler help you.
-
+**记住**：Kotlin 代码应该简洁但可读。利用类型系统保证安全，优先不可变性，使用协程进行并发。当有疑问时，让编译器帮助你。
 
 ---
 
 ---
 name: kotlin-testing
-description: Kotlin testing patterns with Kotest, MockK, coroutine testing, property-based testing, and Kover coverage. Follows TDD methodology with idiomatic Kotlin practices.
+description: 使用 Kotest、MockK、协程测试、属性测试和 Kover 覆盖率的 Kotlin 测试模式。遵循 TDD 方法论与惯用 Kotlin 实践。
 origin: ECC
 ---
 
-# Kotlin Testing Patterns
+# Kotlin 测试模式
 
-Comprehensive Kotlin testing patterns for writing reliable, maintainable tests following TDD methodology with Kotest and MockK.
+使用 Kotest 和 MockK 编写可靠、可维护测试的综合 Kotlin 测试模式，遵循 TDD 方法论。
 
-## When to Use
+## 何时使用
 
-- Writing new Kotlin functions or classes
-- Adding test coverage to existing Kotlin code
-- Implementing property-based tests
-- Following TDD workflow in Kotlin projects
-- Configuring Kover for code coverage
+- 编写新的 Kotlin 函数或类
+- 为现有 Kotlin 代码添加测试覆盖
+- 实现属性测试
+- 在 Kotlin 项目中遵循 TDD 工作流
+- 配置 Kover 用于代码覆盖
 
-## How It Works
+## 工作原理
 
-1. **Identify target code** — Find the function, class, or module to test
-2. **Write a Kotest spec** — Choose a spec style (StringSpec, FunSpec, BehaviorSpec) matching the test scope
-3. **Mock dependencies** — Use MockK to isolate the unit under test
-4. **Run tests (RED)** — Verify the test fails with the expected error
-5. **Implement code (GREEN)** — Write minimal code to pass the test
-6. **Refactor** — Improve the implementation while keeping tests green
-7. **Check coverage** — Run `./gradlew koverHtmlReport` and verify 80%+ coverage
+1. **识别目标代码** — 找到要测试的函数、类或模块
+2. **编写 Kotest spec** — 选择匹配测试范围的 spec 样式（StringSpec、FunSpec、BehaviorSpec）
+3. **Mock 依赖** — 使用 MockK 隔离被测单元
+4. **运行测试（RED）** — 验证测试以预期错误失败
+5. **实现代码（GREEN）** — 编写最小代码通过测试
+6. **重构** — 在保持测试绿色时改进实现
+7. **检查覆盖** — 运行 `./gradlew koverHtmlReport` 并验证 80%+ 覆盖
 
-## Examples
+## 示例
 
-The following sections contain detailed, runnable examples for each testing pattern:
+以下部分包含每个测试模式的详细、可运行示例：
 
-### Quick Reference
+### 快速参考
 
-- **Kotest specs** — StringSpec, FunSpec, BehaviorSpec, DescribeSpec examples in [Kotest Spec Styles](#kotest-spec-styles)
-- **Mocking** — MockK setup, coroutine mocking, argument capture in [MockK](#mockk)
-- **TDD walkthrough** — Full RED/GREEN/REFACTOR cycle with EmailValidator in [TDD Workflow for Kotlin](#tdd-workflow-for-kotlin)
-- **Coverage** — Kover configuration and commands in [Kover Coverage](#kover-coverage)
-- **Ktor testing** — testApplication setup in [Ktor testApplication Testing](#ktor-testapplication-testing)
+- **Kotest specs** — StringSpec、FunSpec、BehaviorSpec 示例见 [Kotest Spec 样式](#kotest-spec-styles)
+- **Mocking** — MockK 设置、协程 mock、参数捕获见 [MockK](#mockk)
+- **TDD 演练** — EmailValidator 的完整 RED/GREEN/REFACTOR 循环见 [Kotlin TDD 工作流](#tdd-workflow-for-kotlin)
+- **覆盖** — Kover 配置和命令见 [Kover 覆盖](#kover-coverage)
+- **Ktor 测试** — testApplication 设置见 [Ktor testApplication 测试](#ktor-testapplication-testing)
 
-### TDD Workflow for Kotlin
+### Kotlin TDD 工作流
 
-#### The RED-GREEN-REFACTOR Cycle
+#### RED-GREEN-REFACTOR 循环
 
 ```
-RED     -> Write a failing test first
-GREEN   -> Write minimal code to pass the test
-REFACTOR -> Improve code while keeping tests green
-REPEAT  -> Continue with next requirement
+RED     -> 先写一个失败的测试
+GREEN   -> 编写最小代码通过测试
+REFACTOR -> 在保持测试绿色时改进代码
+REPEAT  -> 继续下一个需求
 ```
 
-#### Step-by-Step TDD in Kotlin
+#### Kotlin 中的逐步 TDD
 
 ```kotlin
-// Step 1: Define the interface/signature
+// 步骤 1：定义接口/签名
 // EmailValidator.kt
 package com.example.validator
 
@@ -775,7 +774,7 @@ fun validateEmail(email: String): Result<String> {
     TODO("not implemented")
 }
 
-// Step 2: Write failing test (RED)
+// 步骤 2：写失败的测试（RED）
 // EmailValidatorTest.kt
 package com.example.validator
 
@@ -797,12 +796,12 @@ class EmailValidatorTest : StringSpec({
     }
 })
 
-// Step 3: Run tests - verify FAIL
+// 步骤 3：运行测试 - 验证 FAIL
 // $ ./gradlew test
 // EmailValidatorTest > valid email returns success FAILED
 //   kotlin.NotImplementedError: An operation is not implemented
 
-// Step 4: Implement minimal code (GREEN)
+// 步骤 4：实现最小代码（GREEN）
 fun validateEmail(email: String): Result<String> {
     if (email.isBlank()) return Result.failure(IllegalArgumentException("Email cannot be blank"))
     if ('@' !in email) return Result.failure(IllegalArgumentException("Email must contain @"))
@@ -811,18 +810,18 @@ fun validateEmail(email: String): Result<String> {
     return Result.success(email)
 }
 
-// Step 5: Run tests - verify PASS
+// 步骤 5：运行测试 - 验证 PASS
 // $ ./gradlew test
 // EmailValidatorTest > valid email returns success PASSED
 // EmailValidatorTest > empty email returns failure PASSED
 // EmailValidatorTest > email without @ returns failure PASSED
 
-// Step 6: Refactor if needed, verify tests still pass
+// 步骤 6：如需要则重构，验证测试仍通过
 ```
 
-### Kotest Spec Styles
+### Kotest Spec 样式
 
-#### StringSpec (Simplest)
+#### StringSpec（最简单）
 
 ```kotlin
 class CalculatorTest : StringSpec({
@@ -840,7 +839,7 @@ class CalculatorTest : StringSpec({
 })
 ```
 
-#### FunSpec (JUnit-like)
+#### FunSpec（JUnit 风格）
 
 ```kotlin
 class UserServiceTest : FunSpec({
@@ -866,7 +865,7 @@ class UserServiceTest : FunSpec({
 })
 ```
 
-#### BehaviorSpec (BDD Style)
+#### BehaviorSpec（BDD 风格）
 
 ```kotlin
 class OrderServiceTest : BehaviorSpec({
@@ -908,7 +907,7 @@ class OrderServiceTest : BehaviorSpec({
 })
 ```
 
-#### DescribeSpec (RSpec Style)
+#### DescribeSpec（RSpec 风格）
 
 ```kotlin
 class UserValidatorTest : DescribeSpec({
@@ -937,9 +936,9 @@ class UserValidatorTest : DescribeSpec({
 })
 ```
 
-### Kotest Matchers
+### Kotest 匹配器
 
-#### Core Matchers
+#### 核心匹配器
 
 ```kotlin
 import io.kotest.matchers.shouldBe
@@ -948,36 +947,36 @@ import io.kotest.matchers.string.*
 import io.kotest.matchers.collections.*
 import io.kotest.matchers.nulls.*
 
-// Equality
+// 相等
 result shouldBe expected
 result shouldNotBe unexpected
 
-// Strings
+// 字符串
 name shouldStartWith "Al"
 name shouldEndWith "ice"
 name shouldContain "lic"
 name shouldMatch Regex("[A-Z][a-z]+")
 name.shouldBeBlank()
 
-// Collections
+// 集合
 list shouldContain "item"
 list shouldHaveSize 3
 list.shouldBeSorted()
 list.shouldContainAll("a", "b", "c")
 list.shouldBeEmpty()
 
-// Nulls
+// 空
 result.shouldNotBeNull()
 result.shouldBeNull()
 
-// Types
+// 类型
 result.shouldBeInstanceOf<User>()
 
-// Numbers
+// 数字
 count shouldBeGreaterThan 0
 price shouldBeInRange 1.0..100.0
 
-// Exceptions
+// 异常
 shouldThrow<IllegalArgumentException> {
     validateAge(-1)
 }.message shouldBe "Age must be positive"
@@ -987,7 +986,7 @@ shouldNotThrow<Exception> {
 }
 ```
 
-#### Custom Matchers
+#### 自定义匹配器
 
 ```kotlin
 fun beActiveUser() = object : Matcher<User> {
@@ -997,2247 +996,162 @@ fun beActiveUser() = object : Matcher<User> {
         { "User ${value.id} should not be active" },
     )
 }
-
-// Usage
-user should beActiveUser()
 ```
 
 ### MockK
 
-#### Basic Mocking
+#### 基本 Mock 设置
 
 ```kotlin
-class UserServiceTest : FunSpec({
-    val repository = mockk<UserRepository>()
-    val logger = mockk<Logger>(relaxed = true) // Relaxed: returns defaults
-    val service = UserService(repository, logger)
+val repository = mockk<UserRepository>()
+val service = UserService(repository)
 
-    beforeTest {
-        clearMocks(repository, logger)
-    }
+// 每次调用返回固定值
+every { repository.findById(any()) } returns null
 
-    test("findUser delegates to repository") {
-        val expected = User(id = "1", name = "Alice")
-        every { repository.findById("1") } returns expected
+// 使用 coEvery mock 挂起函数
+coEvery { repository.findById("1") } returns User(id = "1", name = "Alice")
 
-        val result = service.findUser("1")
-
-        result shouldBe expected
-        verify(exactly = 1) { repository.findById("1") }
-    }
-
-    test("findUser returns null for unknown id") {
-        every { repository.findById(any()) } returns null
-
-        val result = service.findUser("unknown")
-
-        result.shouldBeNull()
-    }
-})
+// 验证调用
+verify { repository.findById("1") }
+verify(exactly = 1) { repository.findAll() }
+verify(inverse = true) { repository.delete(any()) }
 ```
 
-#### Coroutine Mocking
+#### 协程 Mock
 
 ```kotlin
-class AsyncUserServiceTest : FunSpec({
-    val repository = mockk<UserRepository>()
-    val service = UserService(repository)
+coEvery { repository.save(any()) } returns Unit
+coEvery { repository.findById(any()) } returns null
 
-    test("getUser suspending function") {
-        coEvery { repository.findById("1") } returns User(id = "1", name = "Alice")
+// 抛出异常
+coEvery { repository.findById("error") } throws RuntimeException("Database error")
 
-        val result = service.getUser("1")
-
-        result.name shouldBe "Alice"
-        coVerify { repository.findById("1") }
-    }
-
-    test("getUser with delay") {
-        coEvery { repository.findById("1") } coAnswers {
-            delay(100) // Simulate async work
-            User(id = "1", name = "Alice")
-        }
-
-        val result = service.getUser("1")
-        result.name shouldBe "Alice"
-    }
-})
-```
-
-#### Argument Capture
-
-```kotlin
-test("save captures the user argument") {
-    val slot = slot<User>()
-    coEvery { repository.save(capture(slot)) } returns Unit
-
-    service.createUser(CreateUserRequest("Alice", "alice@example.com"))
-
-    slot.captured.name shouldBe "Alice"
-    slot.captured.email shouldBe "alice@example.com"
-    slot.captured.id.shouldNotBeNull()
+// 延迟响应
+coEvery { repository.findById(any()) } coAnswers {
+    delay(100)
+    User(id = "1", name = "Test")
 }
 ```
 
-#### Spy and Partial Mocking
+#### 参数捕获
 
 ```kotlin
-test("spy on real object") {
-    val realService = UserService(repository)
-    val spy = spyk(realService)
+val slot = slot<User>()
+coEvery { repository.save(capture(slot)) } returns Unit
 
-    every { spy.generateId() } returns "fixed-id"
-
-    spy.createUser(request)
-
-    verify { spy.generateId() } // Overridden
-    // Other methods use real implementation
-}
+service.createUser(User(name = "Alice"))
+assert(slot.captured.name == "Alice")
 ```
 
-### Coroutine Testing
+#### MockK 最佳实践
 
-#### runTest for Suspend Functions
+- 使用 `mockk< T >()` 创建 mock
+- 对挂起函数使用 `coEvery` 和 `coVerify`
+- 使用 `any()` 匹配任意参数
+- 使用 `slot()` 捕获参数值
+- 每个测试创建新 mock 以避免状态泄漏
 
-```kotlin
-import kotlinx.coroutines.test.runTest
+## Kover 覆盖
 
-class CoroutineServiceTest : FunSpec({
-    test("concurrent fetches complete together") {
-        runTest {
-            val service = DataService(testScope = this)
-
-            val result = service.fetchAllData()
-
-            result.users.shouldNotBeEmpty()
-            result.products.shouldNotBeEmpty()
-        }
-    }
-
-    test("timeout after delay") {
-        runTest {
-            val service = SlowService()
-
-            shouldThrow<TimeoutCancellationException> {
-                withTimeout(100) {
-                    service.slowOperation() // Takes > 100ms
-                }
-            }
-        }
-    }
-})
-```
-
-#### Testing Flows
+### Gradle 配置
 
 ```kotlin
-import io.kotest.matchers.collections.shouldContainInOrder
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.toList
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.test.advanceTimeBy
-import kotlinx.coroutines.test.runTest
-
-class FlowServiceTest : FunSpec({
-    test("observeUsers emits updates") {
-        runTest {
-            val service = UserFlowService()
-
-            val emissions = service.observeUsers()
-                .take(3)
-                .toList()
-
-            emissions shouldHaveSize 3
-            emissions.last().shouldNotBeEmpty()
-        }
-    }
-
-    test("searchUsers debounces input") {
-        runTest {
-            val service = SearchService()
-            val queries = MutableSharedFlow<String>()
-
-            val results = mutableListOf<List<User>>()
-            val job = launch {
-                service.searchUsers(queries).collect { results.add(it) }
-            }
-
-            queries.emit("a")
-            queries.emit("ab")
-            queries.emit("abc") // Only this should trigger search
-            advanceTimeBy(500)
-
-            results shouldHaveSize 1
-            job.cancel()
-        }
-    }
-})
-```
-
-#### TestDispatcher
-
-```kotlin
-import kotlinx.coroutines.test.StandardTestDispatcher
-import kotlinx.coroutines.test.advanceUntilIdle
-
-class DispatcherTest : FunSpec({
-    test("uses test dispatcher for controlled execution") {
-        val dispatcher = StandardTestDispatcher()
-
-        runTest(dispatcher) {
-            var completed = false
-
-            launch {
-                delay(1000)
-                completed = true
-            }
-
-            completed shouldBe false
-            advanceTimeBy(1000)
-            completed shouldBe true
-        }
-    }
-})
-```
-
-### Property-Based Testing
-
-#### Kotest Property Testing
-
-```kotlin
-import io.kotest.core.spec.style.FunSpec
-import io.kotest.property.Arb
-import io.kotest.property.arbitrary.*
-import io.kotest.property.forAll
-import io.kotest.property.checkAll
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.encodeToString
-import kotlinx.serialization.decodeFromString
-
-// Note: The serialization roundtrip test below requires the User data class
-// to be annotated with @Serializable (from kotlinx.serialization).
-
-class PropertyTest : FunSpec({
-    test("string reverse is involutory") {
-        forAll<String> { s ->
-            s.reversed().reversed() == s
-        }
-    }
-
-    test("list sort is idempotent") {
-        forAll(Arb.list(Arb.int())) { list ->
-            list.sorted() == list.sorted().sorted()
-        }
-    }
-
-    test("serialization roundtrip preserves data") {
-        checkAll(Arb.bind(Arb.string(1..50), Arb.string(5..100)) { name, email ->
-            User(name = name, email = "$email@test.com")
-        }) { user ->
-            val json = Json.encodeToString(user)
-            val decoded = Json.decodeFromString<User>(json)
-            decoded shouldBe user
-        }
-    }
-})
-```
-
-#### Custom Generators
-
-```kotlin
-val userArb: Arb<User> = Arb.bind(
-    Arb.string(minSize = 1, maxSize = 50),
-    Arb.email(),
-    Arb.enum<Role>(),
-) { name, email, role ->
-    User(
-        id = UserId(UUID.randomUUID().toString()),
-        name = name,
-        email = Email(email),
-        role = role,
-    )
-}
-
-val moneyArb: Arb<Money> = Arb.bind(
-    Arb.long(1L..1_000_000L),
-    Arb.enum<Currency>(),
-) { amount, currency ->
-    Money(amount, currency)
-}
-```
-
-### Data-Driven Testing
-
-#### withData in Kotest
-
-```kotlin
-class ParserTest : FunSpec({
-    context("parsing valid dates") {
-        withData(
-            "2026-01-15" to LocalDate(2026, 1, 15),
-            "2026-12-31" to LocalDate(2026, 12, 31),
-            "2000-01-01" to LocalDate(2000, 1, 1),
-        ) { (input, expected) ->
-            parseDate(input) shouldBe expected
-        }
-    }
-
-    context("rejecting invalid dates") {
-        withData(
-            nameFn = { "rejects '$it'" },
-            "not-a-date",
-            "2026-13-01",
-            "2026-00-15",
-            "",
-        ) { input ->
-            shouldThrow<DateParseException> {
-                parseDate(input)
-            }
-        }
-    }
-})
-```
-
-### Test Lifecycle and Fixtures
-
-#### BeforeTest / AfterTest
-
-```kotlin
-class DatabaseTest : FunSpec({
-    lateinit var db: Database
-
-    beforeSpec {
-        db = Database.connect("jdbc:h2:mem:test;DB_CLOSE_DELAY=-1")
-        transaction(db) {
-            SchemaUtils.create(UsersTable)
-        }
-    }
-
-    afterSpec {
-        transaction(db) {
-            SchemaUtils.drop(UsersTable)
-        }
-    }
-
-    beforeTest {
-        transaction(db) {
-            UsersTable.deleteAll()
-        }
-    }
-
-    test("insert and retrieve user") {
-        transaction(db) {
-            UsersTable.insert {
-                it[name] = "Alice"
-                it[email] = "alice@example.com"
-            }
-        }
-
-        val users = transaction(db) {
-            UsersTable.selectAll().map { it[UsersTable.name] }
-        }
-
-        users shouldContain "Alice"
-    }
-})
-```
-
-#### Kotest Extensions
-
-```kotlin
-// Reusable test extension
-class DatabaseExtension : BeforeSpecListener, AfterSpecListener {
-    lateinit var db: Database
-
-    override suspend fun beforeSpec(spec: Spec) {
-        db = Database.connect("jdbc:h2:mem:test;DB_CLOSE_DELAY=-1")
-    }
-
-    override suspend fun afterSpec(spec: Spec) {
-        // cleanup
-    }
-}
-
-class UserRepositoryTest : FunSpec({
-    val dbExt = DatabaseExtension()
-    register(dbExt)
-
-    test("save and find user") {
-        val repo = UserRepository(dbExt.db)
-        // ...
-    }
-})
-```
-
-### Kover Coverage
-
-#### Gradle Configuration
-
-```kotlin
-// build.gradle.kts
 plugins {
     id("org.jetbrains.kotlinx.kover") version "0.9.7"
 }
 
 kover {
     reports {
-        total {
-            html { onCheck = true }
-            xml { onCheck = true }
-        }
-        filters {
-            excludes {
-                classes("*.generated.*", "*.config.*")
-            }
-        }
-        verify {
-            rule {
-                minBound(80) // Fail build below 80% coverage
-            }
-        }
+        xml.required.set(true)
+        html.required.set(true)
     }
 }
 ```
 
-#### Coverage Commands
+### 运行覆盖报告
 
 ```bash
-# Run tests with coverage
-./gradlew koverHtmlReport
-
-# Verify coverage thresholds
-./gradlew koverVerify
-
-# XML report for CI
-./gradlew koverXmlReport
-
-# View HTML report (use the command for your OS)
-# macOS:   open build/reports/kover/html/index.html
-# Linux:   xdg-open build/reports/kover/html/index.html
-# Windows: start build/reports/kover/html/index.html
+./gradlew koverHtmlReport     # HTML 报告
+./gradlew koverXmlReport       # XML 报告（CI 兼容）
+./gradlew koverVerify         # 验证覆盖门槛
 ```
 
-#### Coverage Targets
-
-| Code Type | Target |
-|-----------|--------|
-| Critical business logic | 100% |
-| Public APIs | 90%+ |
-| General code | 80%+ |
-| Generated / config code | Exclude |
-
-### Ktor testApplication Testing
+### 覆盖门槛
 
 ```kotlin
-class ApiRoutesTest : FunSpec({
-    test("GET /users returns list") {
-        testApplication {
-            application {
-                configureRouting()
-                configureSerialization()
-            }
-
-            val response = client.get("/users")
-
-            response.status shouldBe HttpStatusCode.OK
-            val users = response.body<List<UserResponse>>()
-            users.shouldNotBeEmpty()
-        }
+kover {
+    bounds {
+        minBound(LineCoverage(80))           // 至少 80% 行覆盖
+        minBound(BranchCoverage(70))        // 至少 70% 分支覆盖
     }
+}
+```
 
-    test("POST /users creates user") {
+## Ktor testApplication 测试
+
+```kotlin
+class UserRouteTest : DescribeSpec({
+    describe("User routes") {
         testApplication {
-            application {
-                configureRouting()
-                configureSerialization()
+            val client = createClient()
+            val userService = mockk<UserService>()
+            install(Routing) {
+                userRoutes(userService)
             }
 
-            val response = client.post("/users") {
-                contentType(ContentType.Application.Json)
-                setBody(CreateUserRequest("Alice", "alice@example.com"))
-            }
+            coEvery { userService.getUser(any()) } returns User(id = "1", name = "Alice")
 
-            response.status shouldBe HttpStatusCode.Created
+            val response = client.get("/users/1")
+
+            response.status().shouldBe(HttpStatusCode.OK)
+            response.bodyAsText().shouldContain("Alice")
         }
     }
 })
 ```
 
-### Testing Commands
-
-```bash
-# Run all tests
-./gradlew test
-
-# Run specific test class
-./gradlew test --tests "com.example.UserServiceTest"
-
-# Run specific test
-./gradlew test --tests "com.example.UserServiceTest.getUser returns user when found"
-
-# Run with verbose output
-./gradlew test --info
-
-# Run with coverage
-./gradlew koverHtmlReport
-
-# Run detekt (static analysis)
-./gradlew detekt
-
-# Run ktlint (formatting check)
-./gradlew ktlintCheck
-
-# Continuous testing
-./gradlew test --continuous
-```
-
-### Best Practices
-
-**DO:**
-- Write tests FIRST (TDD)
-- Use Kotest's spec styles consistently across the project
-- Use MockK's `coEvery`/`coVerify` for suspend functions
-- Use `runTest` for coroutine testing
-- Test behavior, not implementation
-- Use property-based testing for pure functions
-- Use `data class` test fixtures for clarity
-
-**DON'T:**
-- Mix testing frameworks (pick Kotest and stick with it)
-- Mock data classes (use real instances)
-- Use `Thread.sleep()` in coroutine tests (use `advanceTimeBy`)
-- Skip the RED phase in TDD
-- Test private functions directly
-- Ignore flaky tests
-
-### Integration with CI/CD
-
-```yaml
-# GitHub Actions example
-test:
-  runs-on: ubuntu-latest
-  steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-java@v4
-      with:
-        distribution: 'temurin'
-        java-version: '21'
-
-    - name: Run tests with coverage
-      run: ./gradlew test koverXmlReport
-
-    - name: Verify coverage
-      run: ./gradlew koverVerify
-
-    - name: Upload coverage
-      uses: codecov/codecov-action@v5
-      with:
-        files: build/reports/kover/report.xml
-        token: ${{ secrets.CODECOV_TOKEN }}
-```
-
-**Remember**: Tests are documentation. They show how your Kotlin code is meant to be used. Use Kotest's expressive matchers to make tests readable and MockK for clean mocking of dependencies.
-
-
----
-
----
-name: kotlin-coroutines-flows
-description: Kotlin Coroutines and Flow patterns for Android and KMP — structured concurrency, Flow operators, StateFlow, error handling, and testing.
-origin: ECC
----
-
-# Kotlin Coroutines & Flows
-
-Patterns for structured concurrency, Flow-based reactive streams, and coroutine testing in Android and Kotlin Multiplatform projects.
-
-## When to Activate
-
-- Writing async code with Kotlin coroutines
-- Using Flow, StateFlow, or SharedFlow for reactive data
-- Handling concurrent operations (parallel loading, debounce, retry)
-- Testing coroutines and Flows
-- Managing coroutine scopes and cancellation
-
-## Structured Concurrency
-
-### Scope Hierarchy
-
-```
-Application
-  └── viewModelScope (ViewModel)
-        └── coroutineScope { } (structured child)
-              ├── async { } (concurrent task)
-              └── async { } (concurrent task)
-```
-
-Always use structured concurrency — never `GlobalScope`:
+## 属性测试
 
 ```kotlin
-// BAD
-GlobalScope.launch { fetchData() }
-
-// GOOD — scoped to ViewModel lifecycle
-viewModelScope.launch { fetchData() }
-
-// GOOD — scoped to composable lifecycle
-LaunchedEffect(key) { fetchData() }
-```
-
-### Parallel Decomposition
-
-Use `coroutineScope` + `async` for parallel work:
-
-```kotlin
-suspend fun loadDashboard(): Dashboard = coroutineScope {
-    val items = async { itemRepository.getRecent() }
-    val stats = async { statsRepository.getToday() }
-    val profile = async { userRepository.getCurrent() }
-    Dashboard(
-        items = items.await(),
-        stats = stats.await(),
-        profile = profile.await()
-    )
-}
-```
-
-### SupervisorScope
-
-Use `supervisorScope` when child failures should not cancel siblings:
-
-```kotlin
-suspend fun syncAll() = supervisorScope {
-    launch { syncItems() }       // failure here won't cancel syncStats
-    launch { syncStats() }
-    launch { syncSettings() }
-}
-```
-
-## Flow Patterns
-
-### Cold Flow — One-Shot to Stream Conversion
-
-```kotlin
-fun observeItems(): Flow<List<Item>> = flow {
-    // Re-emits whenever the database changes
-    itemDao.observeAll()
-        .map { entities -> entities.map { it.toDomain() } }
-        .collect { emit(it) }
-}
-```
-
-### StateFlow for UI State
-
-```kotlin
-class DashboardViewModel(
-    observeProgress: ObserveUserProgressUseCase
-) : ViewModel() {
-    val progress: StateFlow<UserProgress> = observeProgress()
-        .stateIn(
-            scope = viewModelScope,
-            started = SharingStarted.WhileSubscribed(5_000),
-            initialValue = UserProgress.EMPTY
-        )
-}
-```
-
-`WhileSubscribed(5_000)` keeps the upstream active for 5 seconds after the last subscriber leaves — survives configuration changes without restarting.
-
-### Combining Multiple Flows
-
-```kotlin
-val uiState: StateFlow<HomeState> = combine(
-    itemRepository.observeItems(),
-    settingsRepository.observeTheme(),
-    userRepository.observeProfile()
-) { items, theme, profile ->
-    HomeState(items = items, theme = theme, profile = profile)
-}.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), HomeState())
-```
-
-### Flow Operators
-
-```kotlin
-// Debounce search input
-searchQuery
-    .debounce(300)
-    .distinctUntilChanged()
-    .flatMapLatest { query -> repository.search(query) }
-    .catch { emit(emptyList()) }
-    .collect { results -> _state.update { it.copy(results = results) } }
-
-// Retry with exponential backoff
-fun fetchWithRetry(): Flow<Data> = flow { emit(api.fetch()) }
-    .retryWhen { cause, attempt ->
-        if (cause is IOException && attempt < 3) {
-            delay(1000L * (1 shl attempt.toInt()))
-            true
-        } else {
-            false
-        }
-    }
-```
-
-### SharedFlow for One-Time Events
-
-```kotlin
-class ItemListViewModel : ViewModel() {
-    private val _effects = MutableSharedFlow<Effect>()
-    val effects: SharedFlow<Effect> = _effects.asSharedFlow()
-
-    sealed interface Effect {
-        data class ShowSnackbar(val message: String) : Effect
-        data class NavigateTo(val route: String) : Effect
-    }
-
-    private fun deleteItem(id: String) {
-        viewModelScope.launch {
-            repository.delete(id)
-            _effects.emit(Effect.ShowSnackbar("Item deleted"))
-        }
-    }
-}
-
-// Collect in Composable
-LaunchedEffect(Unit) {
-    viewModel.effects.collect { effect ->
-        when (effect) {
-            is Effect.ShowSnackbar -> snackbarHostState.showSnackbar(effect.message)
-            is Effect.NavigateTo -> navController.navigate(effect.route)
-        }
-    }
-}
-```
-
-## Dispatchers
-
-```kotlin
-// CPU-intensive work
-withContext(Dispatchers.Default) { parseJson(largePayload) }
-
-// IO-bound work
-withContext(Dispatchers.IO) { database.query() }
-
-// Main thread (UI) — default in viewModelScope
-withContext(Dispatchers.Main) { updateUi() }
-```
-
-In KMP, use `Dispatchers.Default` and `Dispatchers.Main` (available on all platforms). `Dispatchers.IO` is JVM/Android only — use `Dispatchers.Default` on other platforms or provide via DI.
-
-## Cancellation
-
-### Cooperative Cancellation
-
-Long-running loops must check for cancellation:
-
-```kotlin
-suspend fun processItems(items: List<Item>) = coroutineScope {
-    for (item in items) {
-        ensureActive()  // throws CancellationException if cancelled
-        process(item)
-    }
-}
-```
-
-### Cleanup with try/finally
-
-```kotlin
-viewModelScope.launch {
-    try {
-        _state.update { it.copy(isLoading = true) }
-        val data = repository.fetch()
-        _state.update { it.copy(data = data) }
-    } finally {
-        _state.update { it.copy(isLoading = false) }  // always runs, even on cancellation
-    }
-}
-```
-
-## Testing
-
-### Testing StateFlow with Turbine
-
-```kotlin
-@Test
-fun `search updates item list`() = runTest {
-    val fakeRepository = FakeItemRepository().apply { emit(testItems) }
-    val viewModel = ItemListViewModel(GetItemsUseCase(fakeRepository))
-
-    viewModel.state.test {
-        assertEquals(ItemListState(), awaitItem())  // initial
-
-        viewModel.onSearch("query")
-        val loading = awaitItem()
-        assertTrue(loading.isLoading)
-
-        val loaded = awaitItem()
-        assertFalse(loaded.isLoading)
-        assertEquals(1, loaded.items.size)
-    }
-}
-```
-
-### Testing with TestDispatcher
-
-```kotlin
-@Test
-fun `parallel load completes correctly`() = runTest {
-    val viewModel = DashboardViewModel(
-        itemRepo = FakeItemRepo(),
-        statsRepo = FakeStatsRepo()
-    )
-
-    viewModel.load()
-    advanceUntilIdle()
-
-    val state = viewModel.state.value
-    assertNotNull(state.items)
-    assertNotNull(state.stats)
-}
-```
-
-### Faking Flows
-
-```kotlin
-class FakeItemRepository : ItemRepository {
-    private val _items = MutableStateFlow<List<Item>>(emptyList())
-
-    override fun observeItems(): Flow<List<Item>> = _items
-
-    fun emit(items: List<Item>) { _items.value = items }
-
-    override suspend fun getItemsByCategory(category: String): Result<List<Item>> {
-        return Result.success(_items.value.filter { it.category == category })
-    }
-}
-```
-
-## Anti-Patterns to Avoid
-
-- Using `GlobalScope` — leaks coroutines, no structured cancellation
-- Collecting Flows in `init {}` without a scope — use `viewModelScope.launch`
-- Using `MutableStateFlow` with mutable collections — always use immutable copies: `_state.update { it.copy(list = it.list + newItem) }`
-- Catching `CancellationException` — let it propagate for proper cancellation
-- Using `flowOn(Dispatchers.Main)` to collect — collection dispatcher is the caller's dispatcher
-- Creating `Flow` in `@Composable` without `remember` — recreates the flow every recomposition
-
-## References
-
-See skill: `compose-multiplatform-patterns` for UI consumption of Flows.
-See skill: `android-clean-architecture` for where coroutines fit in layers.
-
-
----
-
----
-name: kotlin-exposed-patterns
-description: JetBrains Exposed ORM patterns including DSL queries, DAO pattern, transactions, HikariCP connection pooling, Flyway migrations, and repository pattern.
-origin: ECC
----
-
-# Kotlin Exposed Patterns
-
-Comprehensive patterns for database access with JetBrains Exposed ORM, including DSL queries, DAO, transactions, and production-ready configuration.
-
-## When to Use
-
-- Setting up database access with Exposed
-- Writing SQL queries using Exposed DSL or DAO
-- Configuring connection pooling with HikariCP
-- Creating database migrations with Flyway
-- Implementing the repository pattern with Exposed
-- Handling JSON columns and complex queries
-
-## How It Works
-
-Exposed provides two query styles: DSL for direct SQL-like expressions and DAO for entity lifecycle management. HikariCP manages a pool of reusable database connections configured via `HikariConfig`. Flyway runs versioned SQL migration scripts at startup to keep the schema in sync. All database operations run inside `newSuspendedTransaction` blocks for coroutine safety and atomicity. The repository pattern wraps Exposed queries behind an interface so business logic stays decoupled from the data layer and tests can use an in-memory H2 database.
-
-## Examples
-
-### DSL Query
-
-```kotlin
-suspend fun findUserById(id: UUID): UserRow? =
-    newSuspendedTransaction {
-        UsersTable.selectAll()
-            .where { UsersTable.id eq id }
-            .map { it.toUser() }
-            .singleOrNull()
-    }
-```
-
-### DAO Entity Usage
-
-```kotlin
-suspend fun createUser(request: CreateUserRequest): User =
-    newSuspendedTransaction {
-        UserEntity.new {
-            name = request.name
-            email = request.email
-            role = request.role
-        }.toModel()
-    }
-```
-
-### HikariCP Configuration
-
-```kotlin
-val hikariConfig = HikariConfig().apply {
-    driverClassName = config.driver
-    jdbcUrl = config.url
-    username = config.username
-    password = config.password
-    maximumPoolSize = config.maxPoolSize
-    isAutoCommit = false
-    transactionIsolation = "TRANSACTION_READ_COMMITTED"
-    validate()
-}
-```
-
-## Database Setup
-
-### HikariCP Connection Pooling
-
-```kotlin
-// DatabaseFactory.kt
-object DatabaseFactory {
-    fun create(config: DatabaseConfig): Database {
-        val hikariConfig = HikariConfig().apply {
-            driverClassName = config.driver
-            jdbcUrl = config.url
-            username = config.username
-            password = config.password
-            maximumPoolSize = config.maxPoolSize
-            isAutoCommit = false
-            transactionIsolation = "TRANSACTION_READ_COMMITTED"
-            validate()
-        }
-
-        return Database.connect(HikariDataSource(hikariConfig))
-    }
-}
-
-data class DatabaseConfig(
-    val url: String,
-    val driver: String = "org.postgresql.Driver",
-    val username: String = "",
-    val password: String = "",
-    val maxPoolSize: Int = 10,
-)
-```
-
-### Flyway Migrations
-
-```kotlin
-// FlywayMigration.kt
-fun runMigrations(config: DatabaseConfig) {
-    Flyway.configure()
-        .dataSource(config.url, config.username, config.password)
-        .locations("classpath:db/migration")
-        .baselineOnMigrate(true)
-        .load()
-        .migrate()
-}
-
-// Application startup
-fun Application.module() {
-    val config = DatabaseConfig(
-        url = environment.config.property("database.url").getString(),
-        username = environment.config.property("database.username").getString(),
-        password = environment.config.property("database.password").getString(),
-    )
-    runMigrations(config)
-    val database = DatabaseFactory.create(config)
-    // ...
-}
-```
-
-### Migration Files
-
-```sql
--- src/main/resources/db/migration/V1__create_users.sql
-CREATE TABLE users (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name VARCHAR(100) NOT NULL,
-    email VARCHAR(255) NOT NULL UNIQUE,
-    role VARCHAR(20) NOT NULL DEFAULT 'USER',
-    metadata JSONB,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX idx_users_email ON users(email);
-CREATE INDEX idx_users_role ON users(role);
-```
-
-## Table Definitions
-
-### DSL Style Tables
-
-```kotlin
-// tables/UsersTable.kt
-object UsersTable : UUIDTable("users") {
-    val name = varchar("name", 100)
-    val email = varchar("email", 255).uniqueIndex()
-    val role = enumerationByName<Role>("role", 20)
-    val metadata = jsonb<UserMetadata>("metadata", Json.Default).nullable()
-    val createdAt = timestampWithTimeZone("created_at").defaultExpression(CurrentTimestampWithTimeZone)
-    val updatedAt = timestampWithTimeZone("updated_at").defaultExpression(CurrentTimestampWithTimeZone)
-}
-
-object OrdersTable : UUIDTable("orders") {
-    val userId = uuid("user_id").references(UsersTable.id)
-    val status = enumerationByName<OrderStatus>("status", 20)
-    val totalAmount = long("total_amount")
-    val currency = varchar("currency", 3)
-    val createdAt = timestampWithTimeZone("created_at").defaultExpression(CurrentTimestampWithTimeZone)
-}
-
-object OrderItemsTable : UUIDTable("order_items") {
-    val orderId = uuid("order_id").references(OrdersTable.id, onDelete = ReferenceOption.CASCADE)
-    val productId = uuid("product_id")
-    val quantity = integer("quantity")
-    val unitPrice = long("unit_price")
-}
-```
-
-### Composite Tables
-
-```kotlin
-object UserRolesTable : Table("user_roles") {
-    val userId = uuid("user_id").references(UsersTable.id, onDelete = ReferenceOption.CASCADE)
-    val roleId = uuid("role_id").references(RolesTable.id, onDelete = ReferenceOption.CASCADE)
-    override val primaryKey = PrimaryKey(userId, roleId)
-}
-```
-
-## DSL Queries
-
-### Basic CRUD
-
-```kotlin
-// Insert
-suspend fun insertUser(name: String, email: String, role: Role): UUID =
-    newSuspendedTransaction {
-        UsersTable.insertAndGetId {
-            it[UsersTable.name] = name
-            it[UsersTable.email] = email
-            it[UsersTable.role] = role
-        }.value
-    }
-
-// Select by ID
-suspend fun findUserById(id: UUID): UserRow? =
-    newSuspendedTransaction {
-        UsersTable.selectAll()
-            .where { UsersTable.id eq id }
-            .map { it.toUser() }
-            .singleOrNull()
-    }
-
-// Select with conditions
-suspend fun findActiveAdmins(): List<UserRow> =
-    newSuspendedTransaction {
-        UsersTable.selectAll()
-            .where { (UsersTable.role eq Role.ADMIN) }
-            .orderBy(UsersTable.name)
-            .map { it.toUser() }
-    }
-
-// Update
-suspend fun updateUserEmail(id: UUID, newEmail: String): Boolean =
-    newSuspendedTransaction {
-        UsersTable.update({ UsersTable.id eq id }) {
-            it[email] = newEmail
-            it[updatedAt] = CurrentTimestampWithTimeZone
-        } > 0
-    }
-
-// Delete
-suspend fun deleteUser(id: UUID): Boolean =
-    newSuspendedTransaction {
-        UsersTable.deleteWhere { UsersTable.id eq id } > 0
-    }
-
-// Row mapping
-private fun ResultRow.toUser() = UserRow(
-    id = this[UsersTable.id].value,
-    name = this[UsersTable.name],
-    email = this[UsersTable.email],
-    role = this[UsersTable.role],
-    metadata = this[UsersTable.metadata],
-    createdAt = this[UsersTable.createdAt],
-    updatedAt = this[UsersTable.updatedAt],
-)
-```
-
-### Advanced Queries
-
-```kotlin
-// Join queries
-suspend fun findOrdersWithUser(userId: UUID): List<OrderWithUser> =
-    newSuspendedTransaction {
-        (OrdersTable innerJoin UsersTable)
-            .selectAll()
-            .where { OrdersTable.userId eq userId }
-            .orderBy(OrdersTable.createdAt, SortOrder.DESC)
-            .map { row ->
-                OrderWithUser(
-                    orderId = row[OrdersTable.id].value,
-                    status = row[OrdersTable.status],
-                    totalAmount = row[OrdersTable.totalAmount],
-                    userName = row[UsersTable.name],
-                )
-            }
-    }
-
-// Aggregation
-suspend fun countUsersByRole(): Map<Role, Long> =
-    newSuspendedTransaction {
-        UsersTable
-            .select(UsersTable.role, UsersTable.id.count())
-            .groupBy(UsersTable.role)
-            .associate { row ->
-                row[UsersTable.role] to row[UsersTable.id.count()]
-            }
-    }
-
-// Subqueries
-suspend fun findUsersWithOrders(): List<UserRow> =
-    newSuspendedTransaction {
-        UsersTable.selectAll()
-            .where {
-                UsersTable.id inSubQuery
-                    OrdersTable.select(OrdersTable.userId).withDistinct()
-            }
-            .map { it.toUser() }
-    }
-
-// LIKE and pattern matching — always escape user input to prevent wildcard injection
-private fun escapeLikePattern(input: String): String =
-    input.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-suspend fun searchUsers(query: String): List<UserRow> =
-    newSuspendedTransaction {
-        val sanitized = escapeLikePattern(query.lowercase())
-        UsersTable.selectAll()
-            .where {
-                (UsersTable.name.lowerCase() like "%${sanitized}%") or
-                    (UsersTable.email.lowerCase() like "%${sanitized}%")
-            }
-            .map { it.toUser() }
-    }
-```
-
-### Pagination
-
-```kotlin
-data class Page<T>(
-    val data: List<T>,
-    val total: Long,
-    val page: Int,
-    val limit: Int,
-) {
-    val totalPages: Int get() = ((total + limit - 1) / limit).toInt()
-    val hasNext: Boolean get() = page < totalPages
-    val hasPrevious: Boolean get() = page > 1
-}
-
-suspend fun findUsersPaginated(page: Int, limit: Int): Page<UserRow> =
-    newSuspendedTransaction {
-        val total = UsersTable.selectAll().count()
-        val data = UsersTable.selectAll()
-            .orderBy(UsersTable.createdAt, SortOrder.DESC)
-            .limit(limit)
-            .offset(((page - 1) * limit).toLong())
-            .map { it.toUser() }
-
-        Page(data = data, total = total, page = page, limit = limit)
-    }
-```
-
-### Batch Operations
-
-```kotlin
-// Batch insert
-suspend fun insertUsers(users: List<CreateUserRequest>): List<UUID> =
-    newSuspendedTransaction {
-        UsersTable.batchInsert(users) { user ->
-            this[UsersTable.name] = user.name
-            this[UsersTable.email] = user.email
-            this[UsersTable.role] = user.role
-        }.map { it[UsersTable.id].value }
-    }
-
-// Upsert (insert or update on conflict)
-suspend fun upsertUser(id: UUID, name: String, email: String) {
-    newSuspendedTransaction {
-        UsersTable.upsert(UsersTable.email) {
-            it[UsersTable.id] = EntityID(id, UsersTable)
-            it[UsersTable.name] = name
-            it[UsersTable.email] = email
-            it[updatedAt] = CurrentTimestampWithTimeZone
-        }
-    }
-}
-```
-
-## DAO Pattern
-
-### Entity Definitions
-
-```kotlin
-// entities/UserEntity.kt
-class UserEntity(id: EntityID<UUID>) : UUIDEntity(id) {
-    companion object : UUIDEntityClass<UserEntity>(UsersTable)
-
-    var name by UsersTable.name
-    var email by UsersTable.email
-    var role by UsersTable.role
-    var metadata by UsersTable.metadata
-    var createdAt by UsersTable.createdAt
-    var updatedAt by UsersTable.updatedAt
-
-    val orders by OrderEntity referrersOn OrdersTable.userId
-
-    fun toModel(): User = User(
-        id = id.value,
-        name = name,
-        email = email,
-        role = role,
-        metadata = metadata,
-        createdAt = createdAt,
-        updatedAt = updatedAt,
-    )
-}
-
-class OrderEntity(id: EntityID<UUID>) : UUIDEntity(id) {
-    companion object : UUIDEntityClass<OrderEntity>(OrdersTable)
-
-    var user by UserEntity referencedOn OrdersTable.userId
-    var status by OrdersTable.status
-    var totalAmount by OrdersTable.totalAmount
-    var currency by OrdersTable.currency
-    var createdAt by OrdersTable.createdAt
-
-    val items by OrderItemEntity referrersOn OrderItemsTable.orderId
-}
-```
-
-### DAO Operations
-
-```kotlin
-suspend fun findUserByEmail(email: String): User? =
-    newSuspendedTransaction {
-        UserEntity.find { UsersTable.email eq email }
-            .firstOrNull()
-            ?.toModel()
-    }
-
-suspend fun createUser(request: CreateUserRequest): User =
-    newSuspendedTransaction {
-        UserEntity.new {
-            name = request.name
-            email = request.email
-            role = request.role
-        }.toModel()
-    }
-
-suspend fun updateUser(id: UUID, request: UpdateUserRequest): User? =
-    newSuspendedTransaction {
-        UserEntity.findById(id)?.apply {
-            request.name?.let { name = it }
-            request.email?.let { email = it }
-            updatedAt = OffsetDateTime.now(ZoneOffset.UTC)
-        }?.toModel()
-    }
-```
-
-## Transactions
-
-### Suspend Transaction Support
-
-```kotlin
-// Good: Use newSuspendedTransaction for coroutine support
-suspend fun performDatabaseOperation(): Result<User> =
-    runCatching {
-        newSuspendedTransaction {
-            val user = UserEntity.new {
-                name = "Alice"
-                email = "alice@example.com"
-            }
-            // All operations in this block are atomic
-            user.toModel()
-        }
-    }
-
-// Good: Nested transactions with savepoints
-suspend fun transferFunds(fromId: UUID, toId: UUID, amount: Long) {
-    newSuspendedTransaction {
-        val from = UserEntity.findById(fromId) ?: throw NotFoundException("User $fromId not found")
-        val to = UserEntity.findById(toId) ?: throw NotFoundException("User $toId not found")
-
-        // Debit
-        from.balance -= amount
-        // Credit
-        to.balance += amount
-
-        // Both succeed or both fail
-    }
-}
-```
-
-### Transaction Isolation
-
-```kotlin
-suspend fun readCommittedQuery(): List<User> =
-    newSuspendedTransaction(transactionIsolation = Connection.TRANSACTION_READ_COMMITTED) {
-        UserEntity.all().map { it.toModel() }
-    }
-
-suspend fun serializableOperation() {
-    newSuspendedTransaction(transactionIsolation = Connection.TRANSACTION_SERIALIZABLE) {
-        // Strictest isolation level for critical operations
-    }
-}
-```
-
-## Repository Pattern
-
-### Interface Definition
-
-```kotlin
-interface UserRepository {
-    suspend fun findById(id: UUID): User?
-    suspend fun findByEmail(email: String): User?
-    suspend fun findAll(page: Int, limit: Int): Page<User>
-    suspend fun search(query: String): List<User>
-    suspend fun create(request: CreateUserRequest): User
-    suspend fun update(id: UUID, request: UpdateUserRequest): User?
-    suspend fun delete(id: UUID): Boolean
-    suspend fun count(): Long
-}
-```
-
-### Exposed Implementation
-
-```kotlin
-class ExposedUserRepository(
-    private val database: Database,
-) : UserRepository {
-
-    override suspend fun findById(id: UUID): User? =
-        newSuspendedTransaction(db = database) {
-            UsersTable.selectAll()
-                .where { UsersTable.id eq id }
-                .map { it.toUser() }
-                .singleOrNull()
-        }
-
-    override suspend fun findByEmail(email: String): User? =
-        newSuspendedTransaction(db = database) {
-            UsersTable.selectAll()
-                .where { UsersTable.email eq email }
-                .map { it.toUser() }
-                .singleOrNull()
-        }
-
-    override suspend fun findAll(page: Int, limit: Int): Page<User> =
-        newSuspendedTransaction(db = database) {
-            val total = UsersTable.selectAll().count()
-            val data = UsersTable.selectAll()
-                .orderBy(UsersTable.createdAt, SortOrder.DESC)
-                .limit(limit)
-                .offset(((page - 1) * limit).toLong())
-                .map { it.toUser() }
-            Page(data = data, total = total, page = page, limit = limit)
-        }
-
-    override suspend fun search(query: String): List<User> =
-        newSuspendedTransaction(db = database) {
-            val sanitized = escapeLikePattern(query.lowercase())
-            UsersTable.selectAll()
-                .where {
-                    (UsersTable.name.lowerCase() like "%${sanitized}%") or
-                        (UsersTable.email.lowerCase() like "%${sanitized}%")
-                }
-                .orderBy(UsersTable.name)
-                .map { it.toUser() }
-        }
-
-    override suspend fun create(request: CreateUserRequest): User =
-        newSuspendedTransaction(db = database) {
-            UsersTable.insert {
-                it[name] = request.name
-                it[email] = request.email
-                it[role] = request.role
-            }.resultedValues!!.first().toUser()
-        }
-
-    override suspend fun update(id: UUID, request: UpdateUserRequest): User? =
-        newSuspendedTransaction(db = database) {
-            val updated = UsersTable.update({ UsersTable.id eq id }) {
-                request.name?.let { name -> it[UsersTable.name] = name }
-                request.email?.let { email -> it[UsersTable.email] = email }
-                it[updatedAt] = CurrentTimestampWithTimeZone
-            }
-            if (updated > 0) findById(id) else null
-        }
-
-    override suspend fun delete(id: UUID): Boolean =
-        newSuspendedTransaction(db = database) {
-            UsersTable.deleteWhere { UsersTable.id eq id } > 0
-        }
-
-    override suspend fun count(): Long =
-        newSuspendedTransaction(db = database) {
-            UsersTable.selectAll().count()
-        }
-
-    private fun ResultRow.toUser() = User(
-        id = this[UsersTable.id].value,
-        name = this[UsersTable.name],
-        email = this[UsersTable.email],
-        role = this[UsersTable.role],
-        metadata = this[UsersTable.metadata],
-        createdAt = this[UsersTable.createdAt],
-        updatedAt = this[UsersTable.updatedAt],
-    )
-}
-```
-
-## JSON Columns
-
-### JSONB with kotlinx.serialization
-
-```kotlin
-// Custom column type for JSONB
-inline fun <reified T : Any> Table.jsonb(
-    name: String,
-    json: Json,
-): Column<T> = registerColumn(name, object : ColumnType<T>() {
-    override fun sqlType() = "JSONB"
-
-    override fun valueFromDB(value: Any): T = when (value) {
-        is String -> json.decodeFromString(value)
-        is PGobject -> {
-            val jsonString = value.value
-                ?: throw IllegalArgumentException("PGobject value is null for column '$name'")
-            json.decodeFromString(jsonString)
-        }
-        else -> throw IllegalArgumentException("Unexpected value: $value")
-    }
-
-    override fun notNullValueToDB(value: T): Any =
-        PGobject().apply {
-            type = "jsonb"
-            this.value = json.encodeToString(value)
-        }
-})
-
-// Usage in table
-@Serializable
-data class UserMetadata(
-    val preferences: Map<String, String> = emptyMap(),
-    val tags: List<String> = emptyList(),
-)
-
-object UsersTable : UUIDTable("users") {
-    val metadata = jsonb<UserMetadata>("metadata", Json.Default).nullable()
-}
-```
-
-## Testing with Exposed
-
-### In-Memory Database for Tests
-
-```kotlin
-class UserRepositoryTest : FunSpec({
-    lateinit var database: Database
-    lateinit var repository: UserRepository
-
-    beforeSpec {
-        database = Database.connect(
-            url = "jdbc:h2:mem:test;DB_CLOSE_DELAY=-1;MODE=PostgreSQL",
-            driver = "org.h2.Driver",
-        )
-        transaction(database) {
-            SchemaUtils.create(UsersTable)
-        }
-        repository = ExposedUserRepository(database)
-    }
-
-    beforeTest {
-        transaction(database) {
-            UsersTable.deleteAll()
-        }
-    }
-
-    test("create and find user") {
-        val user = repository.create(CreateUserRequest("Alice", "alice@example.com"))
-
-        user.name shouldBe "Alice"
-        user.email shouldBe "alice@example.com"
-
-        val found = repository.findById(user.id)
-        found shouldBe user
-    }
-
-    test("findByEmail returns null for unknown email") {
-        val result = repository.findByEmail("unknown@example.com")
-        result.shouldBeNull()
-    }
-
-    test("pagination works correctly") {
-        repeat(25) { i ->
-            repository.create(CreateUserRequest("User $i", "user$i@example.com"))
-        }
-
-        val page1 = repository.findAll(page = 1, limit = 10)
-        page1.data shouldHaveSize 10
-        page1.total shouldBe 25
-        page1.hasNext shouldBe true
-
-        val page3 = repository.findAll(page = 3, limit = 10)
-        page3.data shouldHaveSize 5
-        page3.hasNext shouldBe false
-    }
-})
-```
-
-## Gradle Dependencies
-
-```kotlin
-// build.gradle.kts
-dependencies {
-    // Exposed
-    implementation("org.jetbrains.exposed:exposed-core:1.0.0")
-    implementation("org.jetbrains.exposed:exposed-dao:1.0.0")
-    implementation("org.jetbrains.exposed:exposed-jdbc:1.0.0")
-    implementation("org.jetbrains.exposed:exposed-kotlin-datetime:1.0.0")
-    implementation("org.jetbrains.exposed:exposed-json:1.0.0")
-
-    // Database driver
-    implementation("org.postgresql:postgresql:42.7.5")
-
-    // Connection pooling
-    implementation("com.zaxxer:HikariCP:6.2.1")
-
-    // Migrations
-    implementation("org.flywaydb:flyway-core:10.22.0")
-    implementation("org.flywaydb:flyway-database-postgresql:10.22.0")
-
-    // Testing
-    testImplementation("com.h2database:h2:2.3.232")
-}
-```
-
-## Quick Reference: Exposed Patterns
-
-| Pattern | Description |
-|---------|-------------|
-| `object Table : UUIDTable("name")` | Define table with UUID primary key |
-| `newSuspendedTransaction { }` | Coroutine-safe transaction block |
-| `Table.selectAll().where { }` | Query with conditions |
-| `Table.insertAndGetId { }` | Insert and return generated ID |
-| `Table.update({ condition }) { }` | Update matching rows |
-| `Table.deleteWhere { }` | Delete matching rows |
-| `Table.batchInsert(items) { }` | Efficient bulk insert |
-| `innerJoin` / `leftJoin` | Join tables |
-| `orderBy` / `limit` / `offset` | Sort and paginate |
-| `count()` / `sum()` / `avg()` | Aggregation functions |
-
-**Remember**: Use the DSL style for simple queries and the DAO style when you need entity lifecycle management. Always use `newSuspendedTransaction` for coroutine support, and wrap database operations behind a repository interface for testability.
-
-
----
-
----
-name: kotlin-ktor-patterns
-description: Ktor server patterns including routing DSL, plugins, authentication, Koin DI, kotlinx.serialization, WebSockets, and testApplication testing.
-origin: ECC
----
-
-# Ktor Server Patterns
-
-Comprehensive Ktor patterns for building robust, maintainable HTTP servers with Kotlin coroutines.
-
-## When to Activate
-
-- Building Ktor HTTP servers
-- Configuring Ktor plugins (Auth, CORS, ContentNegotiation, StatusPages)
-- Implementing REST APIs with Ktor
-- Setting up dependency injection with Koin
-- Writing Ktor integration tests with testApplication
-- Working with WebSockets in Ktor
-
-## Application Structure
-
-### Standard Ktor Project Layout
-
-```text
-src/main/kotlin/
-├── com/example/
-│   ├── Application.kt           # Entry point, module configuration
-│   ├── plugins/
-│   │   ├── Routing.kt           # Route definitions
-│   │   ├── Serialization.kt     # Content negotiation setup
-│   │   ├── Authentication.kt    # Auth configuration
-│   │   ├── StatusPages.kt       # Error handling
-│   │   └── CORS.kt              # CORS configuration
-│   ├── routes/
-│   │   ├── UserRoutes.kt        # /users endpoints
-│   │   ├── AuthRoutes.kt        # /auth endpoints
-│   │   └── HealthRoutes.kt      # /health endpoints
-│   ├── models/
-│   │   ├── User.kt              # Domain models
-│   │   └── ApiResponse.kt       # Response envelopes
-│   ├── services/
-│   │   ├── UserService.kt       # Business logic
-│   │   └── AuthService.kt       # Auth logic
-│   ├── repositories/
-│   │   ├── UserRepository.kt    # Data access interface
-│   │   └── ExposedUserRepository.kt
-│   └── di/
-│       └── AppModule.kt         # Koin modules
-src/test/kotlin/
-├── com/example/
-│   ├── routes/
-│   │   └── UserRoutesTest.kt
-│   └── services/
-│       └── UserServiceTest.kt
-```
-
-### Application Entry Point
-
-```kotlin
-// Application.kt
-fun main() {
-    embeddedServer(Netty, port = 8080, module = Application::module).start(wait = true)
-}
-
-fun Application.module() {
-    configureSerialization()
-    configureAuthentication()
-    configureStatusPages()
-    configureCORS()
-    configureDI()
-    configureRouting()
-}
-```
-
-## Routing DSL
-
-### Basic Routes
-
-```kotlin
-// plugins/Routing.kt
-fun Application.configureRouting() {
-    routing {
-        userRoutes()
-        authRoutes()
-        healthRoutes()
-    }
-}
-
-// routes/UserRoutes.kt
-fun Route.userRoutes() {
-    val userService by inject<UserService>()
-
-    route("/users") {
-        get {
-            val users = userService.getAll()
-            call.respond(users)
-        }
-
-        get("/{id}") {
-            val id = call.parameters["id"]
-                ?: return@get call.respond(HttpStatusCode.BadRequest, "Missing id")
-            val user = userService.getById(id)
-                ?: return@get call.respond(HttpStatusCode.NotFound)
-            call.respond(user)
-        }
-
-        post {
-            val request = call.receive<CreateUserRequest>()
-            val user = userService.create(request)
-            call.respond(HttpStatusCode.Created, user)
-        }
-
-        put("/{id}") {
-            val id = call.parameters["id"]
-                ?: return@put call.respond(HttpStatusCode.BadRequest, "Missing id")
-            val request = call.receive<UpdateUserRequest>()
-            val user = userService.update(id, request)
-                ?: return@put call.respond(HttpStatusCode.NotFound)
-            call.respond(user)
-        }
-
-        delete("/{id}") {
-            val id = call.parameters["id"]
-                ?: return@delete call.respond(HttpStatusCode.BadRequest, "Missing id")
-            val deleted = userService.delete(id)
-            if (deleted) call.respond(HttpStatusCode.NoContent)
-            else call.respond(HttpStatusCode.NotFound)
-        }
-    }
-}
-```
-
-### Route Organization with Authenticated Routes
-
-```kotlin
-fun Route.userRoutes() {
-    route("/users") {
-        // Public routes
-        get { /* list users */ }
-        get("/{id}") { /* get user */ }
-
-        // Protected routes
-        authenticate("jwt") {
-            post { /* create user - requires auth */ }
-            put("/{id}") { /* update user - requires auth */ }
-            delete("/{id}") { /* delete user - requires auth */ }
-        }
-    }
-}
-```
-
-## Content Negotiation & Serialization
-
-### kotlinx.serialization Setup
-
-```kotlin
-// plugins/Serialization.kt
-fun Application.configureSerialization() {
-    install(ContentNegotiation) {
-        json(Json {
-            prettyPrint = true
-            isLenient = false
-            ignoreUnknownKeys = true
-            encodeDefaults = true
-            explicitNulls = false
-        })
-    }
-}
-```
-
-### Serializable Models
-
-```kotlin
-@Serializable
-data class UserResponse(
-    val id: String,
-    val name: String,
-    val email: String,
-    val role: Role,
-    @Serializable(with = InstantSerializer::class)
-    val createdAt: Instant,
-)
-
-@Serializable
-data class CreateUserRequest(
-    val name: String,
-    val email: String,
-    val role: Role = Role.USER,
-)
-
-@Serializable
-data class ApiResponse<T>(
-    val success: Boolean,
-    val data: T? = null,
-    val error: String? = null,
-) {
-    companion object {
-        fun <T> ok(data: T): ApiResponse<T> = ApiResponse(success = true, data = data)
-        fun <T> error(message: String): ApiResponse<T> = ApiResponse(success = false, error = message)
-    }
-}
-
-@Serializable
-data class PaginatedResponse<T>(
-    val data: List<T>,
-    val total: Long,
-    val page: Int,
-    val limit: Int,
-)
-```
-
-### Custom Serializers
-
-```kotlin
-object InstantSerializer : KSerializer<Instant> {
-    override val descriptor = PrimitiveSerialDescriptor("Instant", PrimitiveKind.STRING)
-    override fun serialize(encoder: Encoder, value: Instant) =
-        encoder.encodeString(value.toString())
-    override fun deserialize(decoder: Decoder): Instant =
-        Instant.parse(decoder.decodeString())
-}
-```
-
-## Authentication
-
-### JWT Authentication
-
-```kotlin
-// plugins/Authentication.kt
-fun Application.configureAuthentication() {
-    val jwtSecret = environment.config.property("jwt.secret").getString()
-    val jwtIssuer = environment.config.property("jwt.issuer").getString()
-    val jwtAudience = environment.config.property("jwt.audience").getString()
-    val jwtRealm = environment.config.property("jwt.realm").getString()
-
-    install(Authentication) {
-        jwt("jwt") {
-            realm = jwtRealm
-            verifier(
-                JWT.require(Algorithm.HMAC256(jwtSecret))
-                    .withAudience(jwtAudience)
-                    .withIssuer(jwtIssuer)
-                    .build()
-            )
-            validate { credential ->
-                if (credential.payload.audience.contains(jwtAudience)) {
-                    JWTPrincipal(credential.payload)
-                } else {
-                    null
-                }
-            }
-            challenge { _, _ ->
-                call.respond(HttpStatusCode.Unauthorized, ApiResponse.error<Unit>("Invalid or expired token"))
-            }
-        }
-    }
-}
-
-// Extracting user from JWT
-fun ApplicationCall.userId(): String =
-    principal<JWTPrincipal>()
-        ?.payload
-        ?.getClaim("userId")
-        ?.asString()
-        ?: throw AuthenticationException("No userId in token")
-```
-
-### Auth Routes
-
-```kotlin
-fun Route.authRoutes() {
-    val authService by inject<AuthService>()
-
-    route("/auth") {
-        post("/login") {
-            val request = call.receive<LoginRequest>()
-            val token = authService.login(request.email, request.password)
-                ?: return@post call.respond(
-                    HttpStatusCode.Unauthorized,
-                    ApiResponse.error<Unit>("Invalid credentials"),
-                )
-            call.respond(ApiResponse.ok(TokenResponse(token)))
-        }
-
-        post("/register") {
-            val request = call.receive<RegisterRequest>()
-            val user = authService.register(request)
-            call.respond(HttpStatusCode.Created, ApiResponse.ok(user))
-        }
-
-        authenticate("jwt") {
-            get("/me") {
-                val userId = call.userId()
-                val user = authService.getProfile(userId)
-                call.respond(ApiResponse.ok(user))
-            }
-        }
-    }
-}
-```
-
-## Status Pages (Error Handling)
-
-```kotlin
-// plugins/StatusPages.kt
-fun Application.configureStatusPages() {
-    install(StatusPages) {
-        exception<ContentTransformationException> { call, cause ->
-            call.respond(
-                HttpStatusCode.BadRequest,
-                ApiResponse.error<Unit>("Invalid request body: ${cause.message}"),
-            )
-        }
-
-        exception<IllegalArgumentException> { call, cause ->
-            call.respond(
-                HttpStatusCode.BadRequest,
-                ApiResponse.error<Unit>(cause.message ?: "Bad request"),
-            )
-        }
-
-        exception<AuthenticationException> { call, _ ->
-            call.respond(
-                HttpStatusCode.Unauthorized,
-                ApiResponse.error<Unit>("Authentication required"),
-            )
-        }
-
-        exception<AuthorizationException> { call, _ ->
-            call.respond(
-                HttpStatusCode.Forbidden,
-                ApiResponse.error<Unit>("Access denied"),
-            )
-        }
-
-        exception<NotFoundException> { call, cause ->
-            call.respond(
-                HttpStatusCode.NotFound,
-                ApiResponse.error<Unit>(cause.message ?: "Resource not found"),
-            )
-        }
-
-        exception<Throwable> { call, cause ->
-            call.application.log.error("Unhandled exception", cause)
-            call.respond(
-                HttpStatusCode.InternalServerError,
-                ApiResponse.error<Unit>("Internal server error"),
-            )
-        }
-
-        status(HttpStatusCode.NotFound) { call, status ->
-            call.respond(status, ApiResponse.error<Unit>("Route not found"))
-        }
-    }
-}
-```
-
-## CORS Configuration
-
-```kotlin
-// plugins/CORS.kt
-fun Application.configureCORS() {
-    install(CORS) {
-        allowHost("localhost:3000")
-        allowHost("example.com", schemes = listOf("https"))
-        allowHeader(HttpHeaders.ContentType)
-        allowHeader(HttpHeaders.Authorization)
-        allowMethod(HttpMethod.Put)
-        allowMethod(HttpMethod.Delete)
-        allowMethod(HttpMethod.Patch)
-        allowCredentials = true
-        maxAgeInSeconds = 3600
-    }
-}
-```
-
-## Koin Dependency Injection
-
-### Module Definition
-
-```kotlin
-// di/AppModule.kt
-val appModule = module {
-    // Database
-    single<Database> { DatabaseFactory.create(get()) }
-
-    // Repositories
-    single<UserRepository> { ExposedUserRepository(get()) }
-    single<OrderRepository> { ExposedOrderRepository(get()) }
-
-    // Services
-    single { UserService(get()) }
-    single { OrderService(get(), get()) }
-    single { AuthService(get(), get()) }
-}
-
-// Application setup
-fun Application.configureDI() {
-    install(Koin) {
-        modules(appModule)
-    }
-}
-```
-
-### Using Koin in Routes
-
-```kotlin
-fun Route.userRoutes() {
-    val userService by inject<UserService>()
-
-    route("/users") {
-        get {
-            val users = userService.getAll()
-            call.respond(ApiResponse.ok(users))
-        }
-    }
-}
-```
-
-### Koin for Testing
-
-```kotlin
-class UserServiceTest : FunSpec(), KoinTest {
-    override fun extensions() = listOf(KoinExtension(testModule))
-
-    private val testModule = module {
-        single<UserRepository> { mockk() }
-        single { UserService(get()) }
-    }
-
-    private val repository by inject<UserRepository>()
-    private val service by inject<UserService>()
-
-    init {
-        test("getUser returns user") {
-            coEvery { repository.findById("1") } returns testUser
-            service.getById("1") shouldBe testUser
-        }
-    }
-}
-```
-
-## Request Validation
-
-```kotlin
-// Validate request data in routes
-fun Route.userRoutes() {
-    val userService by inject<UserService>()
-
-    post("/users") {
-        val request = call.receive<CreateUserRequest>()
-
-        // Validate
-        require(request.name.isNotBlank()) { "Name is required" }
-        require(request.name.length <= 100) { "Name must be 100 characters or less" }
-        require(request.email.matches(Regex(".+@.+\\..+"))) { "Invalid email format" }
-
-        val user = userService.create(request)
-        call.respond(HttpStatusCode.Created, ApiResponse.ok(user))
-    }
-}
-
-// Or use a validation extension
-fun CreateUserRequest.validate() {
-    require(name.isNotBlank()) { "Name is required" }
-    require(name.length <= 100) { "Name must be 100 characters or less" }
-    require(email.matches(Regex(".+@.+\\..+"))) { "Invalid email format" }
-}
-```
-
-## WebSockets
-
-```kotlin
-fun Application.configureWebSockets() {
-    install(WebSockets) {
-        pingPeriod = 15.seconds
-        timeout = 15.seconds
-        maxFrameSize = 64 * 1024 // 64 KiB — increase only if your protocol requires larger frames
-        masking = false // Server-to-client frames are unmasked per RFC 6455; client-to-server are always masked by Ktor
-    }
-}
-
-fun Route.chatRoutes() {
-    val connections = Collections.synchronizedSet<Connection>(LinkedHashSet())
-
-    webSocket("/chat") {
-        val thisConnection = Connection(this)
-        connections += thisConnection
-
-        try {
-            send("Connected! Users online: ${connections.size}")
-
-            for (frame in incoming) {
-                frame as? Frame.Text ?: continue
-                val text = frame.readText()
-                val message = ChatMessage(thisConnection.name, text)
-
-                // Snapshot under lock to avoid ConcurrentModificationException
-                val snapshot = synchronized(connections) { connections.toList() }
-                snapshot.forEach { conn ->
-                    conn.session.send(Json.encodeToString(message))
-                }
-            }
-        } catch (e: Exception) {
-            logger.error("WebSocket error", e)
-        } finally {
-            connections -= thisConnection
-        }
-    }
-}
-
-data class Connection(val session: DefaultWebSocketSession) {
-    val name: String = "User-${counter.getAndIncrement()}"
-
-    companion object {
-        private val counter = AtomicInteger(0)
-    }
-}
-```
-
-## testApplication Testing
-
-### Basic Route Testing
-
-```kotlin
-class UserRoutesTest : FunSpec({
-    test("GET /users returns list of users") {
-        testApplication {
-            application {
-                install(Koin) { modules(testModule) }
-                configureSerialization()
-                configureRouting()
-            }
-
-            val response = client.get("/users")
-
-            response.status shouldBe HttpStatusCode.OK
-            val body = response.body<ApiResponse<List<UserResponse>>>()
-            body.success shouldBe true
-            body.data.shouldNotBeNull().shouldNotBeEmpty()
-        }
-    }
-
-    test("POST /users creates a user") {
-        testApplication {
-            application {
-                install(Koin) { modules(testModule) }
-                configureSerialization()
-                configureStatusPages()
-                configureRouting()
-            }
-
-            val client = createClient {
-                install(io.ktor.client.plugins.contentnegotiation.ContentNegotiation) {
-                    json()
-                }
-            }
-
-            val response = client.post("/users") {
-                contentType(ContentType.Application.Json)
-                setBody(CreateUserRequest("Alice", "alice@example.com"))
-            }
-
-            response.status shouldBe HttpStatusCode.Created
-        }
-    }
-
-    test("GET /users/{id} returns 404 for unknown id") {
-        testApplication {
-            application {
-                install(Koin) { modules(testModule) }
-                configureSerialization()
-                configureStatusPages()
-                configureRouting()
-            }
-
-            val response = client.get("/users/unknown-id")
-
-            response.status shouldBe HttpStatusCode.NotFound
+import io.kotest.property.forAll
+
+class EmailPropertyTest : StringSpec({
+    "valid email formats are accepted" {
+        forAll(
+            Gen.string(minSize = 5).suchThat { '@' in it && it.count { c -> c == '@' } == 1 },
+        ) { email ->
+            validateEmail(email).isSuccess
         }
     }
 })
 ```
 
-### Testing Authenticated Routes
+## 集成测试
 
 ```kotlin
-class AuthenticatedRoutesTest : FunSpec({
-    test("protected route requires JWT") {
-        testApplication {
-            application {
-                install(Koin) { modules(testModule) }
-                configureSerialization()
-                configureAuthentication()
-                configureRouting()
-            }
-
-            val response = client.post("/users") {
-                contentType(ContentType.Application.Json)
-                setBody(CreateUserRequest("Alice", "alice@example.com"))
-            }
-
-            response.status shouldBe HttpStatusCode.Unauthorized
-        }
-    }
-
-    test("protected route succeeds with valid JWT") {
-        testApplication {
-            application {
-                install(Koin) { modules(testModule) }
-                configureSerialization()
-                configureAuthentication()
-                configureRouting()
-            }
-
-            val token = generateTestJWT(userId = "test-user")
-
-            val client = createClient {
-                install(io.ktor.client.plugins.contentnegotiation.ContentNegotiation) { json() }
-            }
-
-            val response = client.post("/users") {
-                contentType(ContentType.Application.Json)
-                bearerAuth(token)
-                setBody(CreateUserRequest("Alice", "alice@example.com"))
-            }
-
-            response.status shouldBe HttpStatusCode.Created
-        }
+class UserRepositoryIntegrationTest : StringSpec({
+    val database = Database.connect("jdbc:h2:mem:test")
+    
+    "user can be saved and retrieved" {
+        val repository = JdbcUserRepository(database)
+        val user = User(id = "1", name = "Alice", email = "alice@example.com")
+        
+        repository.save(user)
+        val found = repository.findById("1")
+        
+        found.shouldNotBeNull()
+        found!!.name shouldBe "Alice"
     }
 })
 ```
 
-## Configuration
+## 测试最佳实践
 
-### application.yaml
-
-```yaml
-ktor:
-  application:
-    modules:
-      - com.example.ApplicationKt.module
-  deployment:
-    port: 8080
-
-jwt:
-  secret: ${JWT_SECRET}
-  issuer: "https://example.com"
-  audience: "https://example.com/api"
-  realm: "example"
-
-database:
-  url: ${DATABASE_URL}
-  driver: "org.postgresql.Driver"
-  maxPoolSize: 10
-```
-
-### Reading Config
-
-```kotlin
-fun Application.configureDI() {
-    val dbUrl = environment.config.property("database.url").getString()
-    val dbDriver = environment.config.property("database.driver").getString()
-    val maxPoolSize = environment.config.property("database.maxPoolSize").getString().toInt()
-
-    install(Koin) {
-        modules(module {
-            single { DatabaseConfig(dbUrl, dbDriver, maxPoolSize) }
-            single { DatabaseFactory.create(get()) }
-        })
-    }
-}
-```
-
-## Quick Reference: Ktor Patterns
-
-| Pattern | Description |
-|---------|-------------|
-| `route("/path") { get { } }` | Route grouping with DSL |
-| `call.receive<T>()` | Deserialize request body |
-| `call.respond(status, body)` | Send response with status |
-| `call.parameters["id"]` | Read path parameters |
-| `call.request.queryParameters["q"]` | Read query parameters |
-| `install(Plugin) { }` | Install and configure plugin |
-| `authenticate("name") { }` | Protect routes with auth |
-| `by inject<T>()` | Koin dependency injection |
-| `testApplication { }` | Integration testing |
-
-**Remember**: Ktor is designed around Kotlin coroutines and DSLs. Keep routes thin, push logic to services, and use Koin for dependency injection. Test with `testApplication` for full integration coverage.
+- **每个测试一个关注点** — 保持测试简短和专注
+- **AAA 模式** — Arrange（准备）、Act（行动）、Assert（断言）
+- **描述性测试名称** — 测试名称应描述预期行为
+- **隔离** — 每个测试独立运行，无隐藏依赖
+- **快速** — 单元测试应毫秒级运行
+- **确定性** — 无随机失败，无依赖时间
+- **Mock 外部依赖** — 不连接真实数据库或 API

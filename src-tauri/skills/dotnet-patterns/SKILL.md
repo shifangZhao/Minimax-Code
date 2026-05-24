@@ -1,38 +1,38 @@
 ---
 name: dotnet-patterns
-description: Idiomatic C# and .NET patterns, conventions, dependency injection, async/await, and best practices for building robust, maintainable .NET applications.
+description: 惯用 C# 和 .NET 模式、约定、依赖注入、async/await 以及构建健壮、可维护 .NET 应用程序的最佳实践。
 origin: ECC
 ---
 
-# .NET Development Patterns
+# .NET 开发模式
 
-Idiomatic C# and .NET patterns for building robust, performant, and maintainable applications.
+用于构建健壮、高性能和可维护应用程序的惯用 C# 和 .NET 模式。
 
-## When to Activate
+## 激活时机
 
-- Writing new C# code
-- Reviewing C# code
-- Refactoring existing .NET applications
-- Designing service architectures with ASP.NET Core
+- 编写新的 C# 代码
+- 审查 C# 代码
+- 重构现有 .NET 应用程序
+- 使用 ASP.NET Core 设计服务架构
 
-## Core Principles
+## 核心原则
 
-### 1. Prefer Immutability
+### 1. 优先不可变性
 
-Use records and init-only properties for data models. Mutability should be an explicit, justified choice.
+对数据模型使用记录和 init-only 属性。可变性应该是明确的、有据可查的选择。
 
 ```csharp
-// Good: Immutable value object
+// 好：不可变值对象
 public sealed record Money(decimal Amount, string Currency);
 
-// Good: Immutable DTO with init setters
+// 好：带 init setter 的不可变 DTO
 public sealed class CreateOrderRequest
 {
     public required string CustomerId { get; init; }
     public required IReadOnlyList<OrderItem> Items { get; init; }
 }
 
-// Bad: Mutable model with public setters
+// 坏：带公共 setter 的可变模型
 public class Order
 {
     public string CustomerId { get; set; }
@@ -40,12 +40,12 @@ public class Order
 }
 ```
 
-### 2. Explicit Over Implicit
+### 2. 显式优于隐式
 
-Be clear about nullability, access modifiers, and intent.
+对可空性、访问修饰符和意图要清晰。
 
 ```csharp
-// Good: Explicit access modifiers and nullability
+// 好：显式访问修饰符和可空性
 public sealed class UserService
 {
     private readonly IUserRepository _repository;
@@ -64,12 +64,12 @@ public sealed class UserService
 }
 ```
 
-### 3. Depend on Abstractions
+### 3. 依赖抽象
 
-Use interfaces for service boundaries. Register via DI container.
+对服务边界使用接口。通过 DI 容器注册。
 
 ```csharp
-// Good: Interface-based dependency
+// 好：基于接口的依赖
 public interface IOrderRepository
 {
     Task<Order?> FindByIdAsync(Guid id, CancellationToken cancellationToken);
@@ -77,16 +77,16 @@ public interface IOrderRepository
     Task AddAsync(Order order, CancellationToken cancellationToken);
 }
 
-// Registration
+// 注册
 builder.Services.AddScoped<IOrderRepository, SqlOrderRepository>();
 ```
 
-## Async/Await Patterns
+## Async/Await 模式
 
-### Proper Async Usage
+### 正确的 Async 使用
 
 ```csharp
-// Good: Async all the way, with CancellationToken
+// 好：全程 async，带 CancellationToken
 public async Task<OrderSummary> GetOrderSummaryAsync(
     Guid orderId,
     CancellationToken cancellationToken)
@@ -99,18 +99,18 @@ public async Task<OrderSummary> GetOrderSummaryAsync(
     return new OrderSummary(order, customer);
 }
 
-// Bad: Blocking on async
+// 坏：阻塞 async
 public OrderSummary GetOrderSummary(Guid orderId)
 {
-    var order = _repository.FindByIdAsync(orderId, CancellationToken.None).Result; // Deadlock risk
+    var order = _repository.FindByIdAsync(orderId, CancellationToken.None).Result; // 死锁风险
     return new OrderSummary(order);
 }
 ```
 
-### Parallel Async Operations
+### 并行 Async 操作
 
 ```csharp
-// Good: Concurrent independent operations
+// 好：并发独立操作
 public async Task<DashboardData> LoadDashboardAsync(CancellationToken cancellationToken)
 {
     var ordersTask = _orderService.GetRecentAsync(cancellationToken);
@@ -126,9 +126,9 @@ public async Task<DashboardData> LoadDashboardAsync(CancellationToken cancellati
 }
 ```
 
-## Options Pattern
+## Options 模式
 
-Bind configuration sections to strongly-typed objects.
+将配置节绑定到强类型对象。
 
 ```csharp
 public sealed class SmtpOptions
@@ -141,20 +141,20 @@ public sealed class SmtpOptions
     public bool UseSsl { get; init; } = true;
 }
 
-// Registration
+// 注册
 builder.Services.Configure<SmtpOptions>(
     builder.Configuration.GetSection(SmtpOptions.SectionName));
 
-// Usage via injection
+// 通过注入使用
 public class EmailService(IOptions<SmtpOptions> options)
 {
     private readonly SmtpOptions _smtp = options.Value;
 }
 ```
 
-## Result Pattern
+## Result 模式
 
-Return explicit success/failure instead of throwing for expected failures.
+对预期失败返回显式成功/失败，而非抛出异常。
 
 ```csharp
 public sealed record Result<T>
@@ -170,7 +170,7 @@ public sealed record Result<T>
     public static Result<T> Failure(string error) => new(error);
 }
 
-// Usage
+// 使用
 public async Task<Result<Order>> PlaceOrderAsync(CreateOrderRequest request)
 {
     if (request.Items.Count == 0)
@@ -182,7 +182,7 @@ public async Task<Result<Order>> PlaceOrderAsync(CreateOrderRequest request)
 }
 ```
 
-## Repository Pattern with EF Core
+## 带 EF Core 的 Repository 模式
 
 ```csharp
 public sealed class SqlOrderRepository : IOrderRepository
@@ -218,10 +218,10 @@ public sealed class SqlOrderRepository : IOrderRepository
 }
 ```
 
-## Middleware and Pipeline
+## 中间件和管道
 
 ```csharp
-// Custom middleware
+// 自定义中间件
 public sealed class RequestTimingMiddleware
 {
     private readonly RequestDelegate _next;
@@ -254,10 +254,10 @@ public sealed class RequestTimingMiddleware
 }
 ```
 
-## Minimal API Patterns
+## Minimal API 模式
 
 ```csharp
-// Organized with route groups
+// 使用路由组组织
 var orders = app.MapGroup("/api/orders")
     .RequireAuthorization()
     .WithTags("Orders");
@@ -285,10 +285,10 @@ orders.MapPost("/", async (
 });
 ```
 
-## Guard Clauses
+## Guard 子句
 
 ```csharp
-// Good: Early returns with clear validation
+// 好：带清晰验证的提前返回
 public async Task<ProcessResult> ProcessPaymentAsync(
     PaymentRequest request,
     CancellationToken cancellationToken)
@@ -301,21 +301,21 @@ public async Task<ProcessResult> ProcessPaymentAsync(
     if (string.IsNullOrWhiteSpace(request.Currency))
         throw new ArgumentException("Currency is required", nameof(request.Currency));
 
-    // Happy path continues here without nesting
+    // 快乐路径继续在这里，没有嵌套
     var gateway = _gatewayFactory.Create(request.Currency);
     return await gateway.ChargeAsync(request, cancellationToken);
 }
 ```
 
-## Anti-Patterns to Avoid
+## 应避免的反模式
 
-| Anti-Pattern | Fix |
+| 反模式 | 修复 |
 |---|---|
-| `async void` methods | Return `Task` (except event handlers) |
-| `.Result` or `.Wait()` | Use `await` |
-| `catch (Exception) { }` | Handle or rethrow with context |
-| `new Service()` in constructors | Use constructor injection |
-| `public` fields | Use properties with appropriate accessors |
-| `dynamic` in business logic | Use generics or explicit types |
-| Mutable `static` state | Use DI scoping or `ConcurrentDictionary` |
-| `string.Format` in loops | Use `StringBuilder` or interpolated string handlers |
+| `async void` 方法 | 返回 `Task`（事件处理器除外） |
+| `.Result` 或 `.Wait()` | 使用 `await` |
+| `catch (Exception) { }` | 处理或带上下文重新抛出 |
+| 构造函数中的 `new Service()` | 使用构造函数注入 |
+| `public` 字段 | 使用具有适当访问器的属性 |
+| 业务逻辑中的 `dynamic` | 使用泛型或显式类型 |
+| 可变 `static` 状态 | 使用 DI 作用域或 `ConcurrentDictionary` |
+| 循环中的 `string.Format` | 使用 `StringBuilder` 或内插字符串处理器 |

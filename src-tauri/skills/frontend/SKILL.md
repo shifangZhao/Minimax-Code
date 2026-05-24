@@ -1,178 +1,177 @@
 ---
 name: frontend-design
-description: Create distinctive, production-grade frontend interfaces with high design quality. Use when the user asks to build web components, pages, or applications and the visual direction matters as much as the code quality.
+description: 创建独特、生产级前端界面，具有高设计质量。当用户要求构建 web 组件、页面或应用程序且视觉效果与代码质量同等重要时使用。
 origin: ECC
 ---
 
-# Frontend Design
+# 前端设计
 
-Use this when the task is not just "make it work" but "make it look designed."
+当任务不仅是"让它工作"而是"让它看起来经过设计"时使用此技能。
 
-This skill is for product pages, dashboards, app shells, components, or visual systems that need a clear point of view instead of generic AI-looking UI.
+此技能用于产品页面、仪表板、应用界面或需要清晰观点而非通用 AI 界面的视觉系统。
 
-## When To Use
+## 使用场景
 
-- building a landing page, dashboard, or app surface from scratch
-- upgrading a bland interface into something intentional and memorable
-- translating a product concept into a concrete visual direction
-- implementing a frontend where typography, composition, and motion matter
+- 从零开始构建登录页面、仪表板或应用界面
+- 将平淡界面升级为有意图且令人难忘的界面
+- 将产品概念转化为具体的视觉方向
+- 实现前端，其中排版、构图和动效很重要
 
-## Core Principle
+## 核心原则
 
-Pick a direction and commit to it.
+选择一个方向并坚持它。
 
-Safe-average UI is usually worse than a strong, coherent aesthetic with a few bold choices.
+安全、普通的 UI 通常比具有几个大胆选择强烈、一致的美学更差。
 
-## Design Workflow
+## 设计工作流
 
-### 1. Frame the interface first
+### 1. 首先构建设计框架
 
-Before coding, settle:
+编码前先确定：
 
-- purpose
-- audience
-- emotional tone
-- visual direction
-- one thing the user should remember
+- 目的
+- 受众
+- 情感基调
+- 视觉方向
+- 用户应该记住的一件事
 
-Possible directions:
+可能的方向：
 
-- brutally minimal
-- editorial
-- industrial
-- luxury
-- playful
-- geometric
-- retro-futurist
-- soft and organic
-- maximalist
+- 残酷极简
+- 编辑风格
+- 工业风
+- 奢侈感
+- 活泼
+- 几何
+- 复古未来主义
+- 柔和有机
+- 最大主义
 
-Do not mix directions casually. Choose one and execute it cleanly.
+不要随意混合方向。选择一个并干净地执行。
 
-### 2. Build the visual system
+### 2. 构建视觉系统
 
-Define:
+定义：
 
-- type hierarchy
-- color variables
-- spacing rhythm
-- layout logic
-- motion rules
-- surface / border / shadow treatment
+- 类型层次
+- 颜色变量
+- 间距节奏
+- 布局逻辑
+- 动效规则
+- 表面/边框/阴影处理
 
-Use CSS variables or the project's token system so the interface stays coherent as it grows.
+使用 CSS 变量或项目的 token 系统，以便界面随增长保持一致。
 
-### 3. Compose with intention
+### 3. 有意图地组合
 
-Prefer:
+优先：
 
-- asymmetry when it sharpens hierarchy
-- overlap when it creates depth
-- strong whitespace when it clarifies focus
-- dense layouts only when the product benefits from density
+- 当它强化层次时的不对称
+- 当它创造深度时的重叠
+- 当它澄清焦点时的强留白
+- 仅当产品受益于密度时的密集布局
 
-Avoid defaulting to a symmetrical card grid unless it is clearly the right fit.
+除非明确合适，否则不要默认使用对称卡片网格。
 
-### 4. Make motion meaningful
+### 4. 使动效有意义
 
-Use animation to:
+使用动画来：
 
-- reveal hierarchy
-- stage information
-- reinforce user action
-- create one or two memorable moments
+- 揭示层次
+- 分阶段展示信息
+- 强化用户操作
+- 创造一到两个难忘时刻
 
-Do not scatter generic micro-interactions everywhere. One well-directed load sequence is usually stronger than twenty random hover effects.
+不要到处散布通用的微交互。一个精心设计的加载序列通常比二十个随机悬停效果更强。
 
-## Strong Defaults
+## 强默认设置
 
-### Typography
+### 排版
 
-- pick fonts with character
-- pair a distinctive display face with a readable body face when appropriate
-- avoid generic defaults when the page is design-led
+- 选择有特色的字体
+- 在适当时配对独特的展示字体和易读的正文字体
+- 当页面是设计主导时避免通用默认值
 
-### Color
+### 颜色
 
-- commit to a clear palette
-- one dominant field with selective accents usually works better than evenly weighted rainbow palettes
-- avoid cliché purple-gradient-on-white unless the product genuinely calls for it
+- 承诺清晰的调色板
+- 一个占主导地位的色场配选择性强调通常比均匀加权的彩虹调色板效果更好
+- 避免陈词滥调的紫-白渐变，除非产品真正需要
 
-### Background
+### 背景
 
-Use atmosphere:
+使用氛围：
 
-- gradients
-- meshes
-- textures
-- subtle noise
-- patterns
-- layered transparency
+- 渐变
+- 网格
+- 纹理
+- 细微噪点
+- 图案
+- 分层透明
 
-Flat empty backgrounds are rarely the best answer for a product-facing page.
+平坦空背景很少是面向产品页面的最佳答案。
 
-### Layout
+### 布局
 
-- break the grid when the composition benefits from it
-- use diagonals, offsets, and grouping intentionally
-- keep reading flow obvious even when the layout is unconventional
+- 当构图受益时打破网格
+- 有意图地使用对角线、偏移和分组
+- 即使布局非传统也要保持阅读流清晰
 
-## Anti-Patterns
+## 反模式
 
-Never default to:
+绝不默认：
 
-- interchangeable SaaS hero sections
-- generic card piles with no hierarchy
-- random accent colors without a system
-- placeholder-feeling typography
-- motion that exists only because animation was easy to add
+- 可互换的 SaaS 英雄区域
+- 没有层次感的通用卡片堆
+- 没有系统的随机强调色
+- 看起来像占位符的排版
+- 仅因为添加动画容易而存在的动效
 
-## Execution Rules
+## 执行规则
 
-- preserve the established design system when working inside an existing product
-- match technical complexity to the visual idea
-- keep accessibility and responsiveness intact
-- frontends should feel deliberate on desktop and mobile
+- 在现有产品内工作时保留已建立的设计系统
+- 使技术复杂度与视觉创意相匹配
+- 保持可访问性和响应性完整
+- 前端在桌面和移动端都应感觉经过深思熟虑
 
-## Quality Gate
+## 质量门
 
-Before delivering:
+交付前：
 
-- the interface has a clear visual point of view
-- typography and spacing feel intentional
-- color and motion support the product instead of decorating it randomly
-- the result does not read like generic AI UI
-- the implementation is production-grade, not just visually interesting
-
+- 界面有清晰的视觉观点
+- 排版和间距感觉有意图
+- 颜色和动效支持产品而非随机装饰
+- 结果不像通用的 AI UI
+- 实现是生产级的，不只是视觉上有趣
 
 ---
 
 ---
 name: frontend-patterns
-description: Frontend development patterns for React, Next.js, state management, performance optimization, and UI best practices.
+description: React、Next.js、状态管理、性能优化和 UI 最佳实践的前端开发模式。
 origin: ECC
 ---
 
-# Frontend Development Patterns
+# 前端开发模式
 
-Modern frontend patterns for React, Next.js, and performant user interfaces.
+React、Next.js 和高性能用户界面的现代前端模式。
 
-## When to Activate
+## 激活时机
 
-- Building React components (composition, props, rendering)
-- Managing state (useState, useReducer, Zustand, Context)
-- Implementing data fetching (SWR, React Query, server components)
-- Optimizing performance (memoization, virtualization, code splitting)
-- Working with forms (validation, controlled inputs, Zod schemas)
-- Handling client-side routing and navigation
-- Building accessible, responsive UI patterns
+- 构建 React 组件（组合、props、渲染）
+- 管理状态（useState、useReducer、Zustand、Context）
+- 实现数据获取（SWR、React Query、server components）
+- 优化性能（记忆化、虚拟化、代码分割）
+- 处理表单（验证、受控输入、Zod schema）
+- 处理客户端路由和导航
+- 构建可访问、响应式 UI 模式
 
-## Component Patterns
+## 组件模式
 
-### Composition Over Inheritance
+### 组合优于继承
 
 ```typescript
-// PASS: GOOD: Component composition
+// 通过：好的：组件组合
 interface CardProps {
   children: React.ReactNode
   variant?: 'default' | 'outlined'
@@ -190,14 +189,14 @@ export function CardBody({ children }: { children: React.ReactNode }) {
   return <div className="card-body">{children}</div>
 }
 
-// Usage
+// 使用
 <Card>
-  <CardHeader>Title</CardHeader>
-  <CardBody>Content</CardBody>
+  <CardHeader>标题</CardHeader>
+  <CardBody>内容</CardBody>
 </Card>
 ```
 
-### Compound Components
+### 复合组件
 
 ```typescript
 interface TabsContextValue {
@@ -238,16 +237,16 @@ export function Tab({ id, children }: { id: string, children: React.ReactNode })
   )
 }
 
-// Usage
+// 使用
 <Tabs defaultTab="overview">
   <TabList>
-    <Tab id="overview">Overview</Tab>
-    <Tab id="details">Details</Tab>
+    <Tab id="overview">概览</Tab>
+    <Tab id="details">详情</Tab>
   </TabList>
 </Tabs>
 ```
 
-### Render Props Pattern
+### Render Props 模式
 
 ```typescript
 interface DataLoaderProps<T> {
@@ -271,7 +270,7 @@ export function DataLoader<T>({ url, children }: DataLoaderProps<T>) {
   return <>{children(data, loading, error)}</>
 }
 
-// Usage
+// 使用
 <DataLoader<Market[]> url="/api/markets">
   {(markets, loading, error) => {
     if (loading) return <Spinner />
@@ -281,9 +280,9 @@ export function DataLoader<T>({ url, children }: DataLoaderProps<T>) {
 </DataLoader>
 ```
 
-## Custom Hooks Patterns
+## 自定义 Hook 模式
 
-### State Management Hook
+### 状态管理 Hook
 
 ```typescript
 export function useToggle(initialValue = false): [boolean, () => void] {
@@ -296,11 +295,11 @@ export function useToggle(initialValue = false): [boolean, () => void] {
   return [value, toggle]
 }
 
-// Usage
+// 使用
 const [isOpen, toggleOpen] = useToggle()
 ```
 
-### Async Data Fetching Hook
+### 异步数据获取 Hook
 
 ```typescript
 interface UseQueryOptions<T> {
@@ -344,18 +343,18 @@ export function useQuery<T>(
   return { data, error, loading, refetch }
 }
 
-// Usage
+// 使用
 const { data: markets, loading, error, refetch } = useQuery(
   'markets',
   () => fetch('/api/markets').then(r => r.json()),
   {
-    onSuccess: data => console.log('Fetched', data.length, 'markets'),
-    onError: err => console.error('Failed:', err)
+    onSuccess: data => console.log('获取了', data.length, '个市场'),
+    onError: err => console.error('失败:', err)
   }
 )
 ```
 
-### Debounce Hook
+### 防抖 Hook
 
 ```typescript
 export function useDebounce<T>(value: T, delay: number): T {
@@ -372,7 +371,7 @@ export function useDebounce<T>(value: T, delay: number): T {
   return debouncedValue
 }
 
-// Usage
+// 使用
 const [searchQuery, setSearchQuery] = useState('')
 const debouncedQuery = useDebounce(searchQuery, 500)
 
@@ -383,9 +382,9 @@ useEffect(() => {
 }, [debouncedQuery])
 ```
 
-## State Management Patterns
+## 状态管理模式
 
-### Context + Reducer Pattern
+### Context + Reducer 模式
 
 ```typescript
 interface State {
@@ -438,22 +437,22 @@ export function useMarkets() {
 }
 ```
 
-## Performance Optimization
+## 性能优化
 
-### Memoization
+### 记忆化
 
 ```typescript
-// PASS: useMemo for expensive computations
+// 通过：expensive 计算使用 useMemo
 const sortedMarkets = useMemo(() => {
   return markets.sort((a, b) => b.volume - a.volume)
 }, [markets])
 
-// PASS: useCallback for functions passed to children
+// 通过：传递给子组件的函数使用 useCallback
 const handleSearch = useCallback((query: string) => {
   setSearchQuery(query)
 }, [])
 
-// PASS: React.memo for pure components
+// 通过：纯组件使用 React.memo
 export const MarketCard = React.memo<MarketCardProps>(({ market }) => {
   return (
     <div className="market-card">
@@ -464,12 +463,12 @@ export const MarketCard = React.memo<MarketCardProps>(({ market }) => {
 })
 ```
 
-### Code Splitting & Lazy Loading
+### 代码分割和懒加载
 
 ```typescript
 import { lazy, Suspense } from 'react'
 
-// PASS: Lazy load heavy components
+// 通过：懒加载重型组件
 const HeavyChart = lazy(() => import('./HeavyChart'))
 const ThreeJsBackground = lazy(() => import('./ThreeJsBackground'))
 
@@ -488,7 +487,7 @@ export function Dashboard() {
 }
 ```
 
-### Virtualization for Long Lists
+### 长列表虚拟化
 
 ```typescript
 import { useVirtualizer } from '@tanstack/react-virtual'
@@ -499,31 +498,23 @@ export function VirtualMarketList({ markets }: { markets: Market[] }) {
   const virtualizer = useVirtualizer({
     count: markets.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 100,  // Estimated row height
-    overscan: 5  // Extra items to render
+    estimateSize: () => 80,
+    overscan: 5
   })
 
   return (
-    <div ref={parentRef} style={{ height: '600px', overflow: 'auto' }}>
-      <div
-        style={{
-          height: `${virtualizer.getTotalSize()}px`,
-          position: 'relative'
-        }}
-      >
-        {virtualizer.getVirtualItems().map(virtualRow => (
+    <div ref={parentRef} style={{ height: '400px', overflow: 'auto' }}>
+      <div style={{ height: `${virtualizer.getTotalSize()}px` }}>
+        {virtualizer.getVirtualItems().map((virtualRow) => (
           <div
-            key={virtualRow.index}
+            key={virtualRow.key}
             style={{
               position: 'absolute',
-              top: 0,
-              left: 0,
-              width: '100%',
-              height: `${virtualRow.size}px`,
-              transform: `translateY(${virtualRow.start}px)`
+              top: virtualRow.start,
+              height: `${virtualRow.size}px`
             }}
           >
-            <MarketCard market={markets[virtualRow.index]} />
+            <MarketRow market={markets[virtualRow.index]} />
           </div>
         ))}
       </div>
@@ -532,264 +523,151 @@ export function VirtualMarketList({ markets }: { markets: Market[] }) {
 }
 ```
 
-## Form Handling Patterns
+## 表单处理
 
-### Controlled Form with Validation
+### 受控输入
 
 ```typescript
-interface FormData {
-  name: string
-  description: string
-  endDate: string
-}
+export function LoginForm() {
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
 
-interface FormErrors {
-  name?: string
-  description?: string
-  endDate?: string
-}
-
-export function CreateMarketForm() {
-  const [formData, setFormData] = useState<FormData>({
-    name: '',
-    description: '',
-    endDate: ''
-  })
-
-  const [errors, setErrors] = useState<FormErrors>({})
-
-  const validate = (): boolean => {
-    const newErrors: FormErrors = {}
-
-    if (!formData.name.trim()) {
-      newErrors.name = 'Name is required'
-    } else if (formData.name.length > 200) {
-      newErrors.name = 'Name must be under 200 characters'
-    }
-
-    if (!formData.description.trim()) {
-      newErrors.description = 'Description is required'
-    }
-
-    if (!formData.endDate) {
-      newErrors.endDate = 'End date is required'
-    }
-
-    setErrors(newErrors)
-    return Object.keys(newErrors).length === 0
-  }
-
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = (e: FormEvent) => {
     e.preventDefault()
-
-    if (!validate()) return
-
-    try {
-      await createMarket(formData)
-      // Success handling
-    } catch (error) {
-      // Error handling
-    }
+    // 处理提交
   }
 
   return (
     <form onSubmit={handleSubmit}>
       <input
-        value={formData.name}
-        onChange={e => setFormData(prev => ({ ...prev, name: e.target.value }))}
-        placeholder="Market name"
+        type="email"
+        value={email}
+        onChange={(e) => setEmail(e.target.value)}
+        required
       />
-      {errors.name && <span className="error">{errors.name}</span>}
-
-      {/* Other fields */}
-
-      <button type="submit">Create Market</button>
+      <input
+        type="password"
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+        required
+      />
+      <button type="submit">登录</button>
     </form>
   )
 }
 ```
 
-## Error Boundary Pattern
+### Zod 验证
 
 ```typescript
-interface ErrorBoundaryState {
-  hasError: boolean
-  error: Error | null
-}
+import { z } from 'zod'
 
-export class ErrorBoundary extends React.Component<
-  { children: React.ReactNode },
-  ErrorBoundaryState
-> {
-  state: ErrorBoundaryState = {
-    hasError: false,
-    error: null
-  }
+const loginSchema = z.object({
+  email: z.string().email('无效的邮箱格式'),
+  password: z.string().min(8, '密码至少 8 个字符')
+})
 
-  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
-    return { hasError: true, error }
-  }
+type LoginForm = z.infer<typeof loginSchema>
 
-  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
-    console.error('Error boundary caught:', error, errorInfo)
-  }
+export function LoginForm() {
+  const [errors, setErrors] = useState<Record<string, string>>({})
 
-  render() {
-    if (this.state.hasError) {
-      return (
-        <div className="error-fallback">
-          <h2>Something went wrong</h2>
-          <p>{this.state.error?.message}</p>
-          <button onClick={() => this.setState({ hasError: false })}>
-            Try again
-          </button>
-        </div>
-      )
+  const handleSubmit = (data: unknown) => {
+    const result = loginSchema.safeParse(data)
+    if (!result.success) {
+      const fieldErrors: Record<string, string> = {}
+      result.error.errors.forEach((err) => {
+        if (err.path[0]) {
+          fieldErrors[err.path[0] as string] = err.message
+        }
+      })
+      setErrors(fieldErrors)
+      return
     }
-
-    return this.props.children
+    // 表单提交成功
   }
-}
 
-// Usage
-<ErrorBoundary>
-  <App />
-</ErrorBoundary>
-```
-
-## Animation Patterns
-
-### Framer Motion Animations
-
-```typescript
-import { motion, AnimatePresence } from 'framer-motion'
-
-// PASS: List animations
-export function AnimatedMarketList({ markets }: { markets: Market[] }) {
   return (
-    <AnimatePresence>
-      {markets.map(market => (
-        <motion.div
-          key={market.id}
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -20 }}
-          transition={{ duration: 0.3 }}
-        >
-          <MarketCard market={market} />
-        </motion.div>
-      ))}
-    </AnimatePresence>
-  )
-}
+    <form onSubmit={handleSubmit}>
+      <input name="email" type="email" />
+      {errors.email && <span className="error">{errors.email}</span>}
 
-// PASS: Modal animations
-export function Modal({ isOpen, onClose, children }: ModalProps) {
-  return (
-    <AnimatePresence>
-      {isOpen && (
-        <>
-          <motion.div
-            className="modal-overlay"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            onClick={onClose}
-          />
-          <motion.div
-            className="modal-content"
-            initial={{ opacity: 0, scale: 0.9, y: 20 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.9, y: 20 }}
-          >
-            {children}
-          </motion.div>
-        </>
-      )}
-    </AnimatePresence>
+      <input name="password" type="password" />
+      {errors.password && <span className="error">{errors.password}</span>}
+
+      <button type="submit">登录</button>
+    </form>
   )
 }
 ```
 
-## Accessibility Patterns
+## 路由模式
 
-### Keyboard Navigation
+### Next.js App Router
 
 ```typescript
-export function Dropdown({ options, onSelect }: DropdownProps) {
-  const [isOpen, setIsOpen] = useState(false)
-  const [activeIndex, setActiveIndex] = useState(0)
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    switch (e.key) {
-      case 'ArrowDown':
-        e.preventDefault()
-        setActiveIndex(i => Math.min(i + 1, options.length - 1))
-        break
-      case 'ArrowUp':
-        e.preventDefault()
-        setActiveIndex(i => Math.max(i - 1, 0))
-        break
-      case 'Enter':
-        e.preventDefault()
-        onSelect(options[activeIndex])
-        setIsOpen(false)
-        break
-      case 'Escape':
-        setIsOpen(false)
-        break
-    }
-  }
-
+// app/dashboard/page.tsx
+export default function DashboardPage() {
   return (
-    <div
-      role="combobox"
-      aria-expanded={isOpen}
-      aria-haspopup="listbox"
-      onKeyDown={handleKeyDown}
-    >
-      {/* Dropdown implementation */}
+    <div>
+      <h1>仪表板</h1>
     </div>
   )
 }
-```
 
-### Focus Management
+// app/dashboard/[marketId]/page.tsx
+interface PageProps {
+  params: { marketId: string }
+}
 
-```typescript
-export function Modal({ isOpen, onClose, children }: ModalProps) {
-  const modalRef = useRef<HTMLDivElement>(null)
-  const previousFocusRef = useRef<HTMLElement | null>(null)
-
-  useEffect(() => {
-    if (isOpen) {
-      // Save currently focused element
-      previousFocusRef.current = document.activeElement as HTMLElement
-
-      // Focus modal
-      modalRef.current?.focus()
-    } else {
-      // Restore focus when closing
-      previousFocusRef.current?.focus()
-    }
-  }, [isOpen])
-
-  return isOpen ? (
-    <div
-      ref={modalRef}
-      role="dialog"
-      aria-modal="true"
-      tabIndex={-1}
-      onKeyDown={e => e.key === 'Escape' && onClose()}
-    >
-      {children}
-    </div>
-  ) : null
+export default function MarketDetailPage({ params }: PageProps) {
+  const { marketId } = params
+  return <div>市场 ID: {marketId}</div>
 }
 ```
 
-**Remember**: Modern frontend patterns enable maintainable, performant user interfaces. Choose patterns that fit your project complexity.
+### React Router
 
+```typescript
+import { BrowserRouter, Routes, Route, Link, useParams } from 'react-router-dom'
 
----
+export function App() {
+  return (
+    <BrowserRouter>
+      <nav>
+        <Link to="/">首页</Link>
+        <Link to="/markets">市场</Link>
+      </nav>
 
+      <Routes>
+        <Route path="/" element={<HomePage />} />
+        <Route path="/markets" element={<MarketsPage />} />
+        <Route path="/markets/:id" element={<MarketDetailPage />} />
+      </Routes>
+    </BrowserRouter>
+  )
+}
+
+function MarketDetailPage() {
+  const { id } = useParams()
+  return <div>市场 {id}</div>
+}
+```
+
+## 最佳实践
+
+### 做
+
+- 组件保持小而专注
+- 状态尽可能本地化
+- 昂贵的计算用 useMemo
+- 回调函数用 useCallback
+- 使用 TypeScript 避免类型错误
+
+### 不要
+
+- 不要创建巨大的单体组件
+- 不要在不必要时使用 Context（性能开销）
+- 不要在渲染中创建新函数或对象
+- 不要忽略可访问性（a11y）
+- 不要忘记响应式设计

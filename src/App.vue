@@ -29,11 +29,13 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { invoke } from '@tauri-apps/api/core'
 import { db } from './services/db'
 import { check } from '@tauri-apps/plugin-updater'
 
-import { useGlobalStreaming } from './composables/useGlobalStreaming'
+import { useGlobalStreaming, type StreamEventPayload } from './composables/useGlobalStreaming'
 import { usePermissions } from './composables/usePermissions'
+import type { AgentInvokedPayload } from './composables/useAgentConversation'
 import TitleBar from './components/TitleBar.vue'
 import ProjectPathInput from './components/ProjectPathInput.vue'
 import HistorySidebar from './components/HistorySidebar.vue'
@@ -65,8 +67,26 @@ onMounted(async () => {
   // Disable resize ratio overlay on Windows
   try { await getCurrentWindow().setShadow(false) } catch {}
 
+  // Block browser refresh shortcuts (Ctrl+R, F5) but keep devtools (Ctrl+Shift+I)
+  document.addEventListener('keydown', (e) => {
+    // Ctrl+Shift+I → open devtools
+    if (e.ctrlKey && e.shiftKey && e.key === 'I') {
+      e.preventDefault()
+      invoke('open_devtools')
+      return
+    }
+    // Block Ctrl+R, F5, Ctrl+F5, Ctrl+Shift+R
+    if (
+      (e.ctrlKey && e.key === 'r') ||
+      e.key === 'F5' ||
+      (e.ctrlKey && e.key === 'R')
+    ) {
+      e.preventDefault()
+    }
+  })
+
   // Listen for permission requests
-  permUnlisten = await listen<any>('permission_asked', (event) => {
+  permUnlisten = await listen<{ id: string; tool: string; file?: string; command?: string; reason: string }>('permission_asked', (event) => {
     permRequests.value.push(event.payload)
   })
 
@@ -81,7 +101,7 @@ onMounted(async () => {
     console.warn('[updater] Check failed:', e)
   }
 
-  agentInvokedUnlisten = await listen<any>('agent_invoked', async (event) => {
+  agentInvokedUnlisten = await listen<AgentInvokedPayload>('agent_invoked', async (event) => {
     const { target_agent, session_id } = event.payload
     console.log('[agent_invoked] target:', target_agent, 'session:', session_id)
 
@@ -98,7 +118,7 @@ onMounted(async () => {
     let fullThinking = ''
     let toolCallCount = 0
 
-    const unlisten = await listen<any>(`agent_stream_${session_id}`, async (ev) => {
+    const unlisten = await listen<StreamEventPayload>(`agent_stream_${session_id}`, async (ev) => {
       const e = ev.payload
       switch (e.type) {
         case 'content_block_delta':

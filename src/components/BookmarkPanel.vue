@@ -33,20 +33,22 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 
+export interface BookmarkItem {
+  id: number
+  name: string
+  message_count: number
+  total_bytes: number
+}
+
 defineProps<{
   visible: boolean
-  items: Array<{
-    id: number
-    name: string
-    message_count: number
-    total_bytes: number
-  }>
+  items: BookmarkItem[]
   showInput: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'save', name: string): void
-  (e: 'restore', item: any): void
+  (e: 'restore', item: BookmarkItem): void
   (e: 'delete', id: number): void
   (e: 'toggleInput'): void
 }>()

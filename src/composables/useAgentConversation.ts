@@ -2,7 +2,7 @@
 // Supports Interleaved Thinking with complete message history
 
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { db, type ChatMessage } from '../services/db'
+import { db, type ChatMessage, type UIMessage } from '../services/db'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { useGlobalStreaming } from './useGlobalStreaming'
@@ -11,8 +11,23 @@ export interface ToolEvent {
   type: 'tool_start' | 'tool_end'
   tool: string
   tool_id: string
-  input?: Record<string, any>
+  input?: Record<string, unknown>
   result?: string
+}
+
+export interface AskPayload {
+  id: string
+  session_id: number
+  agent_type?: string
+  question?: string
+  questions?: Array<{ id: string; question: string; options?: string[]; multi_select?: boolean }>
+  options?: string[]
+}
+
+export interface AgentInvokedPayload {
+  target_agent: string
+  session_id: number
+  group_chat_id?: number
 }
 
 // 完整的 assistant 响应结构（用于多轮对话）
@@ -41,15 +56,20 @@ export interface TokenUsage {
 // each session's messages and token counts live independently.
 const sessionTokenUsage = new Map<number, TokenUsage>()
 const sessionMessages = new Map<number, ChatMessage[]>()
+const sessionMeta = new Map<number, { count: number }>()
 
 export function useAgentConversation(agentType: string) {
   const messages = ref<ChatMessage[]>([])
   const loading = ref(false)  // true when current session has active stream
   const sessionId = ref<number | null>(null)
   const currentGroupChatId = ref<number | null>(null)
-  const pendingAsk = ref<any>(null)
+  const pendingAsk = ref<{ id: string; questions?: AskPayload['questions'] } | null>(null)
   const toolEvents = ref<ToolEvent[]>([])
   const tokenUsage = ref<TokenUsage>({ estimated_tokens: 0, context_window: 204800, usage_pct: 0 })
+  const cacheUsage = ref({ hit: 0, miss: 0, ratio: 0 })
+  const hasMoreOlder = ref(false)  // true if DB has more messages than loaded
+  const loadingMore = ref(false)   // true while loading older messages
+  const MESSAGE_PAGE_SIZE = 100
 
   // Per-session loading state
   const loadingSessions = new Set<number>()
@@ -60,7 +80,7 @@ export function useAgentConversation(agentType: string) {
 
   // Listen for ask_choice events (only for our session, ensuring agent+group-chat isolation)
   async function setupAskListener() {
-    askUnlisten = await listen<any>('ask_choice', async (event) => {
+    askUnlisten = await listen<AskPayload>('ask_choice', async (event) => {
       const { id, session_id, questions } = event.payload
       // Only show if this ask is for our session
       if (session_id !== sessionId.value) return
@@ -70,7 +90,7 @@ export function useAgentConversation(agentType: string) {
 
   // Listen for being invoked by other agents via send_to_agent
   async function setupAgentInvokedListener() {
-    agentInvokedUnlisten = await listen<any>('agent_invoked', async (event) => {
+    agentInvokedUnlisten = await listen<AgentInvokedPayload>('agent_invoked', async (event) => {
       const { target_agent, session_id, group_chat_id } = event.payload
       if (target_agent !== agentType) return
 
@@ -79,7 +99,7 @@ export function useAgentConversation(agentType: string) {
 
       console.log('[agent_invoked]', agentType, 'invoked, switching to session:', session_id, 'group:', group_chat_id)
 
-      currentGroupChatId.value = group_chat_id
+      currentGroupChatId.value = group_chat_id ?? null
       sessionId.value = session_id
 
       await loadMessages()
@@ -107,6 +127,7 @@ export function useAgentConversation(agentType: string) {
       currentGroupChatId.value = groupChatId
       sessionId.value = null
       messages.value = []
+      hasMoreOlder.value = false
       tokenUsage.value = { estimated_tokens: 0, context_window: 204800, usage_pct: 0 }
       loading.value = false
       return
@@ -135,6 +156,7 @@ export function useAgentConversation(agentType: string) {
       const tu = sessionTokenUsage.get(newSessionId)
       if (tu) tokenUsage.value = tu
       loading.value = loadingSessions.has(newSessionId)
+      hasMoreOlder.value = (sessionMeta.get(newSessionId)?.count ?? 0) > cached.length
     } else {
       await loadMessages()
     }
@@ -144,18 +166,25 @@ export function useAgentConversation(agentType: string) {
     const sid = targetSessionId ?? sessionId.value
     if (!sid) {
       tokenUsage.value = { estimated_tokens: 0, context_window: 204800, usage_pct: 0 }
+      hasMoreOlder.value = false
       return
     }
-    const msgs = await db.getMessages(sid)
+    // Load total count + newest page in parallel
+    const [totalCount, msgs] = await Promise.all([
+      db.getMessageCount(sid).catch(() => 0),
+      db.getMessages(sid, 0, MESSAGE_PAGE_SIZE)
+    ])
     sessionMessages.set(sid, msgs)
+    sessionMeta.set(sid, { count: totalCount })
     // Only update reactive state if loading for the currently viewed session
     if (sid === sessionId.value) {
       messages.value = msgs
+      hasMoreOlder.value = msgs.length < totalCount
       const cached = sessionTokenUsage.get(sid)
       if (cached) {
         tokenUsage.value = cached
       } else if (msgs.length > 0) {
-        const totalChars = msgs.reduce((sum, m) => sum + (m.content?.length || 0) + ((m as any).thinking?.length || 0), 0)
+        const totalChars = msgs.reduce((sum, m) => sum + (m.content?.length || 0) + (m.thinking?.length || 0), 0)
         const est = Math.max(1, Math.round(totalChars / 3))
         const cw = tokenUsage.value.context_window
         tokenUsage.value = { estimated_tokens: est, context_window: cw, usage_pct: Math.min((est / cw) * 100, 99) }
@@ -166,22 +195,51 @@ export function useAgentConversation(agentType: string) {
     // Always update token cache for the loaded session
     const tu = sessionTokenUsage.get(sid)
     if (!tu && msgs.length > 0) {
-      const totalChars = msgs.reduce((sum, m) => sum + (m.content?.length || 0) + ((m as any).thinking?.length || 0), 0)
+      const totalChars = msgs.reduce((sum, m) => sum + (m.content?.length || 0) + (m.thinking?.length || 0), 0)
       const est = Math.max(1, Math.round(totalChars / 3))
       sessionTokenUsage.set(sid, { estimated_tokens: est, context_window: 204800, usage_pct: 0 })
     }
   }
 
+  async function loadMoreMessages() {
+    const sid = sessionId.value
+    if (!sid || !hasMoreOlder.value || loadingMore.value) return
+    loadingMore.value = true
+    try {
+      const currentLoaded = messages.value.length
+      const olderMsgs = await db.getMessages(sid, currentLoaded, MESSAGE_PAGE_SIZE)
+      if (olderMsgs.length > 0) {
+        // Prepend older messages at the beginning
+        messages.value = [...olderMsgs, ...messages.value]
+        sessionMessages.set(sid, [...olderMsgs, ...(sessionMessages.get(sid) || [])])
+      }
+      const meta = sessionMeta.get(sid)
+      hasMoreOlder.value = messages.value.length < (meta?.count ?? 0)
+    } catch (e) {
+      console.error('Failed to load more messages:', e)
+    } finally {
+      loadingMore.value = false
+    }
+  }
+
   // 构建发送给后端的历史消息（符合 MiniMax API 格式）
-  function buildHistoryMessages(): any[] {
-    const history: any[] = []
+  interface HistoryMessage {
+    role: string
+    content: string
+    tool_calls?: string
+    thinking?: string
+    raw_json?: string
+  }
+
+  function buildHistoryMessages(): HistoryMessage[] {
+    const history: HistoryMessage[] = []
 
     for (const msg of messages.value) {
       if (msg.role === 'user') {
         history.push({
           role: 'user',
           content: msg.content,
-          raw_json: (msg as any).raw_json || undefined
+          raw_json: msg.raw_json || undefined
         })
       } else if (msg.role === 'assistant') {
         history.push({
@@ -189,14 +247,14 @@ export function useAgentConversation(agentType: string) {
           content: msg.content || '',
           tool_calls: msg.tool_calls || undefined,
           thinking: msg.thinking || undefined,
-          raw_json: (msg as any).raw_json || undefined
+          raw_json: msg.raw_json || undefined
         })
-      } else if ((msg as any).role === 'tool' || (msg as any).raw_json) {
+      } else if (msg.role === 'tool' || msg.raw_json) {
         // Tool result messages (stored as user role with tool_result content blocks)
         history.push({
           role: 'user',
           content: msg.content,
-          raw_json: (msg as any).raw_json || undefined
+          raw_json: msg.raw_json || undefined
         })
       }
     }
@@ -242,6 +300,7 @@ export function useAgentConversation(agentType: string) {
     loading.value = true
     loadingSessions.add(finalSessionId)
     toolEvents.value = []
+    cacheUsage.value = { hit: 0, miss: 0, ratio: 0 }
 
     console.log('[sendMessage] Loading set to true, setting up event listener for:', `agent_stream_${finalSessionId}`)
 
@@ -335,7 +394,7 @@ export function useAgentConversation(agentType: string) {
             })
           }
           {
-            const te = { type: 'tool_start' as const, tool: ev.tool || '', tool_id: ev.tool_id || '', input: ev.input }
+            const te = { type: 'tool_start' as const, tool: ev.tool || '', tool_id: ev.tool_id || '', input: ev.input, textBefore: fullText }
             toolEvents.value.push(te)
             streamToolEvents.push(te)
             updateStreamState(finalSessionId, {
@@ -366,9 +425,11 @@ export function useAgentConversation(agentType: string) {
           })
           break
         case 'cache_usage':
-          console.log(
-            `[cache] session=${finalSessionId} hit=${ev.cache_hit_tokens} miss=${ev.cache_miss_tokens} ratio=${((ev.cache_hit_ratio || 0) * 100).toFixed(1)}%`
-          )
+          cacheUsage.value = {
+            hit: ev.cache_hit_tokens || 0,
+            miss: ev.cache_miss_tokens || 0,
+            ratio: Math.round((ev.cache_hit_ratio || 0) * 100),
+          }
           break
         case 'token_usage':
           // Never let the displayed token count decrease within a session.
@@ -498,7 +559,7 @@ export function useAgentConversation(agentType: string) {
     const msg = messages.value[messageIndex]
     if (!msg || msg.role !== 'user') return
     const content = msg.content
-    const att = (msg as any).attachments
+    const att = msg.attachments
     await sendMessage(content, att)
   }
 
@@ -549,16 +610,25 @@ export function useAgentConversation(agentType: string) {
     }
   }
 
-  function isInternalCacheMessage(msg: any): boolean {
+  interface ContentBlock {
+    type: string
+    text?: string
+    tool_use_id?: string
+    content?: string | unknown
+    tool_use?: unknown
+    thinking?: unknown
+  }
+
+  function isInternalCacheMessage(msg: ChatMessage): boolean {
     if (msg.role === 'user' && msg.content?.startsWith('## 内置参考资料')) return true
     if (msg.raw_json) {
       try {
-        const blocks = JSON.parse(msg.raw_json)
+        const blocks: ContentBlock[] = JSON.parse(msg.raw_json)
         if (Array.isArray(blocks)) {
-          if (msg.role === 'user' && blocks.some((b: any) => b.type === 'tool_result')) return true
-          if (msg.role === 'assistant' && blocks.some((b: any) => b.type === 'tool_use')) {
-            const hasText = blocks.some((b: any) => b.type === 'text' && b.text?.trim())
-            const hasThinking = blocks.some((b: any) => b.type === 'thinking')
+          if (msg.role === 'user' && blocks.some((b) => b.type === 'tool_result')) return true
+          if (msg.role === 'assistant' && blocks.some((b) => b.type === 'tool_use')) {
+            const hasText = blocks.some((b) => b.type === 'text' && (b.text ?? '').trim())
+            const hasThinking = blocks.some((b) => b.type === 'thinking')
             if (!hasText && !hasThinking) return true
           }
         }
@@ -580,9 +650,9 @@ export function useAgentConversation(agentType: string) {
     // Collect tool results from hidden tool_result messages
     const toolResults = new Map<string, string>()
     for (const m of messages.value) {
-      if ((m as any).raw_json) {
+      if (m.raw_json) {
         try {
-          const blocks = JSON.parse((m as any).raw_json)
+          const blocks = JSON.parse(m.raw_json)
           if (Array.isArray(blocks)) {
             for (const b of blocks) {
               if (b.type === 'tool_result' && b.tool_use_id && b.content) {
@@ -597,7 +667,7 @@ export function useAgentConversation(agentType: string) {
       }
     }
 
-    const result: any[] = []
+    const result: UIMessage[] = []
     for (const m of messages.value) {
       const hidden = isInternalCacheMessage(m)
       if (!hidden) {
@@ -609,22 +679,26 @@ export function useAgentConversation(agentType: string) {
             content: parts.slice(1).join('\n\n'),
           })
         } else {
-          result.push({ ...m, thinking: (m as any).thinking })
+          result.push({ ...m, thinking: m.thinking } as UIMessage)
         }
       }
       // Emit tool cards after this message (whether hidden or not)
-      if (m.role === 'assistant' && (m as any).tool_calls) {
+      if (m.role === 'assistant' && m.tool_calls) {
         try {
-          const calls = JSON.parse((m as any).tool_calls)
+          const calls = JSON.parse(m.tool_calls)
           if (Array.isArray(calls)) {
             for (const tc of calls) {
               result.push({
-                id: `tool-${tc.id}`,
-                role: 'tool',
+                id: `tool-${tc.id}` as unknown as number,
+                session_id: m.session_id,
+                role: 'tool' as const,
                 tool_calls: JSON.stringify([tc]),
                 content: toolResults.get(tc.id) || '',
                 created_at: m.created_at,
-              } as any)
+                thinking: undefined,
+                attachments: undefined,
+                raw_json: undefined,
+              } as UIMessage)
             }
           }
         } catch {}
@@ -643,11 +717,15 @@ export function useAgentConversation(agentType: string) {
     displayMessages,
     initSession,
     loadMessages,
+    loadMoreMessages,
+    hasMoreOlder,
+    loadingMore,
     sendMessage,
     clearAsk,
     clearToolEvents,
     switchGroupChat,
     tokenUsage,
+    cacheUsage,
     retryMessage,
     showRewindConfirm,
     rewindToMessage,

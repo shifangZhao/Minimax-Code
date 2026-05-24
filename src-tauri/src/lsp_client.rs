@@ -6,6 +6,7 @@
 // - Supports npx fallback for npm-based servers
 
 use crate::lsp_types::*;
+use crate::LockMap;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
@@ -46,30 +47,24 @@ pub struct LspClient {
 }
 
 impl LspClient {
-    /// Spawn an LSP server process. Returns None if the server cannot be started.
+    /// Spawn an LSP server process. Returns Err if the server cannot be started.
     pub fn spawn(
         server_id: &str,
         root: &str,
         cmd: &str,
         args: &[String],
-    ) -> Option<Self> {
-        let mut child = match hidden_cmd(cmd)
+    ) -> Result<Self, String> {
+        let mut child = hidden_cmd(cmd)
             .args(args)
             .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("[lsp] Failed to spawn {}: {}", server_id, e);
-                return None;
-            }
-        };
+            .map_err(|e| format!("[lsp] Failed to spawn {}: {}", server_id, e))?;
 
-        let stdin = child.stdin.take().expect("stdin");
-        let stdout = child.stdout.take().expect("stdout");
+        let stdin = child.stdin.take().ok_or_else(|| format!("[lsp] {}: No stdin", server_id))?;
+        let stdout = child.stdout.take().ok_or_else(|| format!("[lsp] {}: No stdout", server_id))?;
         let writer = Arc::new(Mutex::new(BufWriter::new(stdin)));
         let diagnostics: Arc<Mutex<HashMap<String, Vec<LspDiagnostic>>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -87,7 +82,7 @@ impl LspClient {
             read_loop(stdout, &reader_diags, &reader_pending, &reader_alive, &reader_sid);
         });
 
-        Some(Self {
+        Ok(Self {
             server_id: server_id.to_string(),
             root: root.to_string(),
             writer,
@@ -108,19 +103,21 @@ impl LspClient {
         root: &str,
         cmd: &str,
         args: &[String],
-    ) -> Option<Self> {
-        // Try direct
-        if let Some(client) = Self::spawn(server_id, root, cmd, args) {
-            return Some(client);
+    ) -> Result<Self, String> {
+        match Self::spawn(server_id, root, cmd, args) {
+            Ok(client) => Ok(client),
+            Err(e1) => {
+                if is_npm_server(cmd) {
+                    eprintln!("[lsp] {} not found, trying npx {}...", server_id, cmd);
+                    let mut npx_args = vec!["-y".to_string(), cmd.to_string()];
+                    npx_args.extend(args.iter().cloned());
+                    Self::spawn(server_id, root, "npx", &npx_args)
+                        .map_err(|e2| format!("{} | npx fallback: {}", e1, e2))
+                } else {
+                    Err(e1)
+                }
+            }
         }
-        // npx fallback for known npm packages
-        if is_npm_server(cmd) {
-            eprintln!("[lsp] {} not found, trying npx {}...", server_id, cmd);
-            let mut npx_args = vec!["-y".to_string(), cmd.to_string()];
-            npx_args.extend(args.iter().cloned());
-            return Self::spawn(server_id, root, "npx", &npx_args);
-        }
-        None
     }
 
     /// Check if the process is still alive.
@@ -134,7 +131,7 @@ impl LspClient {
         eprintln!("[lsp:{}] Reconnecting...", self.server_id);
 
         // Kill old process
-        let _ = self.process.lock().unwrap().kill();
+        let _ = self.process.lock_str()?.kill();
         self.alive.store(false, Ordering::SeqCst);
 
         // Spawn new process
@@ -149,7 +146,7 @@ impl LspClient {
 
         let stdin = child.stdin.take().ok_or("No stdin")?;
         let stdout = child.stdout.take().ok_or("No stdout")?;
-        *self.writer.lock().unwrap() = BufWriter::new(stdin);
+        *self.writer.lock_str()? = BufWriter::new(stdin);
 
         self.alive.store(true, Ordering::SeqCst);
         let reader_diags = self.diagnostics.clone();
@@ -160,14 +157,14 @@ impl LspClient {
             read_loop(stdout, &reader_diags, &reader_pending, &reader_alive, &reader_sid);
         });
 
-        *self.process.lock().unwrap() = child;
+        *self.process.lock_str()? = child;
 
         // Re-initialize
         self.initialize()?;
 
         // Re-open all tracked files
         let files: Vec<(String, String, String)> = {
-            let versions = self.file_versions.lock().unwrap();
+            let versions = self.file_versions.lock_str()?;
             versions.keys().map(|path| {
                 let content = std::fs::read_to_string(path).unwrap_or_default();
                 let ext = std::path::Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -183,10 +180,10 @@ impl LspClient {
         }
         // Reset version tracking to 0 after reconnect
         {
-            let mut versions = self.file_versions.lock().unwrap();
+            let mut versions = self.file_versions.lock_str()?;
             let paths: Vec<String> = versions.keys().cloned().collect();
             for path in paths {
-                *versions.get_mut(&path).unwrap() = 0;
+                *versions.get_mut(&path).ok_or_else(|| format!("path not tracked: {}", path))? = 0;
             }
         }
 
@@ -224,9 +221,9 @@ impl LspClient {
 
     /// Touch a file: sends didOpen (first time) or didChange (subsequent).
     /// Also sends workspace/didChangeWatchedFiles.
-    pub fn touch_file(&self, path: &str, content: &str, language_id: &str) {
+    pub fn touch_file(&self, path: &str, content: &str, language_id: &str) -> Result<(), String> {
         let uri = path_to_uri(path);
-        let mut versions = self.file_versions.lock().unwrap();
+        let mut versions = self.file_versions.lock_str()?;
 
         if let Some(version) = versions.get_mut(path) {
             // File already open — send didChange
@@ -254,7 +251,7 @@ impl LspClient {
                 }]
             }));
             // Clear stale diagnostics for this file
-            self.diagnostics.lock().unwrap().remove(path);
+            let _ = self.diagnostics.lock_str().map(|mut d| d.remove(path));
             self.notify("textDocument/didOpen", serde_json::json!({
                 "textDocument": {
                     "uri": uri,
@@ -264,6 +261,7 @@ impl LspClient {
                 }
             }));
         }
+        Ok(())
     }
 
     /// Wait for diagnostics to arrive for the given file.
@@ -282,12 +280,17 @@ impl LspClient {
 
     /// Get cached diagnostics for a file.
     pub fn get_diagnostics(&self, path: &str) -> Vec<LspDiagnostic> {
-        self.diagnostics.lock().unwrap().get(path).cloned().unwrap_or_default()
+        self.diagnostics.lock_str()
+            .ok()
+            .and_then(|d| d.get(path).cloned())
+            .unwrap_or_default()
     }
 
     /// Get all cached diagnostics.
     pub fn all_diagnostics(&self) -> HashMap<String, Vec<LspDiagnostic>> {
-        self.diagnostics.lock().unwrap().clone()
+        self.diagnostics.lock_str()
+            .map(|d| d.clone())
+            .unwrap_or_default()
     }
 
     /// Shut down the client and kill the process.
@@ -295,7 +298,9 @@ impl LspClient {
         self.alive.store(false, Ordering::SeqCst);
         let _ = self.request("shutdown", serde_json::json!({}), 3000);
         self.notify("exit", serde_json::json!({}));
-        let _ = self.process.lock().unwrap().kill();
+        if let Ok(mut p) = self.process.lock_str() {
+            let _ = p.kill();
+        }
     }
 
     // ---- Internal ----
@@ -308,7 +313,7 @@ impl LspClient {
         let id = self.next_request_id();
         let (tx, rx) = std::sync::mpsc::channel();
         {
-            self.pending.lock().unwrap().insert(id, tx);
+            self.pending.lock_str()?.insert(id, tx);
         }
         self.write_message(&serde_json::json!({
             "jsonrpc": "2.0",
@@ -339,7 +344,7 @@ impl LspClient {
     fn write_message(&self, msg: &Value) -> Result<(), String> {
         let body = serde_json::to_string(msg).map_err(|e| e.to_string())?;
         let header = format!("Content-Length: {}\r\n\r\n", body.len());
-        let mut writer = self.writer.lock().unwrap();
+        let mut writer = self.writer.lock_str()?;
         writer.write_all(header.as_bytes()).map_err(|e| e.to_string())?;
         writer.write_all(body.as_bytes()).map_err(|e| e.to_string())?;
         writer.flush().map_err(|e| e.to_string())?;
@@ -349,7 +354,9 @@ impl LspClient {
 
 impl Drop for LspClient {
     fn drop(&mut self) {
-        let _ = self.process.lock().unwrap().kill();
+        if let Ok(mut p) = self.process.lock_str() {
+            let _ = p.kill();
+        }
     }
 }
 
@@ -380,13 +387,17 @@ fn read_loop(
                     if let Ok(p) = serde_json::from_value::<PublishDiagnosticsParams>(params.clone()) {
                         let path = uri_to_path(&p.uri);
                         eprintln!("[lsp:{}] diagnostics: {} ({} issues)", server_id, path, p.diagnostics.len());
-                        diagnostics.lock().unwrap().insert(path, p.diagnostics);
+                        if let Ok(mut d) = diagnostics.lock() {
+                            d.insert(path, p.diagnostics);
+                        }
                     }
                 }
             }
         } else if let Some(id) = msg.get("id").and_then(|i| i.as_u64()) {
-            if let Some(tx) = pending.lock().unwrap().remove(&id) {
-                let _ = tx.send(msg);
+            if let Ok(mut p) = pending.lock() {
+                if let Some(tx) = p.remove(&id) {
+                    let _ = tx.send(msg);
+                }
             }
         }
     }

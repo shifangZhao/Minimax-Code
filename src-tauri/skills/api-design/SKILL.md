@@ -1,28 +1,28 @@
 ---
 name: api-design
-description: REST API design patterns including resource naming, status codes, pagination, filtering, error responses, versioning, and rate limiting for production APIs.
+description: REST API 设计模式，包括资源命名、状态码、分页、过滤、错误响应、版本控制和生产 API 速率限制。
 origin: ECC
 ---
 
-# API Design Patterns
+# API 设计模式
 
-Conventions and best practices for designing consistent, developer-friendly REST APIs.
+设计一致、开发者友好的 REST API 的约定和最佳实践。
 
-## When to Activate
+## 激活时机
 
-- Designing new API endpoints
-- Reviewing existing API contracts
-- Adding pagination, filtering, or sorting
-- Implementing error handling for APIs
-- Planning API versioning strategy
-- Building public or partner-facing APIs
+- 设计新的 API 端点
+- 审查现有 API 契约
+- 添加分页、过滤或排序
+- 为 API 实现错误处理
+- 规划 API 版本控制策略
+- 构建公开或合作伙伴 API
 
-## Resource Design
+## 资源设计
 
-### URL Structure
+### URL 结构
 
 ```
-# Resources are nouns, plural, lowercase, kebab-case
+# 资源是名词、复数、小写、kebab-case
 GET    /api/v1/users
 GET    /api/v1/users/:id
 POST   /api/v1/users
@@ -30,90 +30,90 @@ PUT    /api/v1/users/:id
 PATCH  /api/v1/users/:id
 DELETE /api/v1/users/:id
 
-# Sub-resources for relationships
+# 子资源用于关系
 GET    /api/v1/users/:id/orders
 POST   /api/v1/users/:id/orders
 
-# Actions that don't map to CRUD (use verbs sparingly)
+# 不映射到 CRUD 的操作（少用动词）
 POST   /api/v1/orders/:id/cancel
 POST   /api/v1/auth/login
 POST   /api/v1/auth/refresh
 ```
 
-### Naming Rules
+### 命名规则
 
 ```
-# GOOD
-/api/v1/team-members          # kebab-case for multi-word resources
-/api/v1/orders?status=active  # query params for filtering
-/api/v1/users/123/orders      # nested resources for ownership
+# 好
+/api/v1/team-members          # 多词资源用 kebab-case
+/api/v1/orders?status=active  # 查询参数用于过滤
+/api/v1/users/123/orders      # 嵌套资源表示所有权
 
-# BAD
-/api/v1/getUsers              # verb in URL
-/api/v1/user                  # singular (use plural)
-/api/v1/team_members          # snake_case in URLs
-/api/v1/users/123/getOrders   # verb in nested resource
+# 坏
+/api/v1/getUsers              # URL 中有动词
+/api/v1/user                  # 单数（用复数）
+/api/v1/team_members          # URL 中用 snake_case
+/api/v1/users/123/getOrders   # 嵌套资源中有动词
 ```
 
-## HTTP Methods and Status Codes
+## HTTP 方法和状态码
 
-### Method Semantics
+### 方法语义
 
-| Method | Idempotent | Safe | Use For |
+| 方法 | 幂等 | 安全 | 用于 |
 |--------|-----------|------|---------|
-| GET | Yes | Yes | Retrieve resources |
-| POST | No | No | Create resources, trigger actions |
-| PUT | Yes | No | Full replacement of a resource |
-| PATCH | No* | No | Partial update of a resource |
-| DELETE | Yes | No | Remove a resource |
+| GET | 是 | 是 | 检索资源 |
+| POST | 否 | 否 | 创建资源、触发操作 |
+| PUT | 是 | 否 | 完全替换资源 |
+| PATCH | 否* | 否 | 部分更新资源 |
+| DELETE | 是 | 否 | 删除资源 |
 
-*PATCH can be made idempotent with proper implementation
+*PATCH 可通过正确实现变为幂等
 
-### Status Code Reference
-
-```
-# Success
-200 OK                    — GET, PUT, PATCH (with response body)
-201 Created               — POST (include Location header)
-204 No Content            — DELETE, PUT (no response body)
-
-# Client Errors
-400 Bad Request           — Validation failure, malformed JSON
-401 Unauthorized          — Missing or invalid authentication
-403 Forbidden             — Authenticated but not authorized
-404 Not Found             — Resource doesn't exist
-409 Conflict              — Duplicate entry, state conflict
-422 Unprocessable Entity  — Semantically invalid (valid JSON, bad data)
-429 Too Many Requests     — Rate limit exceeded
-
-# Server Errors
-500 Internal Server Error — Unexpected failure (never expose details)
-502 Bad Gateway           — Upstream service failed
-503 Service Unavailable   — Temporary overload, include Retry-After
-```
-
-### Common Mistakes
+### 状态码参考
 
 ```
-# BAD: 200 for everything
+# 成功
+200 OK                    — GET、PUT、PATCH（有响应体）
+201 Created               — POST（包含 Location 头）
+204 No Content            — DELETE、PUT（无响应体）
+
+# 客户端错误
+400 Bad Request           — 验证失败、格式错误的 JSON
+401 Unauthorized          — 缺少或无效认证
+403 Forbidden             — 已认证但未授权
+404 Not Found             — 资源不存在
+409 Conflict              — 重复条目、状态冲突
+422 Unprocessable Entity  — 语义无效（有效 JSON，坏数据）
+429 Too Many Requests     — 超出速率限制
+
+# 服务器错误
+500 Internal Server Error — 意外失败（永不暴露细节）
+502 Bad Gateway           — 上游服务失败
+503 Service Unavailable   — 临时过载，包含 Retry-After
+```
+
+### 常见错误
+
+```
+# 坏：所有事都用 200
 { "status": 200, "success": false, "error": "Not found" }
 
-# GOOD: Use HTTP status codes semantically
+# 好：语义化使用 HTTP 状态码
 HTTP/1.1 404 Not Found
 { "error": { "code": "not_found", "message": "User not found" } }
 
-# BAD: 500 for validation errors
-# GOOD: 400 or 422 with field-level details
+# 坏：500 用于验证错误
+# 好：400 或 422 包含字段级详情
 
-# BAD: 200 for created resources
-# GOOD: 201 with Location header
+# 坏：200 用于创建的资源
+# 好：201 包含 Location 头
 HTTP/1.1 201 Created
 Location: /api/v1/users/abc-123
 ```
 
-## Response Format
+## 响应格式
 
-### Success Response
+### 成功响应
 
 ```json
 {
@@ -126,7 +126,7 @@ Location: /api/v1/users/abc-123
 }
 ```
 
-### Collection Response (with Pagination)
+### 集合响应（带分页）
 
 ```json
 {
@@ -148,7 +148,7 @@ Location: /api/v1/users/abc-123
 }
 ```
 
-### Error Response
+### 错误响应
 
 ```json
 {
@@ -171,10 +171,10 @@ Location: /api/v1/users/abc-123
 }
 ```
 
-### Response Envelope Variants
+### 响应信封变体
 
 ```typescript
-// Option A: Envelope with data wrapper (recommended for public APIs)
+// 选项 A：带 data 包装的信封（推荐用于公开 API）
 interface ApiResponse<T> {
   data: T;
   meta?: PaginationMeta;
@@ -189,38 +189,38 @@ interface ApiError {
   };
 }
 
-// Option B: Flat response (simpler, common for internal APIs)
-// Success: just return the resource directly
-// Error: return error object
-// Distinguish by HTTP status code
+// 选项 B：扁平响应（更简单，常用于内部 API）
+// 成功：直接返回资源
+// 错误：返回错误对象
+// 通过 HTTP 状态码区分
 ```
 
-## Pagination
+## 分页
 
-### Offset-Based (Simple)
+### 基于偏移量（简单）
 
 ```
 GET /api/v1/users?page=2&per_page=20
 
-# Implementation
+# 实现
 SELECT * FROM users
 ORDER BY created_at DESC
 LIMIT 20 OFFSET 20;
 ```
 
-**Pros:** Easy to implement, supports "jump to page N"
-**Cons:** Slow on large offsets (OFFSET 100000), inconsistent with concurrent inserts
+**优点：** 易于实现，支持"跳到第 N 页"
+**缺点：** 大偏移量时慢（OFFSET 100000），并发插入时不一致
 
-### Cursor-Based (Scalable)
+### 基于游标（可扩展）
 
 ```
 GET /api/v1/users?cursor=eyJpZCI6MTIzfQ&limit=20
 
-# Implementation
+# 实现
 SELECT * FROM users
 WHERE id > :cursor_id
 ORDER BY id ASC
-LIMIT 21;  -- fetch one extra to determine has_next
+LIMIT 21;  -- 多取一条来判断 has_next
 ```
 
 ```json
@@ -233,83 +233,83 @@ LIMIT 21;  -- fetch one extra to determine has_next
 }
 ```
 
-**Pros:** Consistent performance regardless of position, stable with concurrent inserts
-**Cons:** Cannot jump to arbitrary page, cursor is opaque
+**优点：** 无论位置如何性能一致，并发插入时稳定
+**缺点：** 无法跳到任意页，游标不透明
 
-### When to Use Which
+### 何时使用哪种
 
-| Use Case | Pagination Type |
+| 场景 | 分页类型 |
 |----------|----------------|
-| Admin dashboards, small datasets (<10K) | Offset |
-| Infinite scroll, feeds, large datasets | Cursor |
-| Public APIs | Cursor (default) with offset (optional) |
-| Search results | Offset (users expect page numbers) |
+| 管理后台、小数据集（<10K） | 偏移量 |
+| 无限滚动、订阅源、大型数据集 | 游标 |
+| 公开 API | 游标（默认）+ 偏移量（可选） |
+| 搜索结果 | 偏移量（用户期望页码） |
 
-## Filtering, Sorting, and Search
+## 过滤、排序和搜索
 
-### Filtering
+### 过滤
 
 ```
-# Simple equality
+# 简单相等
 GET /api/v1/orders?status=active&customer_id=abc-123
 
-# Comparison operators (use bracket notation)
+# 比较运算符（使用括号表示法）
 GET /api/v1/products?price[gte]=10&price[lte]=100
 GET /api/v1/orders?created_at[after]=2025-01-01
 
-# Multiple values (comma-separated)
+# 多值（逗号分隔）
 GET /api/v1/products?category=electronics,clothing
 
-# Nested fields (dot notation)
+# 嵌套字段（点表示法）
 GET /api/v1/orders?customer.country=US
 ```
 
-### Sorting
+### 排序
 
 ```
-# Single field (prefix - for descending)
+# 单字段（前缀 - 表示降序）
 GET /api/v1/products?sort=-created_at
 
-# Multiple fields (comma-separated)
+# 多字段（逗号分隔）
 GET /api/v1/products?sort=-featured,price,-created_at
 ```
 
-### Full-Text Search
+### 全文搜索
 
 ```
-# Search query parameter
+# 搜索查询参数
 GET /api/v1/products?q=wireless+headphones
 
-# Field-specific search
+# 字段特定搜索
 GET /api/v1/users?email=alice
 ```
 
-### Sparse Fieldsets
+### 稀疏字段集
 
 ```
-# Return only specified fields (reduces payload)
+# 只返回指定字段（减少 payload）
 GET /api/v1/users?fields=id,name,email
 GET /api/v1/orders?fields=id,total,status&include=customer.name
 ```
 
-## Authentication and Authorization
+## 认证和授权
 
-### Token-Based Auth
+### 基于 Token 的认证
 
 ```
-# Bearer token in Authorization header
+# Authorization 头中的 Bearer token
 GET /api/v1/users
 Authorization: Bearer eyJhbGciOiJIUzI1NiIs...
 
-# API key (for server-to-server)
+# API 密钥（用于服务端到服务端）
 GET /api/v1/data
 X-API-Key: sk_live_abc123
 ```
 
-### Authorization Patterns
+### 授权模式
 
 ```typescript
-// Resource-level: check ownership
+// 资源级别：检查所有权
 app.get("/api/v1/orders/:id", async (req, res) => {
   const order = await Order.findById(req.params.id);
   if (!order) return res.status(404).json({ error: { code: "not_found" } });
@@ -317,16 +317,16 @@ app.get("/api/v1/orders/:id", async (req, res) => {
   return res.json({ data: order });
 });
 
-// Role-based: check permissions
+// 基于角色：检查权限
 app.delete("/api/v1/users/:id", requireRole("admin"), async (req, res) => {
   await User.delete(req.params.id);
   return res.status(204).send();
 });
 ```
 
-## Rate Limiting
+## 速率限制
 
-### Headers
+### 头信息
 
 ```
 HTTP/1.1 200 OK
@@ -334,7 +334,7 @@ X-RateLimit-Limit: 100
 X-RateLimit-Remaining: 95
 X-RateLimit-Reset: 1640000000
 
-# When exceeded
+# 超出时
 HTTP/1.1 429 Too Many Requests
 Retry-After: 60
 {
@@ -345,58 +345,58 @@ Retry-After: 60
 }
 ```
 
-### Rate Limit Tiers
+### 速率限制层级
 
-| Tier | Limit | Window | Use Case |
+| 层级 | 限制 | 窗口 | 场景 |
 |------|-------|--------|----------|
-| Anonymous | 30/min | Per IP | Public endpoints |
-| Authenticated | 100/min | Per user | Standard API access |
-| Premium | 1000/min | Per API key | Paid API plans |
-| Internal | 10000/min | Per service | Service-to-service |
+| 匿名 | 30/分钟 | 每次 IP | 公开端点 |
+| 已认证 | 100/分钟 | 每次用户 | 标准 API 访问 |
+| 高级 | 1000/分钟 | 每次 API 密钥 | 付费 API 计划 |
+| 内部 | 10000/分钟 | 每次服务 | 服务间调用 |
 
-## Versioning
+## 版本控制
 
-### URL Path Versioning (Recommended)
+### URL 路径版本控制（推荐）
 
 ```
 /api/v1/users
 /api/v2/users
 ```
 
-**Pros:** Explicit, easy to route, cacheable
-**Cons:** URL changes between versions
+**优点：** 显式、易于路由、可缓存
+**缺点：** 版本间 URL 变化
 
-### Header Versioning
+### Header 版本控制
 
 ```
 GET /api/users
 Accept: application/vnd.myapp.v2+json
 ```
 
-**Pros:** Clean URLs
-**Cons:** Harder to test, easy to forget
+**优点：** URL 干净
+**缺点：** 难以测试，容易忘记
 
-### Versioning Strategy
+### 版本控制策略
 
 ```
-1. Start with /api/v1/ — don't version until you need to
-2. Maintain at most 2 active versions (current + previous)
-3. Deprecation timeline:
-   - Announce deprecation (6 months notice for public APIs)
-   - Add Sunset header: Sunset: Sat, 01 Jan 2026 00:00:00 GMT
-   - Return 410 Gone after sunset date
-4. Non-breaking changes don't need a new version:
-   - Adding new fields to responses
-   - Adding new optional query parameters
-   - Adding new endpoints
-5. Breaking changes require a new version:
-   - Removing or renaming fields
-   - Changing field types
-   - Changing URL structure
-   - Changing authentication method
+1. 从 /api/v1/ 开始——直到需要时才版本化
+2. 最多维护 2 个活动版本（当前 + 上一个）
+3. 弃用时间线：
+   - 宣布弃用（公开 API 给 6 个月通知）
+   - 添加 Sunset 头：Sunset: Sat, 01 Jan 2026 00:00:00 GMT
+   - 日落日期后返回 410 Gone
+4. 非破坏性变更不需要新版本：
+   - 向响应添加新字段
+   - 添加新的可选查询参数
+   - 添加新端点
+5. 破坏性变更需要新版本：
+   - 删除或重命名字段
+   - 更改字段类型
+   - 更改 URL 结构
+   - 更改认证方法
 ```
 
-## Implementation Patterns
+## 实现模式
 
 ### TypeScript (Next.js API Route)
 
@@ -505,19 +505,19 @@ func (h *UserHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-## API Design Checklist
+## API 设计检查清单
 
-Before shipping a new endpoint:
+发布新端点前：
 
-- [ ] Resource URL follows naming conventions (plural, kebab-case, no verbs)
-- [ ] Correct HTTP method used (GET for reads, POST for creates, etc.)
-- [ ] Appropriate status codes returned (not 200 for everything)
-- [ ] Input validated with schema (Zod, Pydantic, Bean Validation)
-- [ ] Error responses follow standard format with codes and messages
-- [ ] Pagination implemented for list endpoints (cursor or offset)
-- [ ] Authentication required (or explicitly marked as public)
-- [ ] Authorization checked (user can only access their own resources)
-- [ ] Rate limiting configured
-- [ ] Response does not leak internal details (stack traces, SQL errors)
-- [ ] Consistent naming with existing endpoints (camelCase vs snake_case)
-- [ ] Documented (OpenAPI/Swagger spec updated)
+- [ ] 资源 URL 遵循命名约定（复数、kebab-case、无动词）
+- [ ] 使用正确的 HTTP 方法（GET 用于读取，POST 用于创建等）
+- [ ] 返回适当的状态码（不是所有事都用 200）
+- [ ] 使用 schema 验证输入（Zod、Pydantic、Bean Validation）
+- [ ] 错误响应遵循标准格式，包含代码和消息
+- [ ] 列表端点实现分页（游标或偏移量）
+- [ ] 要求认证（或明确标记为公开）
+- [ ] 检查授权（用户只能访问自己的资源）
+- [ ] 配置速率限制
+- [ ] 响应不泄露内部细节（堆栈跟踪、SQL 错误）
+- [ ] 与现有端点命名一致（camelCase vs snake_case）
+- [ ] 已记录（更新 OpenAPI/Swagger 规范）

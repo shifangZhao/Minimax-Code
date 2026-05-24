@@ -1,93 +1,93 @@
 ---
 name: benchmark
-description: Use this skill to measure performance baselines, detect regressions before/after PRs, and compare stack alternatives.
+description: 使用此技能测量性能基准、检测 PR 前后的回归，并比较技术栈替代方案。
 origin: ECC
 ---
 
-# Benchmark — Performance Baseline & Regression Detection
+# 基准测试 — 性能基准与回归检测
 
-## When to Use
+## 使用场景
 
-- Before and after a PR to measure performance impact
-- Setting up performance baselines for a project
-- When users report "it feels slow"
-- Before a launch — ensure you meet performance targets
-- Comparing your stack against alternatives
+- PR 前后测量性能影响
+- 为项目设置性能基准
+- 当用户报告"感觉变慢了"
+- 发布前——确保达到性能目标
+- 与替代方案比较你的技术栈
 
-## How It Works
+## 工作原理
 
-### Mode 1: Page Performance
+### 模式 1：页面性能
 
-Measures real browser metrics via browser MCP:
-
-```
-1. Navigate to each target URL
-2. Measure Core Web Vitals:
-   - LCP (Largest Contentful Paint) — target < 2.5s
-   - CLS (Cumulative Layout Shift) — target < 0.1
-   - INP (Interaction to Next Paint) — target < 200ms
-   - FCP (First Contentful Paint) — target < 1.8s
-   - TTFB (Time to First Byte) — target < 800ms
-3. Measure resource sizes:
-   - Total page weight (target < 1MB)
-   - JS bundle size (target < 200KB gzipped)
-   - CSS size
-   - Image weight
-   - Third-party script weight
-4. Count network requests
-5. Check for render-blocking resources
-```
-
-### Mode 2: API Performance
-
-Benchmarks API endpoints:
+通过浏览器 MCP 测量真实浏览器指标：
 
 ```
-1. Hit each endpoint 100 times
-2. Measure: p50, p95, p99 latency
-3. Track: response size, status codes
-4. Test under load: 10 concurrent requests
-5. Compare against SLA targets
+1. 导航到每个目标 URL
+2. 测量核心 Web 指标：
+   - LCP（最大内容绘制）— 目标 < 2.5s
+   - CLS（累积布局偏移）— 目标 < 0.1
+   - INP（交互到下一绘制）— 目标 < 200ms
+   - FCP（首次内容绘制）— 目标 < 1.8s
+   - TTFB（首字节时间）— 目标 < 800ms
+3. 测量资源大小：
+   - 总页面重量（目标 < 1MB）
+   - JS 包大小（目标 < 200KB gzip 后）
+   - CSS 大小
+   - 图片重量
+   - 第三方脚本重量
+4. 统计网络请求
+5. 检查渲染阻塞资源
 ```
 
-### Mode 3: Build Performance
+### 模式 2：API 性能
 
-Measures development feedback loop:
-
-```
-1. Cold build time
-2. Hot reload time (HMR)
-3. Test suite duration
-4. TypeScript check time
-5. Lint time
-6. Docker build time
-```
-
-### Mode 4: Before/After Comparison
-
-Run before and after a change to measure impact:
+基准测试 API 端点：
 
 ```
-/benchmark baseline    # saves current metrics
-# ... make changes ...
-/benchmark compare     # compares against baseline
+1. 每个端点 100 次
+2. 测量：p50、p95、p99 延迟
+3. 跟踪：响应大小、状态码
+4. 负载测试：10 个并发请求
+5. 与 SLA 目标比较
 ```
 
-Output:
+### 模式 3：构建性能
+
+测量开发反馈循环：
+
 ```
-| Metric | Before | After | Delta | Verdict |
+1. 冷构建时间
+2. 热重载时间（HMR）
+3. 测试套件持续时间
+4. TypeScript 检查时间
+5. Lint 时间
+6. Docker 构建时间
+```
+
+### 模式 4：前后比较
+
+在变更前后运行以测量影响：
+
+```
+/benchmark baseline    # 保存当前指标
+# ... 进行变更 ...
+/benchmark compare     # 与基准比较
+```
+
+输出：
+```
+| 指标 | 之前 | 之后 | 差异 | 判断 |
 |--------|--------|-------|-------|---------|
-| LCP | 1.2s | 1.4s | +200ms | WARNING: WARN |
-| Bundle | 180KB | 175KB | -5KB | ✓ BETTER |
-| Build | 12s | 14s | +2s | WARNING: WARN |
+| LCP | 1.2s | 1.4s | +200ms | 警告 |
+| Bundle | 180KB | 175KB | -5KB | ✓ 更好 |
+| 构建 | 12s | 14s | +2s | 警告 |
 ```
 
-## Output
+## 输出
 
-Stores baselines in `.ecc/benchmarks/` as JSON. Git-tracked so the team shares baselines.
+将基准存储在 `.ecc/benchmarks/` 作为 JSON。Git 跟踪以便团队共享基准。
 
-## Integration
+## 集成
 
-- CI: run `/benchmark compare` on every PR
-- Pair with `/canary-watch` for post-deploy monitoring
-- Pair with `/browser-qa` for full pre-ship checklist
+- CI：在每个 PR 上运行 `/benchmark compare`
+- 与 `/canary-watch` 配对用于部署后监控
+- 与 `/browser-qa` 配对用于完整发货前检查清单

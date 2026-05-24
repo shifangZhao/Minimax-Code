@@ -1,49 +1,49 @@
 ---
 name: rust-patterns
-description: Idiomatic Rust patterns, ownership, error handling, traits, concurrency, and best practices for building safe, performant applications.
+description: 惯用 Rust 模式、所有权、错误处理、trait、并发和用于构建安全、高性能应用程序的最佳实践。
 origin: ECC
 ---
 
-# Rust Development Patterns
+# Rust 开发模式
 
-Idiomatic Rust patterns and best practices for building safe, performant, and maintainable applications.
+用于构建安全、高性能和可维护应用程序的惯用 Rust 模式和最佳实践。
 
-## When to Use
+## 激活时机
 
-- Writing new Rust code
-- Reviewing Rust code
-- Refactoring existing Rust code
-- Designing crate structure and module layout
+- 编写新的 Rust 代码
+- 审查 Rust 代码
+- 重构现有 Rust 代码
+- 设计 crate 结构和模块布局
 
-## How It Works
+## 工作原理
 
-This skill enforces idiomatic Rust conventions across six key areas: ownership and borrowing to prevent data races at compile time, `Result`/`?` error propagation with `thiserror` for libraries and `anyhow` for applications, enums and exhaustive pattern matching to make illegal states unrepresentable, traits and generics for zero-cost abstraction, safe concurrency via `Arc<Mutex<T>>`, channels, and async/await, and minimal `pub` surfaces organized by domain.
+此技能在六个关键领域强制执行惯用 Rust 约定：所有权和借用以在编译时防止数据竞争，`Result`/`?` 错误传播，库用 `thiserror` 应用用 `anyhow`，枚举和穷尽模式匹配使非法状态无法表示，trait 和泛型用于零成本抽象，通过 `Arc<Mutex<T>>`、通道和 async/await 实现安全并发，以及按领域组织的最小 `pub` 表面。
 
-## Core Principles
+## 核心原则
 
-### 1. Ownership and Borrowing
+### 1. 所有权和借用
 
-Rust's ownership system prevents data races and memory bugs at compile time.
+Rust 的所有权系统在编译时防止数据竞争和内存 bug。
 
 ```rust
-// Good: Pass references when you don't need ownership
+// 好：不需要所有权时传递引用
 fn process(data: &[u8]) -> usize {
     data.len()
 }
 
-// Good: Take ownership only when you need to store or consume
+// 好：仅在需要存储或消费时获取所有权
 fn store(data: Vec<u8>) -> Record {
     Record { payload: data }
 }
 
-// Bad: Cloning unnecessarily to avoid borrow checker
+// 坏：不必要地克隆以避免借用检查器
 fn process_bad(data: &Vec<u8>) -> usize {
-    let cloned = data.clone(); // Wasteful — just borrow
+    let cloned = data.clone(); // 浪费 — 直接借用即可
     cloned.len()
 }
 ```
 
-### Use `Cow` for Flexible Ownership
+### 使用 `Cow` 实现灵活所有权
 
 ```rust
 use std::borrow::Cow;
@@ -52,17 +52,17 @@ fn normalize(input: &str) -> Cow<'_, str> {
     if input.contains(' ') {
         Cow::Owned(input.replace(' ', "_"))
     } else {
-        Cow::Borrowed(input) // Zero-cost when no mutation needed
+        Cow::Borrowed(input) // 不需要变更时零成本
     }
 }
 ```
 
-## Error Handling
+## 错误处理
 
-### Use `Result` and `?` — Never `unwrap()` in Production
+### 使用 `Result` 和 `?` — 生产代码中绝不使用 `unwrap()`
 
 ```rust
-// Good: Propagate errors with context
+// 好：用上下文传播错误
 use anyhow::{Context, Result};
 
 fn load_config(path: &str) -> Result<Config> {
@@ -73,17 +73,17 @@ fn load_config(path: &str) -> Result<Config> {
     Ok(config)
 }
 
-// Bad: Panics on error
+// 坏：错误时 panic
 fn load_config_bad(path: &str) -> Config {
-    let content = std::fs::read_to_string(path).unwrap(); // Panics!
+    let content = std::fs::read_to_string(path).unwrap(); // Panic!
     toml::from_str(&content).unwrap()
 }
 ```
 
-### Library Errors with `thiserror`, Application Errors with `anyhow`
+### 库错误用 `thiserror`，应用错误用 `anyhow`
 
 ```rust
-// Library code: structured, typed errors
+// 库代码：结构化、类型化错误
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -96,7 +96,7 @@ pub enum StorageError {
     InvalidData(String),
 }
 
-// Application code: flexible error handling
+// 应用代码：灵活错误处理
 use anyhow::{bail, Result};
 
 fn run() -> Result<()> {
@@ -108,17 +108,17 @@ fn run() -> Result<()> {
 }
 ```
 
-### `Option` Combinators Over Nested Matching
+### `Option` 组合器而非嵌套匹配
 
 ```rust
-// Good: Combinator chain
+// 好：组合器链
 fn find_user_email(users: &[User], id: u64) -> Option<String> {
     users.iter()
         .find(|u| u.id == id)
         .map(|u| u.email.clone())
 }
 
-// Bad: Deeply nested matching
+// 坏：深度嵌套匹配
 fn find_user_email_bad(users: &[User], id: u64) -> Option<String> {
     match users.iter().find(|u| u.id == id) {
         Some(user) => match &user.email {
@@ -129,12 +129,12 @@ fn find_user_email_bad(users: &[User], id: u64) -> Option<String> {
 }
 ```
 
-## Enums and Pattern Matching
+## 枚举和模式匹配
 
-### Model States as Enums
+### 将状态建模为枚举
 
 ```rust
-// Good: Impossible states are unrepresentable
+// 好：不可能的状态无法表示
 enum ConnectionState {
     Disconnected,
     Connecting { attempt: u32 },
@@ -154,46 +154,46 @@ fn handle(state: &ConnectionState) {
 }
 ```
 
-### Exhaustive Matching — No Catch-All for Business Logic
+### 穷尽匹配 — 业务逻辑不用全匹配
 
 ```rust
-// Good: Handle every variant explicitly
+// 好：显式处理每个变体
 match command {
     Command::Start => start_service(),
     Command::Stop => stop_service(),
     Command::Restart => restart_service(),
-    // Adding a new variant forces handling here
+    // 添加新变体会强制在此处理
 }
 
-// Bad: Wildcard hides new variants
+// 坏：通配符隐藏新变体
 match command {
     Command::Start => start_service(),
-    _ => {} // Silently ignores Stop, Restart, and future variants
+    _ => {} // 静默忽略 Stop、Restart 和未来变体
 }
 ```
 
-## Traits and Generics
+## Trait 和泛型
 
-### Accept Generics, Return Concrete Types
+### 接受泛型，返回具体类型
 
 ```rust
-// Good: Generic input, concrete output
+// 好：泛型输入，具体输出
 fn read_all(reader: &mut impl Read) -> std::io::Result<Vec<u8>> {
     let mut buf = Vec::new();
     reader.read_to_end(&mut buf)?;
     Ok(buf)
 }
 
-// Good: Trait bounds for multiple constraints
+// 好：多约束的 trait bounds
 fn process<T: Display + Send + 'static>(item: T) -> String {
     format!("processed: {item}")
 }
 ```
 
-### Trait Objects for Dynamic Dispatch
+### Trait 对象用于动态分发
 
 ```rust
-// Use when you need heterogeneous collections or plugin systems
+// 当需要异构集合或插件系统时使用
 trait Handler: Send + Sync {
     fn handle(&self, request: &Request) -> Response;
 }
@@ -202,33 +202,33 @@ struct Router {
     handlers: Vec<Box<dyn Handler>>,
 }
 
-// Use generics when you need performance (monomorphization)
+// 当需要性能时使用泛型（单态化）
 fn fast_process<H: Handler>(handler: &H, request: &Request) -> Response {
     handler.handle(request)
 }
 ```
 
-### Newtype Pattern for Type Safety
+### Newtype 模式用于类型安全
 
 ```rust
-// Good: Distinct types prevent mixing up arguments
+// 好：不同类型防止参数混淆
 struct UserId(u64);
 struct OrderId(u64);
 
 fn get_order(user: UserId, order: OrderId) -> Result<Order> {
-    // Can't accidentally swap user and order IDs
+    // 不会意外交换 user 和 order ID
     todo!()
 }
 
-// Bad: Easy to swap arguments
+// 坏：容易交换参数
 fn get_order_bad(user_id: u64, order_id: u64) -> Result<Order> {
     todo!()
 }
 ```
 
-## Structs and Data Modeling
+## 结构体和数据建模
 
-### Builder Pattern for Complex Construction
+### 复杂构造的 Builder 模式
 
 ```rust
 struct ServerConfig {
@@ -252,21 +252,21 @@ impl ServerConfigBuilder {
     }
 }
 
-// Usage: ServerConfig::builder("localhost", 8080).max_connections(200).build()
+// 使用：ServerConfig::builder("localhost", 8080).max_connections(200).build()
 ```
 
-## Iterators and Closures
+## 迭代器和闭包
 
-### Prefer Iterator Chains Over Manual Loops
+### 优先使用迭代器链而非手动循环
 
 ```rust
-// Good: Declarative, lazy, composable
+// 好：声明式、惰性、可组合
 let active_emails: Vec<String> = users.iter()
     .filter(|u| u.is_active)
     .map(|u| u.email.clone())
     .collect();
 
-// Bad: Imperative accumulation
+// 坏：命令式累积
 let mut active_emails = Vec::new();
 for user in &users {
     if user.is_active {
@@ -275,21 +275,21 @@ for user in &users {
 }
 ```
 
-### Use `collect()` with Type Annotation
+### 使用类型注解的 `collect()`
 
 ```rust
-// Collect into different types
+// 收集到不同类型
 let names: Vec<_> = items.iter().map(|i| &i.name).collect();
 let lookup: HashMap<_, _> = items.iter().map(|i| (i.id, i)).collect();
 let combined: String = parts.iter().copied().collect();
 
-// Collect Results — short-circuits on first error
+// 收集 Result — 短路首次错误
 let parsed: Result<Vec<i32>, _> = strings.iter().map(|s| s.parse()).collect();
 ```
 
-## Concurrency
+## 并发
 
-### `Arc<Mutex<T>>` for Shared Mutable State
+### `Arc<Mutex<T>>` 用于共享可变状态
 
 ```rust
 use std::sync::{Arc, Mutex};
@@ -308,12 +308,12 @@ for handle in handles {
 }
 ```
 
-### Channels for Message Passing
+### 通道用于消息传递
 
 ```rust
 use std::sync::mpsc;
 
-let (tx, rx) = mpsc::sync_channel(16); // Bounded channel with backpressure
+let (tx, rx) = mpsc::sync_channel(16); // 带背压的有界通道
 
 for i in 0..5 {
     let tx = tx.clone();
@@ -321,14 +321,14 @@ for i in 0..5 {
         tx.send(format!("message {i}")).expect("receiver disconnected");
     });
 }
-drop(tx); // Close sender so rx iterator terminates
+drop(tx); // 关闭发送者以便 rx 迭代器终止
 
 for msg in rx {
     println!("{msg}");
 }
 ```
 
-### Async with Tokio
+### 使用 Tokio 的 Async
 
 ```rust
 use tokio::time::Duration;
@@ -345,7 +345,7 @@ async fn fetch_with_timeout(url: &str) -> Result<String> {
     response.text().await.context("failed to read body")
 }
 
-// Spawn concurrent tasks
+// 生成并发任务
 async fn fetch_all(urls: Vec<String>) -> Vec<Result<String>> {
     let handles: Vec<_> = urls.into_iter()
         .map(|url| tokio::spawn(async move {
@@ -361,189 +361,188 @@ async fn fetch_all(urls: Vec<String>) -> Vec<Result<String>> {
 }
 ```
 
-## Unsafe Code
+## Unsafe 代码
 
-### When Unsafe Is Acceptable
+### Unsafe 可接受的情况
 
 ```rust
-// Acceptable: FFI boundary with documented invariants (Rust 2024+)
+// 可接受：带有文档化不变量的 FFI 边界 (Rust 2024+)
 /// # Safety
-/// `ptr` must be a valid, aligned pointer to an initialized `Widget`.
+/// `ptr` 必须是有效的、对齐的指向已初始化 `Widget` 的指针。
 unsafe fn widget_from_raw<'a>(ptr: *const Widget) -> &'a Widget {
-    // SAFETY: caller guarantees ptr is valid and aligned
+    // SAFETY: 调用者保证 ptr 有效且对齐
     unsafe { &*ptr }
 }
 
-// Acceptable: Performance-critical path with proof of correctness
-// SAFETY: index is always < len due to the loop bound
+// 可接受：性能关键路径配合正确性证明
+// SAFETY: 由于循环边界，index 始终 < len
 unsafe { slice.get_unchecked(index) }
 ```
 
-### When Unsafe Is NOT Acceptable
+### Unsafe 不可接受的情况
 
 ```rust
-// Bad: Using unsafe to bypass borrow checker
-// Bad: Using unsafe for convenience
-// Bad: Using unsafe without a Safety comment
-// Bad: Transmuting between unrelated types
+// 坏：使用 unsafe 绕过借用检查器
+// 坏：使用 unsafe 图方便
+// 坏：使用 unsafe 但没有 Safety 注释
+// 坏：在不相关的类型之间进行 transmute
 ```
 
-## Module System and Crate Structure
+## 模块系统和 Crate 结构
 
-### Organize by Domain, Not by Type
+### 按领域组织，而非按类型
 
 ```text
 my_app/
 ├── src/
 │   ├── main.rs
 │   ├── lib.rs
-│   ├── auth/          # Domain module
+│   ├── auth/          # 领域模块
 │   │   ├── mod.rs
 │   │   ├── token.rs
 │   │   └── middleware.rs
-│   ├── orders/        # Domain module
+│   ├── orders/        # 领域模块
 │   │   ├── mod.rs
 │   │   ├── model.rs
 │   │   └── service.rs
-│   └── db/            # Infrastructure
+│   └── db/            # 基础设施
 │       ├── mod.rs
 │       └── pool.rs
-├── tests/             # Integration tests
-├── benches/           # Benchmarks
+├── tests/             # 集成测试
+├── benches/           # 基准测试
 └── Cargo.toml
 ```
 
-### Visibility — Expose Minimally
+### 可见性 — 最小化暴露
 
 ```rust
-// Good: pub(crate) for internal sharing
+// 好：pub(crate) 用于内部共享
 pub(crate) fn validate_input(input: &str) -> bool {
     !input.is_empty()
 }
 
-// Good: Re-export public API from lib.rs
+// 好：从 lib.rs 重导出公共 API
 pub mod auth;
 pub use auth::AuthMiddleware;
 
-// Bad: Making everything pub
-pub fn internal_helper() {} // Should be pub(crate) or private
+// 坏：让一切都 pub
+pub fn internal_helper() {} // 应该是 pub(crate) 或 private
 ```
 
-## Tooling Integration
+## 工具集成
 
-### Essential Commands
+### 基本命令
 
 ```bash
-# Build and check
+# 构建和检查
 cargo build
-cargo check              # Fast type checking without codegen
-cargo clippy             # Lints and suggestions
-cargo fmt                # Format code
+cargo check              # 快速类型检查，不生成代码
+cargo clippy             # Lint 和建议
+cargo fmt                # 格式化代码
 
-# Testing
+# 测试
 cargo test
-cargo test -- --nocapture    # Show println output
-cargo test --lib             # Unit tests only
-cargo test --test integration # Integration tests only
+cargo test -- --nocapture    # 显示 println 输出
+cargo test --lib             # 仅单元测试
+cargo test --test integration # 仅集成测试
 
-# Dependencies
-cargo audit              # Security audit
-cargo tree               # Dependency tree
-cargo update             # Update dependencies
+# 依赖
+cargo audit              # 安全审计
+cargo tree               # 依赖树
+cargo update             # 更新依赖
 
-# Performance
-cargo bench              # Run benchmarks
+# 性能
+cargo bench              # 运行基准测试
 ```
 
-## Quick Reference: Rust Idioms
+## 快速参考：Rust 惯用语法
 
-| Idiom | Description |
+| 惯用语法 | 描述 |
 |-------|-------------|
-| Borrow, don't clone | Pass `&T` instead of cloning unless ownership is needed |
-| Make illegal states unrepresentable | Use enums to model valid states only |
-| `?` over `unwrap()` | Propagate errors, never panic in library/production code |
-| Parse, don't validate | Convert unstructured data to typed structs at the boundary |
-| Newtype for type safety | Wrap primitives in newtypes to prevent argument swaps |
-| Prefer iterators over loops | Declarative chains are clearer and often faster |
-| `#[must_use]` on Results | Ensure callers handle return values |
-| `Cow` for flexible ownership | Avoid allocations when borrowing suffices |
-| Exhaustive matching | No wildcard `_` for business-critical enums |
-| Minimal `pub` surface | Use `pub(crate)` for internal APIs |
+| 借用，不要克隆 | 除非需要所有权否则传 `&T` |
+| 使非法状态无法表示 | 使用枚举仅建模有效状态 |
+| 用 `?` 而非 `unwrap()` | 传播错误，库/生产代码永不 panic |
+| 解析，不要验证 | 在边界将非结构化数据转换为类型化结构体 |
+| Newtype 用于类型安全 | 将原语包装在 newtype 中防止参数交换 |
+| 优先使用迭代器而非循环 | 声明式链更清晰且通常更快 |
+| `#[must_use]` 用于 Result | 确保调用者处理返回值 |
+| `Cow` 实现灵活所有权 | 借用足够时避免分配 |
+| 穷尽匹配 | 业务关键枚举不用通配符 `_` |
+| 最小 `pub` 表面 | 对内部 API 使用 `pub(crate)` |
 
-## Anti-Patterns to Avoid
+## 应避免的反模式
 
 ```rust
-// Bad: .unwrap() in production code
+// 坏：生产代码中 .unwrap()
 let value = map.get("key").unwrap();
 
-// Bad: .clone() to satisfy borrow checker without understanding why
+// 坏：不理解为什么就克隆以满足借用检查器
 let data = expensive_data.clone();
 process(&original, &data);
 
-// Bad: Using String when &str suffices
-fn greet(name: String) { /* should be &str */ }
+// 坏：能用 &str 时用 String
+fn greet(name: String) { /* 应该是 &str */ }
 
-// Bad: Box<dyn Error> in libraries (use thiserror instead)
+// 坏：库中用 Box<dyn Error>（用 thiserror 代替）
 fn parse(input: &str) -> Result<Data, Box<dyn std::error::Error>> { todo!() }
 
-// Bad: Ignoring must_use warnings
-let _ = validate(input); // Silently discarding a Result
+// 坏：忽略 must_use 警告
+let _ = validate(input); // 静默丢弃 Result
 
-// Bad: Blocking in async context
+// 坏：在 async 上下文中阻塞
 async fn bad_async() {
-    std::thread::sleep(Duration::from_secs(1)); // Blocks the executor!
-    // Use: tokio::time::sleep(Duration::from_secs(1)).await;
+    std::thread::sleep(Duration::from_secs(1)); // 阻塞执行器！
+    // 使用：tokio::time::sleep(Duration::from_secs(1)).await;
 }
 ```
 
-**Remember**: If it compiles, it's probably correct — but only if you avoid `unwrap()`, minimize `unsafe`, and let the type system work for you.
-
+**记住**：如果能编译，可能是正确的 — 但仅当你避免 `unwrap()`、最小化 `unsafe`，并让类型系统为你工作。
 
 ---
 
 ---
 name: rust-testing
-description: Rust testing patterns including unit tests, integration tests, async testing, property-based testing, mocking, and coverage. Follows TDD methodology.
+description: Rust 测试模式，包括单元测试、集成测试、异步测试、属性测试、mocking 和覆盖率。遵循 TDD 方法论。
 origin: ECC
 ---
 
-# Rust Testing Patterns
+# Rust 测试模式
 
-Comprehensive Rust testing patterns for writing reliable, maintainable tests following TDD methodology.
+遵循 TDD 方法论的可靠、可维护测试的综合 Rust 测试模式。
 
-## When to Use
+## 激活时机
 
-- Writing new Rust functions, methods, or traits
-- Adding test coverage to existing code
-- Creating benchmarks for performance-critical code
-- Implementing property-based tests for input validation
-- Following TDD workflow in Rust projects
+- 编写新的 Rust 函数、方法或 trait
+- 为现有代码添加测试覆盖率
+- 为性能关键代码创建基准测试
+- 为输入验证实现属性测试
+- 在 Rust 项目中遵循 TDD 工作流
 
-## How It Works
+## 工作原理
 
-1. **Identify target code** — Find the function, trait, or module to test
-2. **Write a test** — Use `#[test]` in a `#[cfg(test)]` module, rstest for parameterized tests, or proptest for property-based tests
-3. **Mock dependencies** — Use mockall to isolate the unit under test
-4. **Run tests (RED)** — Verify the test fails with the expected error
-5. **Implement (GREEN)** — Write minimal code to pass
-6. **Refactor** — Improve while keeping tests green
-7. **Check coverage** — Use cargo-llvm-cov, target 80%+
+1. **识别目标代码** — 找到要测试的函数、trait 或模块
+2. **写测试** — 在 `#[cfg(test)]` 模块中使用 `#[test]`，参数化测试用 rstest，属性测试用 proptest
+3. **Mock 依赖** — 使用 mockall 隔离被测单元
+4. **运行测试（RED）** — 验证测试因预期错误失败
+5. **实现（GREEN）** — 写最小代码通过
+6. **重构** — 保持测试绿色时改进
+7. **检查覆盖率** — 使用 cargo-llvm-cov，目标 80%+
 
-## TDD Workflow for Rust
+## Rust 的 TDD 工作流
 
-### The RED-GREEN-REFACTOR Cycle
+### RED-GREEN-REFACTOR 循环
 
 ```
-RED     → Write a failing test first
-GREEN   → Write minimal code to pass the test
-REFACTOR → Improve code while keeping tests green
-REPEAT  → Continue with next requirement
+RED     → 先写一个失败的测试
+GREEN   → 写最小代码使测试通过
+REFACTOR → 保持测试绿色时改进代码
+REPEAT  → 继续下一个需求
 ```
 
-### Step-by-Step TDD in Rust
+### Rust 中的分步 TDD
 
 ```rust
-// RED: Write test first, use todo!() as placeholder
+// RED：先写测试，用 todo!() 作为占位符
 pub fn add(a: i32, b: i32) -> i32 { todo!() }
 
 #[cfg(test)]
@@ -552,18 +551,18 @@ mod tests {
     #[test]
     fn test_add() { assert_eq!(add(2, 3), 5); }
 }
-// cargo test → panics at 'not yet implemented'
+// cargo test → 在 'not yet implemented' 处 panic
 ```
 
 ```rust
-// GREEN: Replace todo!() with minimal implementation
+// GREEN：用最小实现替换 todo!()
 pub fn add(a: i32, b: i32) -> i32 { a + b }
-// cargo test → PASS, then REFACTOR while keeping tests green
+// cargo test → PASS，然后 REFACTOR 保持测试绿色
 ```
 
-## Unit Tests
+## 单元测试
 
-### Module-Level Test Organization
+### 模块级测试组织
 
 ```rust
 // src/user.rs
@@ -606,19 +605,19 @@ mod tests {
 }
 ```
 
-### Assertion Macros
+### 断言宏
 
 ```rust
-assert_eq!(2 + 2, 4);                                    // Equality
-assert_ne!(2 + 2, 5);                                    // Inequality
-assert!(vec![1, 2, 3].contains(&2));                     // Boolean
-assert_eq!(value, 42, "expected 42 but got {value}");    // Custom message
-assert!((0.1_f64 + 0.2 - 0.3).abs() < f64::EPSILON);   // Float comparison
+assert_eq!(2 + 2, 4);                                    // 相等
+assert_ne!(2 + 2, 5);                                    // 不等
+assert!(vec![1, 2, 3].contains(&2));                     // 布尔
+assert_eq!(value, 42, "expected 42 but got {value}");    // 自定义消息
+assert!((0.1_f64 + 0.2 - 0.3).abs() < f64::EPSILON);   // 浮点数比较
 ```
 
-## Error and Panic Testing
+## 错误和 Panic 测试
 
-### Testing `Result` Returns
+### 测试 `Result` 返回
 
 ```rust
 #[test]
@@ -626,7 +625,7 @@ fn parse_returns_error_for_invalid_input() {
     let result = parse_config("}{invalid");
     assert!(result.is_err());
 
-    // Assert specific error variant
+    // 断言特定错误变体
     let err = result.unwrap_err();
     assert!(matches!(err, ConfigError::ParseError(_)));
 }
@@ -635,11 +634,11 @@ fn parse_returns_error_for_invalid_input() {
 fn parse_succeeds_for_valid_input() -> Result<(), Box<dyn std::error::Error>> {
     let config = parse_config(r#"{"port": 8080}"#)?;
     assert_eq!(config.port, 8080);
-    Ok(()) // Test fails if any ? returns Err
+    Ok(()) // 如果任何 ? 返回 Err 则测试失败
 }
 ```
 
-### Testing Panics
+### 测试 Panic
 
 ```rust
 #[test]
@@ -656,22 +655,22 @@ fn panics_with_specific_message() {
 }
 ```
 
-## Integration Tests
+## 集成测试
 
-### File Structure
+### 文件结构
 
 ```text
 my_crate/
 ├── src/
 │   └── lib.rs
-├── tests/              # Integration tests
-│   ├── api_test.rs     # Each file is a separate test binary
+├── tests/              # 集成测试
+│   ├── api_test.rs     # 每个文件是一个单独的测试二进制
 │   ├── db_test.rs
-│   └── common/         # Shared test utilities
+│   └── common/         # 共享测试工具
 │       └── mod.rs
 ```
 
-### Writing Integration Tests
+### 编写集成测试
 
 ```rust
 // tests/api_test.rs
@@ -688,9 +687,9 @@ fn full_request_lifecycle() {
 }
 ```
 
-## Async Tests
+## 异步测试
 
-### With Tokio
+### 使用 Tokio
 
 ```rust
 #[tokio::test]
@@ -713,9 +712,9 @@ async fn handles_timeout() {
 }
 ```
 
-## Test Organization Patterns
+## 测试组织模式
 
-### Parameterized Tests with `rstest`
+### 使用 `rstest` 的参数化测试
 
 ```rust
 use rstest::{rstest, fixture};
@@ -741,14 +740,14 @@ fn test_insert(test_db: TestDb) {
 }
 ```
 
-### Test Helpers
+### 测试辅助函数
 
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Creates a test user with sensible defaults.
+    /// 创建具有合理默认值的测试用户。
     fn make_user(name: &str) -> User {
         User::new(name, &format!("{name}@test.com")).unwrap()
     }
@@ -761,9 +760,9 @@ mod tests {
 }
 ```
 
-## Property-Based Testing with `proptest`
+## 使用 `proptest` 的属性测试
 
-### Basic Property Tests
+### 基本属性测试
 
 ```rust
 use proptest::prelude::*;
@@ -793,7 +792,7 @@ proptest! {
 }
 ```
 
-### Custom Strategies
+### 自定义策略
 
 ```rust
 use proptest::prelude::*;
@@ -811,9 +810,9 @@ proptest! {
 }
 ```
 
-## Mocking with `mockall`
+## 使用 `mockall` 的 Mocking
 
-### Trait-Based Mocking
+### 基于 Trait 的 Mocking
 
 ```rust
 use mockall::{automock, predicate::eq};
@@ -848,9 +847,9 @@ fn service_returns_none_when_not_found() {
 }
 ```
 
-## Doc Tests
+## 文档测试
 
-### Executable Documentation
+### 可执行文档
 
 ```rust
 /// Adds two numbers together.
@@ -890,7 +889,7 @@ pub fn parse_config(input: &str) -> Result<Config, ParseError> {
 }
 ```
 
-## Benchmarking with Criterion
+## 使用 Criterion 的基准测试
 
 ```toml
 # Cargo.toml
@@ -921,59 +920,59 @@ criterion_group!(benches, bench_fibonacci);
 criterion_main!(benches);
 ```
 
-## Test Coverage
+## 测试覆盖率
 
-### Running Coverage
+### 运行覆盖率
 
 ```bash
-# Install: cargo install cargo-llvm-cov (or use taiki-e/install-action in CI)
-cargo llvm-cov                    # Summary
-cargo llvm-cov --html             # HTML report
-cargo llvm-cov --lcov > lcov.info # LCOV format for CI
-cargo llvm-cov --fail-under-lines 80  # Fail if below threshold
+# 安装：cargo install cargo-llvm-cov（或在 CI 中使用 taiki-e/install-action）
+cargo llvm-cov                    # 摘要
+cargo llvm-cov --html             # HTML 报告
+cargo llvm-cov --lcov > lcov.info # LCOV 格式用于 CI
+cargo llvm-cov --fail-under-lines 80  # 低于阈值则失败
 ```
 
-### Coverage Targets
+### 覆盖率目标
 
-| Code Type | Target |
+| 代码类型 | 目标 |
 |-----------|--------|
-| Critical business logic | 100% |
-| Public API | 90%+ |
-| General code | 80%+ |
-| Generated / FFI bindings | Exclude |
+| 关键业务逻辑 | 100% |
+| 公共 API | 90%+ |
+| 通用代码 | 80%+ |
+| 生成/FFI 绑定 | 排除 |
 
-## Testing Commands
+## 测试命令
 
 ```bash
-cargo test                        # Run all tests
-cargo test -- --nocapture         # Show println output
-cargo test test_name              # Run tests matching pattern
-cargo test --lib                  # Unit tests only
-cargo test --test api_test        # Integration tests only
-cargo test --doc                  # Doc tests only
-cargo test --no-fail-fast         # Don't stop on first failure
-cargo test -- --ignored           # Run ignored tests
+cargo test                        # 运行所有测试
+cargo test -- --nocapture         # 显示 println 输出
+cargo test test_name              # 运行匹配模式的测试
+cargo test --lib                  # 仅单元测试
+cargo test --test api_test        # 仅集成测试
+cargo test --doc                  # 仅文档测试
+cargo test --no-fail-fast         # 首次失败不停
+cargo test -- --ignored           # 运行忽略的测试
 ```
 
-## Best Practices
+## 最佳实践
 
-**DO:**
-- Write tests FIRST (TDD)
-- Use `#[cfg(test)]` modules for unit tests
-- Test behavior, not implementation
-- Use descriptive test names that explain the scenario
-- Prefer `assert_eq!` over `assert!` for better error messages
-- Use `?` in tests that return `Result` for cleaner error output
-- Keep tests independent — no shared mutable state
+**要做：**
+- 先写测试（TDD）
+- 使用 `#[cfg(test)]` 模块进行单元测试
+- 测试行为，而非实现
+- 使用描述性测试名称解释场景
+- 优先使用 `assert_eq!` 以获得更好的错误消息
+- 在返回 `Result` 的测试中使用 `?` 以获得更清晰的错误输出
+- 保持测试独立 — 无共享可变状态
 
-**DON'T:**
-- Use `#[should_panic]` when you can test `Result::is_err()` instead
-- Mock everything — prefer integration tests when feasible
-- Ignore flaky tests — fix or quarantine them
-- Use `sleep()` in tests — use channels, barriers, or `tokio::time::pause()`
-- Skip error path testing
+**不要：**
+- 当可以测试 `Result::is_err()` 时使用 `#[should_panic]`
+- Mock 一切 — 可行时优先使用集成测试
+- 忽略 flaky 测试 — 修复或隔离它们
+- 在测试中使用 `sleep()` — 使用通道、barrier 或 `tokio::time::pause()`
+- 跳过错误路径测试
 
-## CI Integration
+## CI 集成
 
 ```yaml
 # GitHub Actions
@@ -999,5 +998,3 @@ test:
     - name: Coverage
       run: cargo llvm-cov --fail-under-lines 80
 ```
-
-**Remember**: Tests are documentation. They show how your code is meant to be used. Write them clearly and keep them up to date.

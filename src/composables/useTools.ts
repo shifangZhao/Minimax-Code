@@ -1,9 +1,13 @@
 import { invoke } from '@tauri-apps/api/core'
 import { db } from '../services/db'
 
+function errorMsg(e: unknown): string {
+  return e instanceof Error ? e.message : String(e)
+}
+
 export interface ToolResult {
   success: boolean
-  data?: any
+  data?: unknown
   error?: string
 }
 
@@ -14,8 +18,8 @@ export const fileTools = {
     try {
       const content = await db.readFile(path)
       return { success: true, data: content }
-    } catch (e: any) {
-      return { success: false, error: e.message }
+    } catch (e) {
+      return { success: false, error: errorMsg(e) }
     }
   },
 
@@ -23,8 +27,8 @@ export const fileTools = {
     try {
       await db.writeFile(path, content)
       return { success: true, data: `Written: ${path}` }
-    } catch (e: any) {
-      return { success: false, error: e.message }
+    } catch (e) {
+      return { success: false, error: errorMsg(e) }
     }
   },
 
@@ -32,8 +36,8 @@ export const fileTools = {
     try {
       const results = await db.readFiles(paths)
       return { success: true, data: results }
-    } catch (e: any) {
-      return { success: false, error: e.message }
+    } catch (e) {
+      return { success: false, error: errorMsg(e) }
     }
   },
 
@@ -41,8 +45,8 @@ export const fileTools = {
     try {
       const results = await db.writeFiles(files)
       return { success: true, data: results }
-    } catch (e: any) {
-      return { success: false, error: e.message }
+    } catch (e) {
+      return { success: false, error: errorMsg(e) }
     }
   },
 
@@ -51,8 +55,8 @@ export const fileTools = {
       const entries = await db.listDir(path)
       const formatted = entries.map(e => `${e.is_dir ? '[DIR]' : '[FILE]'} ${e.name}`)
       return { success: true, data: formatted.join('\n') }
-    } catch (e: any) {
-      return { success: false, error: e.message }
+    } catch (e) {
+      return { success: false, error: errorMsg(e) }
     }
   },
 
@@ -60,8 +64,8 @@ export const fileTools = {
     try {
       await db.createDir(path)
       return { success: true, data: `Created: ${path}` }
-    } catch (e: any) {
-      return { success: false, error: e.message }
+    } catch (e) {
+      return { success: false, error: errorMsg(e) }
     }
   },
 
@@ -69,8 +73,8 @@ export const fileTools = {
     try {
       await db.removePath(path)
       return { success: true, data: `Removed: ${path}` }
-    } catch (e: any) {
-      return { success: false, error: e.message }
+    } catch (e) {
+      return { success: false, error: errorMsg(e) }
     }
   },
 }
@@ -82,8 +86,8 @@ export const gitTools = {
     try {
       const result = await db.gitStatus(repoPath)
       return { success: result.exit_code === 0, data: result.stdout || result.stderr }
-    } catch (e: any) {
-      return { success: false, error: e.message }
+    } catch (e) {
+      return { success: false, error: errorMsg(e) }
     }
   },
 
@@ -91,8 +95,8 @@ export const gitTools = {
     try {
       const result = await db.gitLog(repoPath, count)
       return { success: result.exit_code === 0, data: result.stdout || result.stderr }
-    } catch (e: any) {
-      return { success: false, error: e.message }
+    } catch (e) {
+      return { success: false, error: errorMsg(e) }
     }
   },
 
@@ -100,8 +104,8 @@ export const gitTools = {
     try {
       const result = await db.gitDiff(repoPath, target)
       return { success: result.exit_code === 0, data: result.stdout || result.stderr }
-    } catch (e: any) {
-      return { success: false, error: e.message }
+    } catch (e) {
+      return { success: false, error: errorMsg(e) }
     }
   },
 
@@ -109,8 +113,8 @@ export const gitTools = {
     try {
       const result = await db.gitBranch(repoPath)
       return { success: result.exit_code === 0, data: result.stdout || result.stderr }
-    } catch (e: any) {
-      return { success: false, error: e.message }
+    } catch (e) {
+      return { success: false, error: errorMsg(e) }
     }
   },
 
@@ -118,8 +122,8 @@ export const gitTools = {
     try {
       const result = await db.gitCheckout(repoPath, branch)
       return { success: result.exit_code === 0, data: result.stdout || result.stderr }
-    } catch (e: any) {
-      return { success: false, error: e.message }
+    } catch (e) {
+      return { success: false, error: errorMsg(e) }
     }
   },
 
@@ -127,8 +131,8 @@ export const gitTools = {
     try {
       const result = await db.gitCommit(repoPath, message)
       return { success: result.exit_code === 0, data: result.stdout || result.stderr }
-    } catch (e: any) {
-      return { success: false, error: e.message }
+    } catch (e) {
+      return { success: false, error: errorMsg(e) }
     }
   },
 
@@ -136,8 +140,8 @@ export const gitTools = {
     try {
       const result = await db.gitStash(repoPath)
       return { success: result.exit_code === 0, data: result.stdout || result.stderr }
-    } catch (e: any) {
-      return { success: false, error: e.message }
+    } catch (e) {
+      return { success: false, error: errorMsg(e) }
     }
   },
 
@@ -145,8 +149,8 @@ export const gitTools = {
     try {
       const result = await db.gitStashPop(repoPath)
       return { success: result.exit_code === 0, data: result.stdout || result.stderr }
-    } catch (e: any) {
-      return { success: false, error: e.message }
+    } catch (e) {
+      return { success: false, error: errorMsg(e) }
     }
   },
 }
@@ -162,8 +166,8 @@ export const searchTools = {
         return `${m.file}\n${lines}`
       }).join('\n\n')
       return { success: true, data: formatted || 'No matches found' }
-    } catch (e: any) {
-      return { success: false, error: e.message }
+    } catch (e) {
+      return { success: false, error: errorMsg(e) }
     }
   },
 }
@@ -175,8 +179,8 @@ export const envTools = {
     try {
       const info = await db.getEnvInfo(repoPath)
       return { success: true, data: info }
-    } catch (e: any) {
-      return { success: false, error: e.message }
+    } catch (e) {
+      return { success: false, error: errorMsg(e) }
     }
   },
 
@@ -184,8 +188,8 @@ export const envTools = {
     try {
       const structure = await db.analyzeProjectStructure(repoPath)
       return { success: true, data: structure }
-    } catch (e: any) {
-      return { success: false, error: e.message }
+    } catch (e) {
+      return { success: false, error: errorMsg(e) }
     }
   },
 }
@@ -197,8 +201,8 @@ export const processTools = {
     try {
       const pid = await db.spawnProcess(command, cwd)
       return { success: true, data: { pid } }
-    } catch (e: any) {
-      return { success: false, error: e.message }
+    } catch (e) {
+      return { success: false, error: errorMsg(e) }
     }
   },
 
@@ -206,8 +210,8 @@ export const processTools = {
     try {
       await db.killProcess(pid)
       return { success: true, data: `Killed process ${pid}` }
-    } catch (e: any) {
-      return { success: false, error: e.message }
+    } catch (e) {
+      return { success: false, error: errorMsg(e) }
     }
   },
 }
@@ -223,8 +227,8 @@ export const terminalTools = {
         data: result.stdout || result.stderr,
         error: result.exit_code !== 0 ? `Exit ${result.exit_code}` : undefined,
       }
-    } catch (e: any) {
-      return { success: false, error: e.message }
+    } catch (e) {
+      return { success: false, error: errorMsg(e) }
     }
   },
 }
@@ -237,8 +241,8 @@ export const replaceTools = {
       const results = await db.findReplaceInFiles(dir, find, replace, fileFilter, useRegex)
       const total = results.reduce((sum, r) => sum + r.replacements, 0)
       return { success: true, data: `${results.length} files modified, ${total} replacements` }
-    } catch (e: any) {
-      return { success: false, error: e.message }
+    } catch (e) {
+      return { success: false, error: errorMsg(e) }
     }
   },
 }
@@ -254,8 +258,8 @@ export const patchTools = {
         data: result.stdout || result.stderr,
         error: result.exit_code !== 0 ? `Exit ${result.exit_code}` : undefined,
       }
-    } catch (e: any) {
-      return { success: false, error: e.message }
+    } catch (e) {
+      return { success: false, error: errorMsg(e) }
     }
   },
 
@@ -263,8 +267,8 @@ export const patchTools = {
     try {
       const patch = await db.createPatch(repoPath, target, outputPath)
       return { success: true, data: patch }
-    } catch (e: any) {
-      return { success: false, error: e.message }
+    } catch (e) {
+      return { success: false, error: errorMsg(e) }
     }
   },
 }
@@ -281,8 +285,8 @@ export const testTools = {
         data: `${summary}\n\n${result.output}`,
         error: result.failed > 0 ? summary : undefined,
       }
-    } catch (e: any) {
-      return { success: false, error: e.message }
+    } catch (e) {
+      return { success: false, error: errorMsg(e) }
     }
   },
 }
@@ -299,8 +303,8 @@ export const codeModTools = {
         data: `${succeeded}/${results.length} files modified`,
         error: succeeded < results.length ? results.filter(r => !r.success).map(r => r.error).join(', ') : undefined,
       }
-    } catch (e: any) {
-      return { success: false, error: e.message }
+    } catch (e) {
+      return { success: false, error: errorMsg(e) }
     }
   },
 }
@@ -316,8 +320,8 @@ export const webSearchTools = {
         success: true,
         data: formatted || 'No results found',
       }
-    } catch (e: any) {
-      return { success: false, error: e.message }
+    } catch (e) {
+      return { success: false, error: errorMsg(e) }
     }
   },
 }
@@ -332,8 +336,8 @@ export const imageTools = {
         success: true,
         data: result,
       }
-    } catch (e: any) {
-      return { success: false, error: e.message }
+    } catch (e) {
+      return { success: false, error: errorMsg(e) }
     }
   },
 }

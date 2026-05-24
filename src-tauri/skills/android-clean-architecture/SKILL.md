@@ -1,56 +1,56 @@
 ---
 name: android-clean-architecture
-description: Clean Architecture patterns for Android and Kotlin Multiplatform projects — module structure, dependency rules, UseCases, Repositories, and data layer patterns.
+description: Android 和 Kotlin Multiplatform 项目的清洁架构模式——模块结构、依赖规则、UseCases、Repositories 和数据层模式。
 origin: ECC
 ---
 
-# Android Clean Architecture
+# Android 清洁架构
 
-Clean Architecture patterns for Android and KMP projects. Covers module boundaries, dependency inversion, UseCase/Repository patterns, and data layer design with Room, SQLDelight, and Ktor.
+Android 和 KMP 项目的清洁架构模式。涵盖模块边界、依赖反转、UseCase/Repository 模式和 Room、SQLDelight、Ktor 的数据层设计。
 
-## When to Activate
+## 激活时机
 
-- Structuring Android or KMP project modules
-- Implementing UseCases, Repositories, or DataSources
-- Designing data flow between layers (domain, data, presentation)
-- Setting up dependency injection with Koin or Hilt
-- Working with Room, SQLDelight, or Ktor in a layered architecture
+- 构建 Android 或 KMP 项目模块
+- 实现 UseCases、Repositories 或 DataSources
+- 设计层间数据流（domain、data、presentation）
+- 使用 Koin 或 Hilt 设置依赖注入
+- 在分层架构中使用 Room、SQLDelight 或 Ktor
 
-## Module Structure
+## 模块结构
 
-### Recommended Layout
+### 推荐布局
 
 ```
 project/
-├── app/                  # Android entry point, DI wiring, Application class
-├── core/                 # Shared utilities, base classes, error types
-├── domain/               # UseCases, domain models, repository interfaces (pure Kotlin)
-├── data/                 # Repository implementations, DataSources, DB, network
-├── presentation/         # Screens, ViewModels, UI models, navigation
-├── design-system/        # Reusable Compose components, theme, typography
-└── feature/              # Feature modules (optional, for larger projects)
+├── app/                  # Android 入口点、DI 接线、Application 类
+├── core/                 # 共享工具类、基类、错误类型
+├── domain/               # UseCases、领域模型、仓库接口（纯 Kotlin）
+├── data/                 # Repository 实现、DataSources、DB、网络
+├── presentation/         # 屏幕、ViewModels、UI 模型、导航
+├── design-system/        # 可复用 Compose 组件、主题、排版
+└── feature/              # 功能模块（可选，用于大型项目）
     ├── auth/
     ├── settings/
     └── profile/
 ```
 
-### Dependency Rules
+### 依赖规则
 
 ```
 app → presentation, domain, data, core
 presentation → domain, design-system, core
 data → domain, core
-domain → core (or no dependencies)
-core → (nothing)
+domain → core（或无依赖）
+core → (无)
 ```
 
-**Critical**: `domain` must NEVER depend on `data`, `presentation`, or any framework. It contains pure Kotlin only.
+**关键**：`domain` 绝不能依赖 `data`、`presentation` 或任何框架。它只包含纯 Kotlin。
 
-## Domain Layer
+## 领域层
 
-### UseCase Pattern
+### UseCase 模式
 
-Each UseCase represents one business operation. Use `operator fun invoke` for clean call sites:
+每个 UseCase 代表一个业务操作。使用 `operator fun invoke` 获得干净的调用点：
 
 ```kotlin
 class GetItemsByCategoryUseCase(
@@ -61,7 +61,7 @@ class GetItemsByCategoryUseCase(
     }
 }
 
-// Flow-based UseCase for reactive streams
+// 基于 Flow 的 UseCase（响应式流）
 class ObserveUserProgressUseCase(
     private val repository: UserRepository
 ) {
@@ -71,9 +71,9 @@ class ObserveUserProgressUseCase(
 }
 ```
 
-### Domain Models
+### 领域模型
 
-Domain models are plain Kotlin data classes — no framework annotations:
+领域模型是纯 Kotlin 数据类——无框架注解：
 
 ```kotlin
 data class Item(
@@ -88,9 +88,9 @@ data class Item(
 enum class Status { DRAFT, ACTIVE, ARCHIVED }
 ```
 
-### Repository Interfaces
+### 仓库接口
 
-Defined in domain, implemented in data:
+在 domain 中定义，在 data 中实现：
 
 ```kotlin
 interface ItemRepository {
@@ -100,11 +100,11 @@ interface ItemRepository {
 }
 ```
 
-## Data Layer
+## 数据层
 
-### Repository Implementation
+### 仓库实现
 
-Coordinates between local and remote data sources:
+协调本地和远程数据源：
 
 ```kotlin
 class ItemRepositoryImpl(
@@ -134,12 +134,12 @@ class ItemRepositoryImpl(
 }
 ```
 
-### Mapper Pattern
+### 映射器模式
 
-Keep mappers as extension functions near the data models:
+将映射器保持为靠近数据模型的扩展函数：
 
 ```kotlin
-// In data layer
+// 在 data 层
 fun ItemEntity.toDomain() = Item(
     id = id,
     title = title,
@@ -159,7 +159,7 @@ fun ItemDto.toEntity() = ItemEntity(
 )
 ```
 
-### Room Database (Android)
+### Room 数据库（Android）
 
 ```kotlin
 @Entity(tableName = "items")
@@ -209,7 +209,7 @@ observeAll:
 SELECT * FROM ItemEntity;
 ```
 
-### Ktor Network Client (KMP)
+### Ktor 网络客户端（KMP）
 
 ```kotlin
 class ItemRemoteDataSource(private val client: HttpClient) {
@@ -221,7 +221,7 @@ class ItemRemoteDataSource(private val client: HttpClient) {
     }
 }
 
-// HttpClient setup with content negotiation
+// HttpClient 配置与内容协商
 val httpClient = HttpClient {
     install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
     install(Logging) { level = LogLevel.HEADERS }
@@ -229,32 +229,32 @@ val httpClient = HttpClient {
 }
 ```
 
-## Dependency Injection
+## 依赖注入
 
-### Koin (KMP-friendly)
+### Koin（KMP 友好）
 
 ```kotlin
-// Domain module
+// Domain 模块
 val domainModule = module {
     factory { GetItemsByCategoryUseCase(get()) }
     factory { ObserveUserProgressUseCase(get()) }
 }
 
-// Data module
+// Data 模块
 val dataModule = module {
     single<ItemRepository> { ItemRepositoryImpl(get(), get()) }
     single { ItemLocalDataSource(get()) }
     single { ItemRemoteDataSource(get()) }
 }
 
-// Presentation module
+// Presentation 模块
 val presentationModule = module {
     viewModelOf(::ItemListViewModel)
     viewModelOf(::DashboardViewModel)
 }
 ```
 
-### Hilt (Android-only)
+### Hilt（仅 Android）
 
 ```kotlin
 @Module
@@ -270,11 +270,11 @@ class ItemListViewModel @Inject constructor(
 ) : ViewModel()
 ```
 
-## Error Handling
+## 错误处理
 
-### Result/Try Pattern
+### Result/Try 模式
 
-Use `Result<T>` or a custom sealed type for error propagation:
+使用 `Result<T>` 或自定义密封类型进行错误传播：
 
 ```kotlin
 sealed interface Try<out T> {
@@ -288,7 +288,7 @@ sealed interface AppError {
     data object Unauthorized : AppError
 }
 
-// In ViewModel — map to UI state
+// 在 ViewModel 中——映射到 UI 状态
 viewModelScope.launch {
     when (val result = getItems(category)) {
         is Try.Success -> _state.update { it.copy(items = result.value, isLoading = false) }
@@ -297,9 +297,9 @@ viewModelScope.launch {
 }
 ```
 
-## Convention Plugins (Gradle)
+## 约定插件（Gradle）
 
-For KMP projects, use convention plugins to reduce build file duplication:
+对于 KMP 项目，使用约定插件减少构建文件重复：
 
 ```kotlin
 // build-logic/src/main/kotlin/kmp-library.gradle.kts
@@ -317,23 +317,23 @@ kotlin {
 }
 ```
 
-Apply in modules:
+在模块中应用：
 
 ```kotlin
 // domain/build.gradle.kts
 plugins { id("kmp-library") }
 ```
 
-## Anti-Patterns to Avoid
+## 应避免的反模式
 
-- Importing Android framework classes in `domain` — keep it pure Kotlin
-- Exposing database entities or DTOs to the UI layer — always map to domain models
-- Putting business logic in ViewModels — extract to UseCases
-- Using `GlobalScope` or unstructured coroutines — use `viewModelScope` or structured concurrency
-- Fat repository implementations — split into focused DataSources
-- Circular module dependencies — if A depends on B, B must not depend on A
+- 在 `domain` 中导入 Android 框架类——保持纯 Kotlin
+- 向 UI 层暴露数据库实体或 DTO——始终映射到领域模型
+- 在 ViewModels 中放置业务逻辑——提取到 UseCases
+- 使用 `GlobalScope` 或非结构化协程——使用 `viewModelScope` 或结构化并发
+- 胖仓库实现——分割为专注的 DataSources
+- 循环模块依赖——如果 A 依赖 B，B 不能依赖 A
 
-## References
+## 参考
 
-See skill: `compose-multiplatform-patterns` for UI patterns.
-See skill: `kotlin-coroutines-flows` for async patterns.
+参见技能：`compose-multiplatform-patterns` 用于 UI 模式。
+参见技能：`kotlin-coroutines-flows` 用于异步模式。

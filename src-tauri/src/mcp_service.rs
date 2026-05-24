@@ -4,6 +4,7 @@
 // Config loaded from ~/.minimaxcode/mcp.json (global) and {workspace}/.minimaxcode/mcp.json (project).
 // Tool naming: {server_name}_{tool_name} to avoid collisions across servers.
 
+use crate::LockMap;
 use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -124,9 +125,12 @@ impl Transport {
     fn stderr_snippet(&self) -> String {
         match self {
             Transport::Stdio(t) => {
-                let sb = t.stderr_buf.lock().unwrap();
-                let s = sb.trim();
-                if s.is_empty() { String::new() } else { format!("\nstderr: {}", &s[..s.len().min(500)]) }
+                if let Ok(sb) = t.stderr_buf.lock() {
+                    let s = sb.trim();
+                    if s.is_empty() { String::new() } else { format!("\nstderr: {}", &s[..s.len().min(500)]) }
+                } else {
+                    String::new()
+                }
             }
             Transport::Http(_) => String::new(),
         }
@@ -136,7 +140,7 @@ impl Transport {
 // ---- Stdio Transport ----
 
 impl StdioTransport {
-    fn spawn(command: &[String], env: &HashMap<String, String>, cwd: &str) -> Option<Self> {
+    fn spawn(command: &[String], env: &HashMap<String, String>, cwd: &str) -> Result<Self, String> {
         let cmd_name = &command[0];
         let cmd_args: Vec<&str> = command[1..].iter().map(|s| s.as_str()).collect();
 
@@ -152,17 +156,12 @@ impl StdioTransport {
             cmd.env(k, v);
         }
 
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("[mcp] Failed to spawn {}: {}", cmd_name, e);
-                return None;
-            }
-        };
+        let mut child = cmd.spawn()
+            .map_err(|e| format!("[mcp] Failed to spawn {}: {}", cmd_name, e))?;
 
-        let stdin = child.stdin.take().expect("stdin");
-        let stdout = child.stdout.take().expect("stdout");
-        let stderr = child.stderr.take().expect("stderr");
+        let stdin = child.stdin.take().ok_or_else(|| format!("[mcp] {}: No stdin", cmd_name))?;
+        let stdout = child.stdout.take().ok_or_else(|| format!("[mcp] {}: No stdout", cmd_name))?;
+        let stderr = child.stderr.take().ok_or_else(|| format!("[mcp] {}: No stderr", cmd_name))?;
         let writer = Mutex::new(BufWriter::new(stdin));
         let pending: Arc<Mutex<HashMap<u64, std::sync::mpsc::Sender<serde_json::Value>>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -185,9 +184,10 @@ impl StdioTransport {
                     Ok(0) => break,
                     Ok(n) => {
                         if let Ok(s) = String::from_utf8(buf[..n].to_vec()) {
-                            let mut sb = stderr_buf_clone.lock().unwrap();
-                            if sb.len() < 8192 {
-                                sb.push_str(&s);
+                            if let Ok(mut sb) = stderr_buf_clone.lock() {
+                                if sb.len() < 8192 {
+                                    sb.push_str(&s);
+                                }
                             }
                         }
                     }
@@ -196,7 +196,7 @@ impl StdioTransport {
             }
         });
 
-        Some(Self {
+        Ok(Self {
             writer,
             next_id: AtomicU64::new(1),
             pending,
@@ -217,7 +217,7 @@ impl StdioTransport {
         req["id"] = serde_json::json!(id);
 
         let (tx, rx) = std::sync::mpsc::channel();
-        self.pending.lock().unwrap().insert(id, tx);
+        self.pending.lock_str()?.insert(id, tx);
         write_stdio_message(&self.writer, &req)?;
 
         rx.recv_timeout(std::time::Duration::from_millis(timeout_ms))
@@ -240,16 +240,17 @@ impl StdioTransport {
 impl Drop for StdioTransport {
     fn drop(&mut self) {
         self.alive.store(false, Ordering::SeqCst);
-        let _ = self.process.lock().unwrap().kill();
+        if let Ok(mut p) = self.process.lock_str() {
+            let _ = p.kill();
+        }
     }
 }
 
 fn write_stdio_message(writer: &Mutex<BufWriter<ChildStdin>>, msg: &serde_json::Value) -> Result<(), String> {
     let body = serde_json::to_string(msg).map_err(|e| e.to_string())?;
-    let header = format!("Content-Length: {}\r\n\r\n", body.len());
-    let mut w = writer.lock().unwrap();
-    w.write_all(header.as_bytes()).map_err(|e| e.to_string())?;
+    let mut w = writer.lock_str()?;
     w.write_all(body.as_bytes()).map_err(|e| e.to_string())?;
+    w.write_all(b"\n").map_err(|e| e.to_string())?;
     w.flush().map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -307,8 +308,10 @@ fn stdio_read_loop(
 
 fn dispatch_msg(msg: serde_json::Value, pending: &Arc<Mutex<HashMap<u64, std::sync::mpsc::Sender<serde_json::Value>>>>) {
     if let Some(id) = msg.get("id").and_then(|i| i.as_u64()) {
-        if let Some(tx) = pending.lock().unwrap().remove(&id) {
-            let _ = tx.send(msg);
+        if let Ok(mut p) = pending.lock() {
+            if let Some(tx) = p.remove(&id) {
+                let _ = tx.send(msg);
+            }
         }
     }
 }
@@ -476,8 +479,8 @@ impl McpService {
                                 }
                             }
                             // Merge "command": "uvx" + "args": [...] → "command": ["uvx", ...]
-                            if val.get("command").map(|c| c.is_string()).unwrap_or(false) {
-                                let cmd = val["command"].as_str().unwrap().to_string();
+                            if let Some(cmd_str) = val.get("command").and_then(|c| c.as_str()) {
+                                let cmd = cmd_str.to_string();
                                 let mut full = vec![cmd];
                                 if let Some(args) = val.get("args").and_then(|a| a.as_array()) {
                                     for a in args {
@@ -597,8 +600,7 @@ impl McpService {
                         std::env::var("PATH").unwrap_or_default()
                     ));
                 }
-                let t = StdioTransport::spawn(command, env, cwd)
-                    .ok_or_else(|| format!("Failed to spawn: {:?}", command))?;
+                let t = StdioTransport::spawn(command, env, cwd)?;
                 (Transport::Stdio(t), timeout.unwrap_or(crate::MCP_HTTP_TIMEOUT_SECS * 1000))
             }
             McpServerConfig::Remote { url, headers, timeout, .. } => {

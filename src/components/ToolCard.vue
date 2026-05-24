@@ -7,7 +7,7 @@
       <span v-if="language" class="tool-card-lang">{{ language }}</span>
     </div>
 
-    <!-- Diff view for edit_file -->
+    <!-- Diff view for edit_file (expanded by default) -->
     <div v-if="toolKind === 'edit'" class="tool-card-diff">
       <div class="diff-header">
         <span class="diff-marker diff-del">−</span>
@@ -21,35 +21,60 @@
       <div class="diff-content diff-ins-content" v-html="diffNew"></div>
     </div>
 
-    <!-- Code block for write_file / read_file -->
+    <!-- Code block for read_file (collapsible, default collapsed) -->
+    <div v-else-if="toolKind === 'code' && isReadTool" class="tool-card-code">
+      <div class="tool-card-toggle" @click="codeCollapsed = !codeCollapsed">
+        <span class="toggle-arrow" :class="{ collapsed: codeCollapsed }"></span>
+        <span class="toggle-label">读取结果</span>
+      </div>
+      <div v-show="!codeCollapsed" v-html="codeHtml"></div>
+    </div>
+
+    <!-- Code block for write_file (no collapse, as-is) -->
     <div v-else-if="toolKind === 'code'" class="tool-card-code" v-html="codeHtml"></div>
 
     <!-- Terminal style for run_command -->
     <div v-else-if="toolKind === 'run'" class="tool-card-run">
       <pre v-if="command" class="tool-card-cmd"><span class="prompt">$</span> {{ command }}</pre>
-      <pre v-if="result" class="tool-card-output">{{ result }}</pre>
+      <template v-if="result">
+        <div class="tool-card-toggle" @click="runCollapsed = !runCollapsed">
+          <span class="toggle-arrow" :class="{ collapsed: runCollapsed }"></span>
+          <span class="toggle-label">执行结果</span>
+        </div>
+        <pre v-show="!runCollapsed" class="tool-card-output">{{ result }}</pre>
+      </template>
     </div>
 
     <!-- Compact output for list/delete/exists operations -->
     <div v-else-if="toolKind === 'compact'" class="tool-card-compact">
-      <pre v-if="result" class="tool-card-output">{{ result }}</pre>
+      <template v-if="result">
+        <div class="tool-card-toggle" @click="compactCollapsed = !compactCollapsed">
+          <span class="toggle-arrow" :class="{ collapsed: compactCollapsed }"></span>
+          <span class="toggle-label">结果</span>
+        </div>
+        <pre v-show="!compactCollapsed" class="tool-card-output">{{ result }}</pre>
+      </template>
     </div>
 
-    <!-- Default fallback with args + result -->
+    <!-- Default fallback (MCP tools: web_search, understand_image, etc.) -->
     <div v-else>
       <details v-if="parsedArgs" class="tool-card-args" open>
         <summary>参数</summary>
         <pre>{{ argsJson }}</pre>
       </details>
-      <pre v-if="result" class="tool-card-output">{{ result }}</pre>
+      <template v-if="resultText">
+        <div class="tool-card-toggle" @click="defaultCollapsed = !defaultCollapsed">
+          <span class="toggle-arrow" :class="{ collapsed: defaultCollapsed }"></span>
+          <span class="toggle-label">结果</span>
+        </div>
+        <pre v-show="!defaultCollapsed" class="tool-card-output">{{ resultText }}</pre>
+      </template>
     </div>
-
-    <div v-if="resultText" class="tool-card-result">{{ resultText }}</div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { renderHighlightedBlock, renderSearchReplace, langFromPath } from '../composables/useMarkdown'
 
 interface ToolInfo {
@@ -62,7 +87,11 @@ const props = defineProps<{
   toolInfo: ToolInfo
 }>()
 
-// Parse args if it's a JSON string
+const codeCollapsed = ref(true)
+const runCollapsed = ref(true)
+const compactCollapsed = ref(true)
+const defaultCollapsed = ref(true)
+
 const parsedArgs = computed(() => {
   if (!props.toolInfo.args) return null
   try {
@@ -77,13 +106,16 @@ const argsJson = computed(() => {
   return JSON.stringify(parsedArgs.value, null, 2)
 })
 
-// Tool name (strip any prefix like "mcp_")
 const toolName = computed(() => {
   const name = props.toolInfo.name || 'tool'
   return name.replace(/^(mcp_|filesystem_)/, '')
 })
 
-// Determine tool kind based on name
+const isReadTool = computed(() => {
+  const n = toolName.value.toLowerCase()
+  return n.includes('read') && !n.includes('write') && !n.includes('edit')
+})
+
 const toolKind = computed(() => {
   const name = toolName.value.toLowerCase()
   if (name.includes('edit')) return 'edit'
@@ -94,7 +126,6 @@ const toolKind = computed(() => {
   return 'default'
 })
 
-// Icon based on tool kind
 const icon = computed(() => {
   switch (toolKind.value) {
     case 'edit': return '✎'
@@ -105,7 +136,6 @@ const icon = computed(() => {
   }
 })
 
-// File path from args (common locations)
 const filePath = computed(() => {
   if (!parsedArgs.value) return null
   return parsedArgs.value.path
@@ -114,36 +144,30 @@ const filePath = computed(() => {
     || null
 })
 
-// Language hint from file path
 const language = computed(() => {
   const path = filePath.value || ''
   const ext = path.split('.').pop()?.toLowerCase() || ''
   return langFromPath(ext)
 })
 
-// Command from args
 const command = computed(() => {
   if (!parsedArgs.value) return null
   return parsedArgs.value.command || parsedArgs.value.cmd || null
 })
 
-// Result text
 const resultText = computed(() => {
   return props.toolInfo.result || ''
 })
 
-// Result for compact tools
 const result = computed(() => {
   return props.toolInfo.result || ''
 })
 
-// Code block for read/write
 const codeHtml = computed(() => {
   if (toolKind.value !== 'code') return ''
   return renderHighlightedBlock(props.toolInfo.result || '', language.value || 'plaintext')
 })
 
-// Diff view for edit_file — shows before (red) and after (green) side by side
 const diffOld = computed(() => {
   if (toolKind.value !== 'edit' || !parsedArgs.value) return ''
   const search = parsedArgs.value.search
@@ -151,9 +175,6 @@ const diffOld = computed(() => {
   return renderSearchReplace(search, parsedArgs.value.replace || '', filePath.value || '')
 })
 
-// For edit, new content is shown in diffNew via renderSearchReplace, but we need
-// separate old/new sections. Since renderSearchReplace returns a combined view,
-// we use it for old and only show the new in the second section.
 const diffNew = computed(() => {
   if (toolKind.value !== 'edit' || !parsedArgs.value) return ''
   const replace = parsedArgs.value.replace
@@ -213,6 +234,42 @@ const diffNew = computed(() => {
   padding: 1px 8px;
   border-radius: 4px;
   font-size: 11px;
+}
+
+/* Collapse toggle */
+.tool-card-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  padding: 4px 0;
+  margin-bottom: 4px;
+}
+
+.tool-card-toggle:hover {
+  color: var(--text-primary);
+}
+
+.toggle-arrow {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid var(--text-secondary);
+  border-bottom: 1.5px solid var(--text-secondary);
+  transform: rotate(-45deg);
+  transition: transform 0.2s;
+  flex-shrink: 0;
+}
+
+.toggle-arrow.collapsed {
+  transform: rotate(45deg);
+}
+
+.toggle-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-family: inherit;
 }
 
 .tool-card-diff {
@@ -309,7 +366,7 @@ const diffNew = computed(() => {
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--text-secondary);
-  max-height: 200px;
+  max-height: 400px;
   overflow-y: auto;
 }
 
@@ -341,11 +398,5 @@ const diffNew = computed(() => {
   white-space: pre-wrap;
   word-break: break-word;
   font-size: 11px;
-}
-
-.tool-card-result {
-  margin-top: 6px;
-  font-size: 11px;
-  color: var(--text-secondary);
 }
 </style>

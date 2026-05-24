@@ -38,7 +38,7 @@ export interface ChatResponse {
   content: Array<{
     type: string
     text?: string
-    [key: string]: any
+    [key: string]: unknown
   }>
   model: string
   stop_reason: string

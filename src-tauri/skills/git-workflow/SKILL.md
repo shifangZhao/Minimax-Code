@@ -1,129 +1,129 @@
 ---
 name: git-workflow
-description: Git workflow patterns including branching strategies, commit conventions, merge vs rebase, conflict resolution, and collaborative development best practices for teams of all sizes.
+description: Git 工作流模式，包括分支策略、提交约定、merge vs rebase、冲突解决和各种规模团队协作开发的最佳实践。
 origin: ECC
 ---
 
-# Git Workflow Patterns
+# Git 工作流模式
 
-Best practices for Git version control, branching strategies, and collaborative development.
+Git 版本控制、分支策略和协作开发的最佳实践。
 
-## When to Activate
+## 激活时机
 
-- Setting up Git workflow for a new project
-- Deciding on branching strategy (GitFlow, trunk-based, GitHub flow)
-- Writing commit messages and PR descriptions
-- Resolving merge conflicts
-- Managing releases and version tags
-- Onboarding new team members to Git practices
+- 为新项目设置 Git 工作流
+- 决定分支策略（GitFlow、基于 trunk、GitHub flow）
+- 编写提交消息和 PR 描述
+- 解决合并冲突
+- 管理发布和版本标签
+- 让新团队成员熟悉 Git 实践
 
-## Branching Strategies
+## 分支策略
 
-### GitHub Flow (Simple, Recommended for Most)
+### GitHub Flow（简单，推荐大多数情况）
 
-Best for continuous deployment and small-to-medium teams.
+最适合持续部署和中小型团队。
 
 ```
-main (protected, always deployable)
+main (protected，始终可部署)
   │
-  ├── feature/user-auth      → PR → merge to main
-  ├── feature/payment-flow   → PR → merge to main
-  └── fix/login-bug          → PR → merge to main
+  ├── feature/user-auth      → PR → 合并到 main
+  ├── feature/payment-flow   → PR → 合并到 main
+  └── fix/login-bug          → PR → 合并到 main
 ```
 
-**Rules:**
-- `main` is always deployable
-- Create feature branches from `main`
-- Open Pull Request when ready for review
-- After approval and CI passes, merge to `main`
-- Deploy immediately after merge
+**规则：**
+- `main` 始终可部署
+- 从 `main` 创建功能分支
+- 准备好审查时打开 Pull Request
+- 批准且 CI 通过后合并到 `main`
+- 合并后立即部署
 
-### Trunk-Based Development (High-Velocity Teams)
+### 基于 trunk 的开发（高 velocity 团队）
 
-Best for teams with strong CI/CD and feature flags.
+最适合有强 CI/CD 和功能标志的团队。
 
 ```
 main (trunk)
   │
-  ├── short-lived feature (1-2 days max)
-  ├── short-lived feature
-  └── short-lived feature
+  ├── 短寿命功能分支（最多 1-2 天）
+  ├── 短寿命功能分支
+  └── 短寿命功能分支
 ```
 
-**Rules:**
-- Everyone commits to `main` or very short-lived branches
-- Feature flags hide incomplete work
-- CI must pass before merge
-- Deploy multiple times per day
+**规则：**
+- 每个人提交到 `main` 或非常短寿的分支
+- 功能标志隐藏未完成的工作
+- CI 必须通过才能合并
+- 每天多次部署
 
-### GitFlow (Complex, Release-Cycle Driven)
+### GitFlow（复杂，发布周期驱动）
 
-Best for scheduled releases and enterprise projects.
+最适合有计划发布和企业项目。
 
 ```
-main (production releases)
+main (生产发布)
   │
-  └── develop (integration branch)
+  └── develop (集成分支)
         │
         ├── feature/user-auth
         ├── feature/payment
         │
-        ├── release/1.0.0    → merge to main and develop
+        ├── release/1.0.0    → 合并到 main 和 develop
         │
-        └── hotfix/critical  → merge to main and develop
+        └── hotfix/critical  → 合并到 main 和 develop
 ```
 
-**Rules:**
-- `main` contains production-ready code only
-- `develop` is the integration branch
-- Feature branches from `develop`, merge back to `develop`
-- Release branches from `develop`, merge to `main` and `develop`
-- Hotfix branches from `main`, merge to both `main` and `develop`
+**规则：**
+- `main` 仅包含生产就绪代码
+- `develop` 是集成分支
+- 功能分支从 `develop` 创建，合并回 `develop`
+- 发布分支从 `develop` 创建，合并到 `main` 和 `develop`
+- 热修复分支从 `main` 创建，合并到 `main` 和 `develop`
 
-### When to Use Which
+### 何时使用哪种
 
-| Strategy | Team Size | Release Cadence | Best For |
+| 策略 | 团队规模 | 发布节奏 | 最适合 |
 |----------|-----------|-----------------|----------|
-| GitHub Flow | Any | Continuous | SaaS, web apps, startups |
-| Trunk-Based | 5+ experienced | Multiple/day | High-velocity teams, feature flags |
-| GitFlow | 10+ | Scheduled | Enterprise, regulated industries |
+| GitHub Flow | 任意 | 持续 | SaaS、web 应用、创业公司 |
+| 基于 trunk | 5+ 有经验 | 多次/天 | 高 velocity 团队、功能标志 |
+| GitFlow | 10+ | 计划 | 企业、受监管行业 |
 
-## Commit Messages
+## 提交消息
 
-### Conventional Commits Format
+### 约定提交格式
 
 ```
-<type>(<scope>): <subject>
+<类型>(<范围>): <主题>
 
-[optional body]
+[可选正文]
 
-[optional footer(s)]
+[可选页脚]
 ```
 
-### Types
+### 类型
 
-| Type | Use For | Example |
+| 类型 | 用于 | 示例 |
 |------|---------|---------|
-| `feat` | New feature | `feat(auth): add OAuth2 login` |
-| `fix` | Bug fix | `fix(api): handle null response in user endpoint` |
-| `docs` | Documentation | `docs(readme): update installation instructions` |
-| `style` | Formatting, no code change | `style: fix indentation in login component` |
-| `refactor` | Code refactoring | `refactor(db): extract connection pool to module` |
-| `test` | Adding/updating tests | `test(auth): add unit tests for token validation` |
-| `chore` | Maintenance tasks | `chore(deps): update dependencies` |
-| `perf` | Performance improvement | `perf(query): add index to users table` |
-| `ci` | CI/CD changes | `ci: add PostgreSQL service to test workflow` |
-| `revert` | Revert previous commit | `revert: revert "feat(auth): add OAuth2 login"` |
+| `feat` | 新功能 | `feat(auth): add OAuth2 login` |
+| `fix` | Bug 修复 | `fix(api): handle null response in user endpoint` |
+| `docs` | 文档 | `docs(readme): update installation instructions` |
+| `style` | 格式化，无代码变更 | `style: fix indentation in login component` |
+| `refactor` | 代码重构 | `refactor(db): extract connection pool to module` |
+| `test` | 添加/更新测试 | `test(auth): add unit tests for token validation` |
+| `chore` | 维护任务 | `chore(deps): update dependencies` |
+| `perf` | 性能改进 | `perf(query): add index to users table` |
+| `ci` | CI/CD 变更 | `ci: add PostgreSQL service to test workflow` |
+| `revert` | 撤销之前的提交 | `revert: revert "feat(auth): add OAuth2 login"` |
 
-### Good vs Bad Examples
+### 好与坏的示例
 
 ```
-# BAD: Vague, no context
+# 坏：模糊，无上下文
 git commit -m "fixed stuff"
 git commit -m "updates"
 git commit -m "WIP"
 
-# GOOD: Clear, specific, explains why
+# 好：清晰、具体、解释原因
 git commit -m "fix(api): retry requests on 503 Service Unavailable
 
 The external API occasionally returns 503 errors during peak hours.
@@ -132,299 +132,299 @@ Added exponential backoff retry logic with max 3 attempts.
 Closes #123"
 ```
 
-### Commit Message Template
+### 提交消息模板
 
-Create `.gitmessage` in repo root:
+在仓库根目录创建 `.gitmessage`：
 
 ```
-# <type>(<scope>): <subject>
-# # Types: feat, fix, docs, style, refactor, test, chore, perf, ci, revert
-# Scope: api, ui, db, auth, etc.
-# Subject: imperative mood, no period, max 50 chars
+# <类型>(<范围>): <主题>
+# # 类型：feat, fix, docs, style, refactor, test, chore, perf, ci, revert
+# 范围：api, ui, db, auth 等。
+# 主题：祈使语气，无句点，最多 50 字符
 #
-# [optional body] - explain why, not what
-# [optional footer] - Breaking changes, closes #issue
+# [可选正文] - 解释原因，而非什么
+# [可选页脚] - 破坏性变更，关闭 #issue
 ```
 
-Enable with: `git config commit.template .gitmessage`
+启用：`git config commit.template .gitmessage`
 
 ## Merge vs Rebase
 
-### Merge (Preserves History)
+### Merge（保留历史）
 
 ```bash
-# Creates a merge commit
+# 创建合并提交
 git checkout main
 git merge feature/user-auth
 
-# Result:
-# *   merge commit
+# 结果：
+# *   合并提交
 # |\
-# | * feature commits
+# | * 功能提交
 # |/
-# * main commits
+# * main 提交
 ```
 
-**Use when:**
-- Merging feature branches into `main`
-- You want to preserve exact history
-- Multiple people worked on the branch
-- The branch has been pushed and others may have based work on it
+**使用时：**
+- 将功能分支合并到 `main`
+- 你想保留确切历史
+- 多人在分支上工作
+- 分支已推送且其他人可能基于其工作
 
-### Rebase (Linear History)
+### Rebase（线性历史）
 
 ```bash
-# Rewrites feature commits onto target branch
+# 将功能提交重写到目标分支
 git checkout feature/user-auth
 git rebase main
 
-# Result:
-# * feature commits (rewritten)
-# * main commits
+# 结果：
+# * 功能提交（重写）
+# * main 提交
 ```
 
-**Use when:**
-- Updating your local feature branch with latest `main`
-- You want a linear, clean history
-- The branch is local-only (not pushed)
-- You're the only one working on the branch
+**使用时：**
+- 用最新的 `main` 更新本地功能分支
+- 你想要线性、干净的历史
+- 分支仅本地（未推送）
+- 你是唯一在分支上工作的人
 
-### Rebase Workflow
+### Rebase 工作流
 
 ```bash
-# Update feature branch with latest main (before PR)
+# PR 前用最新的 main 更新功能分支
 git checkout feature/user-auth
 git fetch origin
 git rebase origin/main
 
-# Fix any conflicts
-# Tests should still pass
+# 解决任何冲突
+# 测试仍应通过
 
-# Force push (only if you're the only contributor)
+# 强制推送（仅当你唯一贡献者时）
 git push --force-with-lease origin feature/user-auth
 ```
 
-### When NOT to Rebase
+### 何时不 Rebase
 
 ```
-# NEVER rebase branches that:
-- Have been pushed to a shared repository
-- Other people have based work on
-- Are protected branches (main, develop)
-- Are already merged
+# 绝不 rebase 分支：
+- 已推送到共享仓库
+- 其他人已基于其工作
+- 受保护分支（main、develop）
+- 已合并
 
-# Why: Rebase rewrites history, breaking others' work
+# 为什么：Rebase 重写历史，破坏他人工作
 ```
 
-## Pull Request Workflow
+## Pull Request 工作流
 
-### PR Title Format
+### PR 标题格式
 
 ```
-<type>(<scope>): <description>
+<类型>(<范围>): <描述>
 
-Examples:
+示例：
 feat(auth): add SSO support for enterprise users
 fix(api): resolve race condition in order processing
 docs(api): add OpenAPI specification for v2 endpoints
 ```
 
-### PR Description Template
+### PR 描述模板
 
 ```markdown
-## What
+## 做什么
 
-Brief description of what this PR does.
+这个 PR 做了什么。
 
-## Why
+## 为什么
 
-Explain the motivation and context.
+解释动机和背景。
 
-## How
+## 怎么做
 
-Key implementation details worth highlighting.
+值得强调的关键实现细节。
 
-## Testing
+## 测试
 
-- [ ] Unit tests added/updated
-- [ ] Integration tests added/updated
-- [ ] Manual testing performed
+- [ ] 已添加/更新单元测试
+- [ ] 已添加/更新集成测试
+- [ ] 已执行手动测试
 
-## Screenshots (if applicable)
+## 截图（如适用）
 
-Before/after screenshots for UI changes.
+UI 变更的前后截图。
 
-## Checklist
+## 检查清单
 
-- [ ] Code follows project style guidelines
-- [ ] Self-review completed
-- [ ] Comments added for complex logic
-- [ ] Documentation updated
-- [ ] No new warnings introduced
-- [ ] Tests pass locally
-- [ ] Related issues linked
+- [ ] 代码遵循项目风格指南
+- [ ] 自我审查已完成
+- [ ] 为复杂逻辑添加了注释
+- [ ] 文档已更新
+- [ ] 未引入新警告
+- [ ] 测试在本地通过
+- [ ] 相关问题已链接
 
 Closes #123
 ```
 
-### Code Review Checklist
+### 代码审查检查清单
 
-**For Reviewers:**
+**审查者：**
 
-- [ ] Does the code solve the stated problem?
-- [ ] Are there any edge cases not handled?
-- [ ] Is the code readable and maintainable?
-- [ ] Are there sufficient tests?
-- [ ] Are there security concerns?
-- [ ] Is the commit history clean (squashed if needed)?
+- [ ] 代码是否解决了所述问题？
+- [ ] 是否有未处理的边界情况？
+- [ ] 代码是否易读和可维护？
+- [ ] 是否有足够的测试？
+- [ ] 是否有安全问题？
+- [ ] 提交历史是否干净（需要时 squash）？
 
-**For Authors:**
+**作者：**
 
-- [ ] Self-review completed before requesting review
-- [ ] CI passes (tests, lint, typecheck)
-- [ ] PR size is reasonable (<500 lines ideal)
-- [ ] Related to a single feature/fix
-- [ ] Description clearly explains the change
+- [ ] 请求审查前已完成自我审查
+- [ ] CI 通过（测试、lint、类型检查）
+- [ ] PR 大小合理（<500 行理想）
+- [ ] 与单一功能/修复相关
+- [ ] 描述清楚解释变更
 
-## Conflict Resolution
+## 冲突解决
 
-### Identify Conflicts
+### 识别冲突
 
 ```bash
-# Check for conflicts before merge
+# 合并前检查冲突
 git checkout main
 git merge feature/user-auth --no-commit --no-ff
 
-# If conflicts, Git will show:
+# 如果有冲突，Git 会显示：
 # CONFLICT (content): Merge conflict in src/auth/login.ts
 # Automatic merge failed; fix conflicts and then commit the result.
 ```
 
-### Resolve Conflicts
+### 解决冲突
 
 ```bash
-# See conflicted files
+# 查看有冲突的文件
 git status
 
-# View conflict markers in file
+# 查看文件中的冲突标记
 # <<<<<<< HEAD
-# content from main
+# main 的内容
 # =======
-# content from feature branch
+# 功能分支的内容
 # >>>>>>> feature/user-auth
 
-# Option 1: Manual resolution
-# Edit file, remove markers, keep correct content
+# 选项 1：手动解决
+# 编辑文件，移除标记，保留正确内容
 
-# Option 2: Use merge tool
+# 选项 2：使用合并工具
 git mergetool
 
-# Option 3: Accept one side
-git checkout --ours src/auth/login.ts    # Keep main version
-git checkout --theirs src/auth/login.ts  # Keep feature version
+# 选项 3：接受某一端
+git checkout --ours src/auth/login.ts    # 保留 main 版本
+git checkout --theirs src/auth/login.ts  # 保留功能版本
 
-# After resolving, stage and commit
+# 解决后，暂存并提交
 git add src/auth/login.ts
 git commit
 ```
 
-### Conflict Prevention Strategies
+### 冲突预防策略
 
 ```bash
-# 1. Keep feature branches small and short-lived
-# 2. Rebase frequently onto main
+# 1. 保持功能分支小且短寿
+# 2. 频繁 rebase 到 main
 git checkout feature/user-auth
 git fetch origin
 git rebase origin/main
 
-# 3. Communicate with team about touching shared files
-# 4. Use feature flags instead of long-lived branches
-# 5. Review and merge PRs promptly
+# 3. 与团队沟通关于触碰共享文件
+# 4. 使用功能标志而非长寿命分支
+# 5. 及时审查和合并 PR
 ```
 
-## Branch Management
+## 分支管理
 
-### Naming Conventions
+### 命名约定
 
 ```
-# Feature branches
+# 功能分支
 feature/user-authentication
 feature/JIRA-123-payment-integration
 
-# Bug fixes
+# Bug 修复
 fix/login-redirect-loop
 fix/456-null-pointer-exception
 
-# Hotfixes (production issues)
+# 热修复（生产问题）
 hotfix/critical-security-patch
 hotfix/database-connection-leak
 
-# Releases
+# 发布
 release/1.2.0
 release/2024-01-hotfix
 
-# Experiments/POCs
+# 实验/POC
 experiment/new-caching-strategy
 poc/graphql-migration
 ```
 
-### Branch Cleanup
+### 分支清理
 
 ```bash
-# Delete local branches that are merged
+# 删除已合并的本地分支
 git branch --merged main | grep -v "^\*\|main" | xargs -n 1 git branch -d
 
-# Delete remote-tracking references for deleted remote branches
+# 删除已删除远程分支的远程追踪引用
 git fetch -p
 
-# Delete local branch
-git branch -d feature/user-auth  # Safe delete (only if merged)
-git branch -D feature/user-auth  # Force delete
+# 删除本地分支
+git branch -d feature/user-auth  # 安全删除（仅在已合并时）
+git branch -D feature/user-auth  # 强制删除
 
-# Delete remote branch
+# 删除远程分支
 git push origin --delete feature/user-auth
 ```
 
-### Stash Workflow
+### Stash 工作流
 
 ```bash
-# Save work in progress
+# 保存进行中的工作
 git stash push -m "WIP: user authentication"
 
-# List stashes
+# 列出 stash
 git stash list
 
-# Apply most recent stash
+# 应用最近的 stash
 git stash pop
 
-# Apply specific stash
+# 应用特定的 stash
 git stash apply stash@{2}
 
-# Drop stash
+# 删除 stash
 git stash drop stash@{0}
 ```
 
-## Release Management
+## 发布管理
 
-### Semantic Versioning
+### 语义化版本
 
 ```
 MAJOR.MINOR.PATCH
 
-MAJOR: Breaking changes
-MINOR: New features, backward compatible
-PATCH: Bug fixes, backward compatible
+MAJOR：破坏性变更
+MINOR：新功能，向后兼容
+PATCH：Bug 修复，向后兼容
 
-Examples:
-1.0.0 → 1.0.1 (patch: bug fix)
-1.0.1 → 1.1.0 (minor: new feature)
-1.1.0 → 2.0.0 (major: breaking change)
+示例：
+1.0.0 → 1.0.1 (patch: bug 修复)
+1.0.1 → 1.1.0 (minor: 新功能)
+1.1.0 → 2.0.0 (major: 破坏性变更)
 ```
 
-### Creating Releases
+### 创建发布
 
 ```bash
-# Create annotated tag
+# 创建带注释的标签
 git tag -a v1.2.0 -m "Release v1.2.0
 
 Features:
@@ -437,59 +437,59 @@ Fixes:
 Breaking Changes:
 - None"
 
-# Push tag to remote
+# 推送标签到远程
 git push origin v1.2.0
 
-# List tags
+# 列出标签
 git tag -l
 
-# Delete tag
+# 删除标签
 git tag -d v1.2.0
 git push origin --delete v1.2.0
 ```
 
-### Changelog Generation
+### Changelog 生成
 
 ```bash
-# Generate changelog from commits
+# 从提交生成 changelog
 git log v1.1.0..v1.2.0 --oneline --no-merges
 
-# Or use conventional-changelog
+# 或使用 conventional-changelog
 npx conventional-changelog -i CHANGELOG.md -s
 ```
 
-## Git Configuration
+## Git 配置
 
-### Essential Configs
+### 基本配置
 
 ```bash
-# User identity
+# 用户身份
 git config --global user.name "Your Name"
 git config --global user.email "your@email.com"
 
-# Default branch name
+# 默认分支名
 git config --global init.defaultBranch main
 
-# Pull behavior (rebase instead of merge)
+# Pull 行为（rebase 而非 merge）
 git config --global pull.rebase true
 
-# Push behavior (push current branch only)
+# Push 行为（仅推送当前分支）
 git config --global push.default current
 
-# Auto-correct typos
+# 自动纠正拼写错误
 git config --global help.autocorrect 1
 
-# Better diff algorithm
+# 更好的 diff 算法
 git config --global diff.algorithm histogram
 
-# Color output
+# 彩色输出
 git config --global color.ui auto
 ```
 
-### Useful Aliases
+### 有用的别名
 
 ```bash
-# Add to ~/.gitconfig
+# 添加到 ~/.gitconfig
 [alias]
     co = checkout
     br = branch
@@ -498,218 +498,3 @@ git config --global color.ui auto
     unstage = reset HEAD --
     last = log -1 HEAD
     visual = log --oneline --graph --all
-    amend = commit --amend --no-edit
-    wip = commit -m "WIP"
-    undo = reset --soft HEAD~1
-    contributors = shortlog -sn
-```
-
-### Gitignore Patterns
-
-```gitignore
-# Dependencies
-node_modules/
-vendor/
-
-# Build outputs
-dist/
-build/
-*.o
-*.exe
-
-# Environment files
-.env
-.env.local
-.env.*.local
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# Logs
-*.log
-logs/
-
-# Test coverage
-coverage/
-
-# Cache
-.cache/
-*.tsbuildinfo
-```
-
-## Common Workflows
-
-### Starting a New Feature
-
-```bash
-# 1. Update main branch
-git checkout main
-git pull origin main
-
-# 2. Create feature branch
-git checkout -b feature/user-auth
-
-# 3. Make changes and commit
-git add .
-git commit -m "feat(auth): implement OAuth2 login"
-
-# 4. Push to remote
-git push -u origin feature/user-auth
-
-# 5. Create Pull Request on GitHub/GitLab
-```
-
-### Updating a PR with New Changes
-
-```bash
-# 1. Make additional changes
-git add .
-git commit -m "feat(auth): add error handling"
-
-# 2. Push updates
-git push origin feature/user-auth
-```
-
-### Syncing Fork with Upstream
-
-```bash
-# 1. Add upstream remote (once)
-git remote add upstream https://github.com/original/repo.git
-
-# 2. Fetch upstream
-git fetch upstream
-
-# 3. Merge upstream/main into your main
-git checkout main
-git merge upstream/main
-
-# 4. Push to your fork
-git push origin main
-```
-
-### Undoing Mistakes
-
-```bash
-# Undo last commit (keep changes)
-git reset --soft HEAD~1
-
-# Undo last commit (discard changes)
-git reset --hard HEAD~1
-
-# Undo last commit pushed to remote
-git revert HEAD
-git push origin main
-
-# Undo specific file changes
-git checkout HEAD -- path/to/file
-
-# Fix last commit message
-git commit --amend -m "New message"
-
-# Add forgotten file to last commit
-git add forgotten-file
-git commit --amend --no-edit
-```
-
-## Git Hooks
-
-### Pre-Commit Hook
-
-```bash
-#!/bin/bash
-# .git/hooks/pre-commit
-
-# Run linting
-npm run lint || exit 1
-
-# Run tests
-npm test || exit 1
-
-# Check for secrets
-if git diff --cached | grep -E '(password|api_key|secret)'; then
-    echo "Possible secret detected. Commit aborted."
-    exit 1
-fi
-```
-
-### Pre-Push Hook
-
-```bash
-#!/bin/bash
-# .git/hooks/pre-push
-
-# Run full test suite
-npm run test:all || exit 1
-
-# Check for console.log statements
-if git diff origin/main | grep -E 'console\.log'; then
-    echo "Remove console.log statements before pushing."
-    exit 1
-fi
-```
-
-## Anti-Patterns
-
-```
-# BAD: Committing directly to main
-git checkout main
-git commit -m "fix bug"
-
-# GOOD: Use feature branches and PRs
-
-# BAD: Committing secrets
-git add .env  # Contains API keys
-
-# GOOD: Add to .gitignore, use environment variables
-
-# BAD: Giant PRs (1000+ lines)
-# GOOD: Break into smaller, focused PRs
-
-# BAD: "Update" commit messages
-git commit -m "update"
-git commit -m "fix"
-
-# GOOD: Descriptive messages
-git commit -m "fix(auth): resolve redirect loop after login"
-
-# BAD: Rewriting public history
-git push --force origin main
-
-# GOOD: Use revert for public branches
-git revert HEAD
-
-# BAD: Long-lived feature branches (weeks/months)
-# GOOD: Keep branches short (days), rebase frequently
-
-# BAD: Committing generated files
-git add dist/
-git add node_modules/
-
-# GOOD: Add to .gitignore
-```
-
-## Quick Reference
-
-| Task | Command |
-|------|---------|
-| Create branch | `git checkout -b feature/name` |
-| Switch branch | `git checkout branch-name` |
-| Delete branch | `git branch -d branch-name` |
-| Merge branch | `git merge branch-name` |
-| Rebase branch | `git rebase main` |
-| View history | `git log --oneline --graph` |
-| View changes | `git diff` |
-| Stage changes | `git add .` or `git add -p` |
-| Commit | `git commit -m "message"` |
-| Push | `git push origin branch-name` |
-| Pull | `git pull origin branch-name` |
-| Stash | `git stash push -m "message"` |
-| Undo last commit | `git reset --soft HEAD~1` |
-| Revert commit | `git revert HEAD` |

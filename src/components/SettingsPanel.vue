@@ -137,6 +137,23 @@ import { invoke } from '@tauri-apps/api/core'
 const props = defineProps<{ visible: boolean }>()
 const emit = defineEmits<{ (e: 'close'): void }>()
 
+interface AgentModelConfig {
+  provider: string
+  model: string
+  context_window: number
+}
+
+interface ProviderConfig {
+  provider: string
+  minimax_api_key: string
+  model: string
+  custom_api_url: string
+  custom_api_key: string
+  custom_model: string
+  context_window: number
+  custom_context_window: number
+}
+
 const loaded = ref(false)
 const provider = ref('minimax')
 const minimaxApiKey = ref('')
@@ -175,7 +192,7 @@ const agentModels = ref<Record<string, string>>({})
 async function loadAgentConfigs() {
   for (const ag of teamAgents) {
     try {
-      const cfg = await invoke<any>('get_agent_model_config', { agentType: ag.key })
+      const cfg = await invoke<AgentModelConfig | null>('get_agent_model_config', { agentType: ag.key })
       if (cfg) {
         agentModels.value[ag.key] = `${cfg.provider}|${cfg.model}|${cfg.context_window}`
       } else {
@@ -242,7 +259,7 @@ watch(() => props.visible, async (val) => {
 
 const loadSettings = async () => {
   try {
-    const config = await invoke<any>('get_provider_config')
+    const config = await invoke<ProviderConfig>('get_provider_config')
     provider.value = config.provider || 'minimax'
     minimaxApiKey.value = config.minimax_api_key || ''
     model.value = config.model || 'MiniMax-M2.7'

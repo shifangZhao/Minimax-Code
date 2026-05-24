@@ -1,32 +1,32 @@
 ---
 name: csharp-testing
-description: C# and .NET testing patterns with xUnit, FluentAssertions, mocking, integration tests, and test organization best practices.
+description: C# 和 .NET 测试模式，包含 xUnit、FluentAssertions、mock、集成测试和测试组织最佳实践。
 origin: ECC
 ---
 
-# C# Testing Patterns
+# C# 测试模式
 
-Comprehensive testing patterns for .NET applications using xUnit, FluentAssertions, and modern testing practices.
+使用 xUnit、FluentAssertions 和现代测试实践的综合 .NET 应用测试模式。
 
-## When to Activate
+## 激活时机
 
-- Writing new tests for C# code
-- Reviewing test quality and coverage
-- Setting up test infrastructure for .NET projects
-- Debugging flaky or slow tests
+- 为 C# 代码编写新测试
+- 审查测试质量和覆盖率
+- 为 .NET 项目设置测试基础设施
+- 调试不稳定或慢的测试
 
-## Test Framework Stack
+## 测试框架栈
 
-| Tool | Purpose |
+| 工具 | 用途 |
 |---|---|
-| **xUnit** | Test framework (preferred for .NET) |
-| **FluentAssertions** | Readable assertion syntax |
-| **NSubstitute** or **Moq** | Mocking dependencies |
-| **Testcontainers** | Real infrastructure in integration tests |
-| **WebApplicationFactory** | ASP.NET Core integration tests |
-| **Bogus** | Realistic test data generation |
+| **xUnit** | 测试框架（.NET 首选） |
+| **FluentAssertions** | 可读断言语法 |
+| **NSubstitute** 或 **Moq** | Mock 依赖 |
+| **Testcontainers** | 集成测试中的真实基础设施 |
+| **WebApplicationFactory** | ASP.NET Core 集成测试 |
+| **Bogus** | 真实测试数据生成 |
 
-## Unit Test Structure
+## 单元测试结构
 
 ### Arrange-Act-Assert
 
@@ -81,7 +81,7 @@ public sealed class OrderServiceTests
 }
 ```
 
-### Parameterized Tests with Theory
+### 使用 Theory 的参数化测试
 
 ```csharp
 [Theory]
@@ -113,7 +113,7 @@ public static TheoryData<CreateOrderRequest, string> InvalidOrderCases => new()
 };
 ```
 
-## Mocking with NSubstitute
+## 使用 NSubstitute Mock
 
 ```csharp
 [Fact]
@@ -147,9 +147,9 @@ public async Task PlaceOrderAsync_PersistsOrder()
 }
 ```
 
-## ASP.NET Core Integration Tests
+## ASP.NET Core 集成测试
 
-### WebApplicationFactory Setup
+### WebApplicationFactory 设置
 
 ```csharp
 public sealed class OrderApiTests : IClassFixture<WebApplicationFactory<Program>>
@@ -195,7 +195,7 @@ public sealed class OrderApiTests : IClassFixture<WebApplicationFactory<Program>
 }
 ```
 
-### Testing with Testcontainers
+### 使用 Testcontainers 测试
 
 ```csharp
 public sealed class PostgresOrderRepositoryTests : IAsyncLifetime
@@ -237,7 +237,7 @@ public sealed class PostgresOrderRepositoryTests : IAsyncLifetime
 }
 ```
 
-## Test Organization
+## 测试组织
 
 ```
 tests/
@@ -259,7 +259,7 @@ tests/
       DatabaseFixture.cs
 ```
 
-## Test Data Builders
+## 测试数据构建器
 
 ```csharp
 public sealed class OrderBuilder
@@ -279,43 +279,19 @@ public sealed class OrderBuilder
         return this;
     }
 
+    public OrderBuilder WithNoItems()
+    {
+        _items.Clear();
+        return this;
+    }
+
     public Order Build() => Order.Create(_customerId, _items);
 }
 
-// Usage in tests
+// 使用
 var order = new OrderBuilder()
-    .WithCustomer("cust-vip")
-    .WithItem("SKU-PREMIUM", 3, 99.99m)
+    .WithCustomer("cust-123")
+    .WithItem("SKU-001", 2, 29.99m)
+    .WithItem("SKU-002", 1, 9.99m)
     .Build();
-```
-
-## Common Anti-Patterns
-
-| Anti-Pattern | Fix |
-|---|---|
-| Testing implementation details | Test behavior and outcomes |
-| Shared mutable test state | Fresh instance per test (xUnit does this via constructors) |
-| `Thread.Sleep` in async tests | Use `Task.Delay` with timeout, or polling helpers |
-| Asserting on `ToString()` output | Assert on typed properties |
-| One giant assertion per test | One logical assertion per test |
-| Test names describing implementation | Name by behavior: `Method_ExpectedResult_WhenCondition` |
-| Ignoring `CancellationToken` | Always pass and verify cancellation |
-
-## Running Tests
-
-```bash
-# Run all tests
-dotnet test
-
-# Run with coverage
-dotnet test --collect:"XPlat Code Coverage"
-
-# Run specific project
-dotnet test tests/MyApp.UnitTests/
-
-# Filter by test name
-dotnet test --filter "FullyQualifiedName~OrderService"
-
-# Watch mode during development
-dotnet watch test --project tests/MyApp.UnitTests/
 ```

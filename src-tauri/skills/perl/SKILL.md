@@ -1,40 +1,40 @@
 ---
 name: perl-patterns
-description: Modern Perl 5.36+ idioms, best practices, and conventions for building robust, maintainable Perl applications.
+description: 现代 Perl 5.36+ 惯用语法、最佳实践和约定，用于构建健壮、可维护的 Perl 应用程序。
 origin: ECC
 ---
 
-# Modern Perl Development Patterns
+# 现代 Perl 开发模式
 
-Idiomatic Perl 5.36+ patterns and best practices for building robust, maintainable applications.
+用于构建健壮、可维护应用程序的惯用 Perl 5.36+ 模式和最佳实践。
 
-## When to Activate
+## 激活时机
 
-- Writing new Perl code or modules
-- Reviewing Perl code for idiom compliance
-- Refactoring legacy Perl to modern standards
-- Designing Perl module architecture
-- Migrating pre-5.36 code to modern Perl
+- 编写新的 Perl 代码或模块
+- 审查 Perl 代码的惯用语法合规性
+- 将遗留 Perl 重构为现代标准
+- 设计 Perl 模块架构
+- 将 pre-5.36 代码迁移到现代 Perl
 
-## How It Works
+## 工作原理
 
-Apply these patterns as a bias toward modern Perl 5.36+ defaults: signatures, explicit modules, focused error handling, and testable boundaries. The examples below are meant to be copied as starting points, then tightened for the actual app, dependency stack, and deployment model in front of you.
+将这些模式作为现代 Perl 5.36+ 默认的偏置应用：签名、显式模块、专注错误处理和可测试边界。下面的示例作为起始点复制，然后为你面前实际的应用、依赖栈和部署模型收紧。
 
-## Core Principles
+## 核心原则
 
-### 1. Use `v5.36` Pragma
+### 1. 使用 `v5.36` 编译指示
 
-A single `use v5.36` replaces the old boilerplate and enables strict, warnings, and subroutine signatures.
+单个 `use v5.36` 替换旧样板并启用 strict、warnings 和子例程签名。
 
 ```perl
-# Good: Modern preamble
+# 好：现代前言
 use v5.36;
 
 sub greet($name) {
     say "Hello, $name!";
 }
 
-# Bad: Legacy boilerplate
+# 坏：遗留样板
 use strict;
 use warnings;
 use feature 'say', 'signatures';
@@ -46,28 +46,28 @@ sub greet {
 }
 ```
 
-### 2. Subroutine Signatures
+### 2. 子例程签名
 
-Use signatures for clarity and automatic arity checking.
+使用签名以提高清晰度和自动元数检查。
 
 ```perl
 use v5.36;
 
-# Good: Signatures with defaults
+# 好：带默认值的签名
 sub connect_db($host, $port = 5432, $timeout = 30) {
-    # $host is required, others have defaults
+    # $host 是必需的，其他有默认值
     return DBI->connect("dbi:Pg:host=$host;port=$port", undef, undef, {
         RaiseError => 1,
         PrintError => 0,
     });
 }
 
-# Good: Slurpy parameter for variable args
+# 好：Slurpy 参数用于可变参数
 sub log_message($level, @details) {
     say "[$level] " . join(' ', @details);
 }
 
-# Bad: Manual argument unpacking
+# 坏：手动参数解包
 sub connect_db {
     my ($host, $port, $timeout) = @_;
     $port    //= 5432;
@@ -76,23 +76,23 @@ sub connect_db {
 }
 ```
 
-### 3. Context Sensitivity
+### 3. 上下文敏感
 
-Understand scalar vs list context — a core Perl concept.
+理解标量 vs 列表上下文 — 一个核心 Perl 概念。
 
 ```perl
 use v5.36;
 
 my @items = (1, 2, 3, 4, 5);
 
-my @copy  = @items;            # List context: all elements
-my $count = @items;            # Scalar context: count (5)
-say "Items: " . scalar @items; # Force scalar context
+my @copy  = @items;            # 列表上下文：所有元素
+my $count = @items;            # 标量上下文：计数 (5)
+say "Items: " . scalar @items; # 强制标量上下文
 ```
 
-### 4. Postfix Dereferencing
+### 4. 后缀解引用
 
-Use postfix dereference syntax for readability with nested structures.
+对嵌套结构使用后缀解引用语法以提高可读性。
 
 ```perl
 use v5.36;
@@ -104,28 +104,28 @@ my $data = {
     ],
 };
 
-# Good: Postfix dereferencing
+# 好：后缀解引用
 my @users = $data->{users}->@*;
 my @roles = $data->{users}[0]{roles}->@*;
 my %first = $data->{users}[0]->%*;
 
-# Bad: Circumfix dereferencing (harder to read in chains)
+# 坏：环缀解引用（链中难读）
 my @users = @{ $data->{users} };
 my @roles = @{ $data->{users}[0]{roles} };
 ```
 
-### 5. The `isa` Operator (5.32+)
+### 5. `isa` 操作符（5.32+）
 
-Infix type-check — replaces `blessed($o) && $o->isa('X')`.
+中缀类型检查 — 替换 `blessed($o) && $o->isa('X')`。
 
 ```perl
 use v5.36;
 if ($obj isa 'My::Class') { $obj->do_something }
 ```
 
-## Error Handling
+## 错误处理
 
-### eval/die Pattern
+### eval/die 模式
 
 ```perl
 use v5.36;
@@ -137,7 +137,7 @@ sub parse_config($path) {
 }
 ```
 
-### Try::Tiny (Reliable Exception Handling)
+### Try::Tiny（可靠的异常处理）
 
 ```perl
 use v5.36;
@@ -156,7 +156,7 @@ sub fetch_user($id) {
 }
 ```
 
-### Native try/catch (5.40+)
+### 原生 try/catch（5.40+）
 
 ```perl
 use v5.40;
@@ -173,12 +173,12 @@ sub divide($x, $y) {
 }
 ```
 
-## Modern OO with Moo
+## 使用 Moo 的现代 OO
 
-Prefer Moo for lightweight, modern OO. Use Moose only when its metaprotocol is needed.
+优先 Moo 用于轻量级、现代 OO。仅在其元协议需要时使用 Moose。
 
 ```perl
-# Good: Moo class
+# 好：Moo 类
 package User;
 use Moo;
 use Types::Standard qw(Str Int ArrayRef);
@@ -199,14 +199,14 @@ sub greet($self) {
 
 1;
 
-# Usage
+# 使用
 my $user = User->new(
     name  => 'Alice',
     email => 'alice@example.com',
     roles => ['admin', 'user'],
 );
 
-# Bad: Blessed hashref (no validation, no accessors)
+# 坏：blessed hashref（无验证，无访问器）
 package User;
 sub new {
     my ($class, %args) = @_;
@@ -216,7 +216,7 @@ sub name { return $_[0]->{name} }
 1;
 ```
 
-### Moo Roles
+### Moo 角色
 
 ```perl
 package Role::Serializable;
@@ -235,7 +235,7 @@ sub TO_HASH($self) { { name => $self->name, email => $self->email } }
 1;
 ```
 
-### Native `class` Keyword (5.38+, Corinna)
+### 原生 `class` 关键字（5.38+，Corinna）
 
 ```perl
 use v5.38;
@@ -252,14 +252,14 @@ my $p = Point->new(x => 3, y => 4);
 say $p->magnitude;  # 5
 ```
 
-## Regular Expressions
+## 正则表达式
 
-### Named Captures and `/x` Flag
+### 命名捕获和 `/x` 标志
 
 ```perl
 use v5.36;
 
-# Good: Named captures with /x for readability
+# 好：命名捕获和 /x 以提高可读性
 my $log_re = qr{
     ^ (?<timestamp> \d{4}-\d{2}-\d{2} \s \d{2}:\d{2}:\d{2} )
     \s+ \[ (?<level> \w+ ) \]
@@ -271,18 +271,18 @@ if ($line =~ $log_re) {
     say "Message: $+{message}";
 }
 
-# Bad: Positional captures (hard to maintain)
+# 坏：位置捕获（难维护）
 if ($line =~ /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+\[(\w+)\]\s+(.+)$/) {
     say "Time: $1, Level: $2";
 }
 ```
 
-### Precompiled Patterns
+### 预编译模式
 
 ```perl
 use v5.36;
 
-# Good: Compile once, use many
+# 好：编译一次，使用多次
 my $email_re = qr/^[A-Za-z0-9._%+-]+\@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
 
 sub validate_emails(@emails) {
@@ -290,14 +290,14 @@ sub validate_emails(@emails) {
 }
 ```
 
-## Data Structures
+## 数据结构
 
-### References and Safe Deep Access
+### 引用和安全深度访问
 
 ```perl
 use v5.36;
 
-# Hash and array references
+# 哈希和数组引用
 my $config = {
     database => {
         host => 'localhost',
@@ -306,18 +306,18 @@ my $config = {
     },
 };
 
-# Safe deep access (returns undef if any level missing)
+# 安全深度访问（任何级别缺失返回 undef）
 my $port = $config->{database}{port};           # 5432
-my $missing = $config->{cache}{host};           # undef, no error
+my $missing = $config->{cache}{host};           # undef，无错误
 
-# Hash slices
+# 哈希切片
 my %subset;
 @subset{qw(host port)} = @{$config->{database}}{qw(host port)};
 
-# Array slices
+# 数组切片
 my @first_two = $config->{database}{options}->@[0, 1];
 
-# Multi-variable for loop (experimental in 5.36, stable in 5.40)
+# 多变量 for 循环（5.36 实验，5.40 稳定）
 use feature 'for_list';
 no warnings 'experimental::for_list';
 for my ($key, $val) (%$config) {
@@ -325,14 +325,14 @@ for my ($key, $val) (%$config) {
 }
 ```
 
-## File I/O
+## 文件 I/O
 
-### Three-Argument Open
+### 三参数 Open
 
 ```perl
 use v5.36;
 
-# Good: Three-arg open with autodie (core module, eliminates 'or die')
+# 好：三参数 open with autodie（核心模块，消除 'or die'）
 use autodie;
 
 sub read_file($path) {
@@ -343,12 +343,12 @@ sub read_file($path) {
     return $content;
 }
 
-# Bad: Two-arg open (shell injection risk, see perl-security)
-open FH, $path;            # NEVER do this
-open FH, "< $path";        # Still bad — user data in mode string
+# 坏：两参数 open（shell 注入风险，参见 perl-security）
+open FH, $path;            # 绝不这样做
+open FH, "< $path";        # 仍然坏 — 用户数据在模式字符串中
 ```
 
-### Path::Tiny for File Operations
+### Path::Tiny 用于文件操作
 
 ```perl
 use v5.36;
@@ -358,36 +358,36 @@ my $file = path('config', 'app.json');
 my $content = $file->slurp_utf8;
 $file->spew_utf8($new_content);
 
-# Iterate directory
+# 迭代目录
 for my $child (path('src')->children(qr/\.pl$/)) {
     say $child->basename;
 }
 ```
 
-## Module Organization
+## 模块组织
 
-### Standard Project Layout
+### 标准项目布局
 
 ```text
 MyApp/
 ├── lib/
 │   └── MyApp/
-│       ├── App.pm           # Main module
-│       ├── Config.pm        # Configuration
-│       ├── DB.pm            # Database layer
-│       └── Util.pm          # Utilities
+│       ├── App.pm           # 主模块
+│       ├── Config.pm        # 配置
+│       ├── DB.pm            # 数据库层
+│       └── Util.pm          # 工具
 ├── bin/
-│   └── myapp                # Entry-point script
+│   └── myapp                # 入口点脚本
 ├── t/
-│   ├── 00-load.t            # Compilation tests
-│   ├── unit/                # Unit tests
-│   └── integration/         # Integration tests
-├── cpanfile                 # Dependencies
-├── Makefile.PL              # Build system
-└── .perlcriticrc            # Linting config
+│   ├── 00-load.t            # 编译测试
+│   ├── unit/                # 单元测试
+│   └── integration/         # 集成测试
+├── cpanfile                 # 依赖
+├── Makefile.PL              # 构建系统
+└── .perlcriticrc            # Linting 配置
 ```
 
-### Exporter Patterns
+### 导出器模式
 
 ```perl
 package MyApp::Util;
@@ -402,20 +402,20 @@ sub trim($str) { $str =~ s/^\s+|\s+$//gr }
 1;
 ```
 
-## Tooling
+## 工具
 
-### perltidy Configuration (.perltidyrc)
+### perltidy 配置 (.perltidyrc)
 
 ```text
--i=4        # 4-space indent
--l=100      # 100-char line length
--ci=4       # continuation indent
+-i=4        # 4 空格缩进
+-l=100      # 100 字符行长度
+-ci=4       # 继续缩进
 -ce         # cuddled else
--bar        # opening brace on same line
--nolq       # don't outdent long quoted strings
+-bar        # 开头大括号在同一行
+-nolq       # 不 outdent 长引用字符串
 ```
 
-### perlcritic Configuration (.perlcriticrc)
+### perlcritic 配置 (.perlcriticrc)
 
 ```ini
 severity = 3
@@ -432,12 +432,12 @@ severity = 4
 allowed_values = 0 1 2 -1
 ```
 
-### Dependency Management (cpanfile + carton)
+### 依赖管理（cpanfile + carton）
 
 ```bash
-cpanm App::cpanminus Carton   # Install tools
-carton install                 # Install deps from cpanfile
-carton exec -- perl bin/myapp  # Run with local deps
+cpanm App::cpanminus Carton   # 安装工具
+carton install                 # 从 cpanfile 安装依赖
+carton exec -- perl bin/myapp  # 使用本地依赖运行
 ```
 
 ```perl
@@ -453,84 +453,83 @@ on test => sub {
 };
 ```
 
-## Quick Reference: Modern Perl Idioms
+## 快速参考：现代 Perl 惯用语法
 
-| Legacy Pattern | Modern Replacement |
+| 遗留模式 | 现代替换 |
 |---|---|
 | `use strict; use warnings;` | `use v5.36;` |
 | `my ($x, $y) = @_;` | `sub foo($x, $y) { ... }` |
 | `@{ $ref }` | `$ref->@*` |
 | `%{ $ref }` | `$ref->%*` |
 | `open FH, "< $file"` | `open my $fh, '<:encoding(UTF-8)', $file` |
-| `blessed hashref` | `Moo` class with types |
-| `$1, $2, $3` | `$+{name}` (named captures) |
-| `eval { }; if ($@)` | `Try::Tiny` or native `try/catch` (5.40+) |
+| `blessed hashref` | 带类型的 `Moo` 类 |
+| `$1, $2, $3` | `$+{name}`（命名捕获） |
+| `eval { }; if ($@)` | `Try::Tiny` 或原生 `try/catch`（5.40+） |
 | `BEGIN { require Exporter; }` | `use Exporter 'import';` |
-| Manual file ops | `Path::Tiny` |
-| `blessed($o) && $o->isa('X')` | `$o isa 'X'` (5.32+) |
-| `builtin::true / false` | `use builtin 'true', 'false';` (5.36+, experimental) |
+| 手动文件操作 | `Path::Tiny` |
+| `blessed($o) && $o->isa('X')` | `$o isa 'X'`（5.32+） |
+| `builtin::true / false` | `use builtin 'true', 'false';`（5.36+，实验性） |
 
-## Anti-Patterns
+## 反模式
 
 ```perl
-# 1. Two-arg open (security risk)
-open FH, $filename;                     # NEVER
+# 1. 两参数 open（安全风险）
+open FH, $filename;                     # 绝不
 
-# 2. Indirect object syntax (ambiguous parsing)
-my $obj = new Foo(bar => 1);            # Bad
-my $obj = Foo->new(bar => 1);           # Good
+# 2. 间接对象语法（解析歧义）
+my $obj = new Foo(bar => 1);            # 坏
+my $obj = Foo->new(bar => 1);           # 好
 
-# 3. Excessive reliance on $_
-map { process($_) } grep { validate($_) } @items;  # Hard to follow
-my @valid = grep { validate($_) } @items;           # Better: break it up
+# 3. 过度依赖 $_
+map { process($_) } grep { validate($_) } @items;  # 难跟随
+my @valid = grep { validate($_) } @items;           # 更好：分解
 my @results = map { process($_) } @valid;
 
-# 4. Disabling strict refs
-no strict 'refs';                        # Almost always wrong
-${"My::Package::$var"} = $value;         # Use a hash instead
+# 4. 禁用 strict refs
+no strict 'refs';                        # 几乎总是错
+${"My::Package::$var"} = $value;         # 改用哈希
 
-# 5. Global variables as configuration
-our $TIMEOUT = 30;                       # Bad: mutable global
-use constant TIMEOUT => 30;              # Better: constant
-# Best: Moo attribute with default
+# 5. 全局变量作为配置
+our $TIMEOUT = 30;                       # 坏：可变全局
+use constant TIMEOUT => 30;              # 更好：常量
+# 最好：带默认值的 Moo 属性
 
-# 6. String eval for module loading
-eval "require $module";                  # Bad: code injection risk
-eval "use $module";                      # Bad
-use Module::Runtime 'require_module';    # Good: safe module loading
+# 6. 字符串 eval 加载模块
+eval "require $module";                  # 坏：代码注入风险
+eval "use $module";                      # 坏
+use Module::Runtime 'require_module';    # 好：安全模块加载
 require_module($module);
 ```
 
-**Remember**: Modern Perl is clean, readable, and safe. Let `use v5.36` handle the boilerplate, use Moo for objects, and prefer CPAN's battle-tested modules over hand-rolled solutions.
-
+**记住**：现代 Perl 是清洁、可读和安全的。让 `use v5.36` 处理样板，使用 Moo 处理对象，优先使用 CPAN 的经过实战测试的模块而非手写解决方案。
 
 ---
 
 ---
 name: perl-testing
-description: Perl testing patterns using Test2::V0, Test::More, prove runner, mocking, coverage with Devel::Cover, and TDD methodology.
+description: Perl 测试模式，使用 Test2::V0、Test::More、prove 运行器、mock、Devel::Cover 覆盖率和 TDD 方法论。
 origin: ECC
 ---
 
-# Perl Testing Patterns
+# Perl 测试模式
 
-Comprehensive testing strategies for Perl applications using Test2::V0, Test::More, prove, and TDD methodology.
+使用 Test2::V0、Test::More、prove 和 TDD 方法论的综合 Perl 应用测试策略。
 
-## When to Activate
+## 激活时机
 
-- Writing new Perl code (follow TDD: red, green, refactor)
-- Designing test suites for Perl modules or applications
-- Reviewing Perl test coverage
-- Setting up Perl testing infrastructure
-- Migrating tests from Test::More to Test2::V0
-- Debugging failing Perl tests
+- 编写新 Perl 代码（遵循 TDD：红、绿、重构）
+- 为 Perl 模块或应用设计测试套件
+- 审查 Perl 测试覆盖
+- 设置 Perl 测试基础设施
+- 将测试从 Test::More 迁移到 Test2::V0
+- 调试失败的 Perl 测试
 
-## TDD Workflow
+## TDD 工作流
 
-Always follow the RED-GREEN-REFACTOR cycle.
+始终遵循 RED-GREEN-REFACTOR 循环。
 
 ```perl
-# Step 1: RED — Write a failing test
+# 步骤 1：RED — 写一个失败的测试
 # t/unit/calculator.t
 use v5.36;
 use Test2::V0;
@@ -546,7 +545,7 @@ subtest 'addition' => sub {
 
 done_testing;
 
-# Step 2: GREEN — Write minimal implementation
+# 步骤 2：GREEN — 写最小实现
 # lib/Calculator.pm
 package Calculator;
 use v5.36;
@@ -558,56 +557,56 @@ sub add($self, $a, $b) {
 
 1;
 
-# Step 3: REFACTOR — Improve while tests stay green
-# Run: prove -lv t/unit/calculator.t
+# 步骤 3：REFACTOR — 在测试保持绿色时改进
+# 运行：prove -lv t/unit/calculator.t
 ```
 
-## Test::More Fundamentals
+## Test::More 基础
 
-The standard Perl testing module — widely used, ships with core.
+标准 Perl 测试模块 — 广泛使用，随核心一起发货。
 
-### Basic Assertions
+### 基本断言
 
 ```perl
 use v5.36;
 use Test::More;
 
-# Plan upfront or use done_testing
-# plan tests => 5;  # Fixed plan (optional)
+# 预先计划或使用 done_testing
+# plan tests => 5;  # 固定计划（可选）
 
-# Equality
+# 相等
 is($result, 42, 'returns correct value');
 isnt($result, 0, 'not zero');
 
-# Boolean
+# 布尔
 ok($user->is_active, 'user is active');
 ok(!$user->is_banned, 'user is not banned');
 
-# Deep comparison
+# 深度比较
 is_deeply(
     $got,
     { name => 'Alice', roles => ['admin'] },
     'returns expected structure'
 );
 
-# Pattern matching
+# 模式匹配
 like($error, qr/not found/i, 'error mentions not found');
 unlike($output, qr/password/, 'output hides password');
 
-# Type check
+# 类型检查
 isa_ok($obj, 'MyApp::User');
 can_ok($obj, 'save', 'delete');
 
 done_testing;
 ```
 
-### SKIP and TODO
+### SKIP 和 TODO
 
 ```perl
 use v5.36;
 use Test::More;
 
-# Skip tests conditionally
+# 条件跳过测试
 SKIP: {
     skip 'No database configured', 2 unless $ENV{TEST_DB};
 
@@ -616,7 +615,7 @@ SKIP: {
     is($db->version, '15', 'correct PostgreSQL version');
 }
 
-# Mark expected failures
+# 标记预期失败
 TODO: {
     local $TODO = 'Caching not yet implemented';
     is($cache->get('key'), 'value', 'cache returns value');
@@ -625,49 +624,49 @@ TODO: {
 done_testing;
 ```
 
-## Test2::V0 Modern Framework
+## Test2::V0 现代框架
 
-Test2::V0 is the modern replacement for Test::More — richer assertions, better diagnostics, and extensible.
+Test2::V0 是 Test::More 的现代替代 — 更丰富的断言、更好的诊断和可扩展。
 
-### Why Test2?
+### 为什么用 Test2？
 
-- Superior deep comparison with hash/array builders
-- Better diagnostic output on failures
-- Subtests with cleaner scoping
-- Extensible via Test2::Tools::* plugins
-- Backward-compatible with Test::More tests
+- 通过哈希/数组构建器优越的深度比较
+- 失败时更好的诊断输出
+- 更清洁作用域的子测试
+- 通过 Test2::Tools::* 插件可扩展
+- 与 Test::More 测试向后兼容
 
-### Deep Comparison with Builders
+### 使用构建器的深度比较
 
 ```perl
 use v5.36;
 use Test2::V0;
 
-# Hash builder — check partial structure
+# 哈希构建器 — 检查部分结构
 is(
     $user->to_hash,
     hash {
         field name  => 'Alice';
         field email => match(qr/\@example\.com$/);
         field age   => validator(sub { $_ >= 18 });
-        # Ignore other fields
+        # 忽略其他字段
         etc();
     },
     'user has expected fields'
 );
 
-# Array builder
+# 数组构建器
 is(
     $result,
     array {
         item 'first';
         item match(qr/^second/);
-        item DNE();  # Does Not Exist — verify no extra items
+        item DNE();  # 不存在 — 验证无额外项
     },
     'result matches expected list'
 );
 
-# Bag — order-independent comparison
+# Bag — 顺序无关比较
 is(
     $tags,
     bag {
@@ -679,7 +678,7 @@ is(
 );
 ```
 
-### Subtests
+### 子测试
 
 ```perl
 use v5.36;
@@ -702,23 +701,23 @@ subtest 'User validation' => sub {
 done_testing;
 ```
 
-### Exception Testing with Test2
+### Test2 异常测试
 
 ```perl
 use v5.36;
 use Test2::V0;
 
-# Test that code dies
+# 测试代码死亡
 like(
     dies { divide(10, 0) },
     qr/Division by zero/,
     'dies on division by zero'
 );
 
-# Test that code lives
+# 测试代码存活
 ok(lives { divide(10, 2) }, 'division succeeds') or note($@);
 
-# Combined pattern
+# 组合模式
 subtest 'error handling' => sub {
     ok(lives { parse_config('valid.json') }, 'valid config parses');
     like(
@@ -731,57 +730,57 @@ subtest 'error handling' => sub {
 done_testing;
 ```
 
-## Test Organization and prove
+## 测试组织和 prove
 
-### Directory Structure
+### 目录结构
 
 ```text
 t/
-├── 00-load.t              # Verify modules compile
-├── 01-basic.t             # Core functionality
+├── 00-load.t              # 验证模块编译
+├── 01-basic.t             # 核心功能
 ├── unit/
-│   ├── config.t           # Unit tests by module
+│   ├── config.t           # 按模块的单元测试
 │   ├── user.t
 │   └── util.t
 ├── integration/
 │   ├── database.t
 │   └── api.t
 ├── lib/
-│   └── TestHelper.pm      # Shared test utilities
+│   └── TestHelper.pm      # 共享测试工具
 └── fixtures/
-    ├── config.json        # Test data files
+    ├── config.json        # 测试数据文件
     └── users.csv
 ```
 
-### prove Commands
+### prove 命令
 
 ```bash
-# Run all tests
+# 运行所有测试
 prove -l t/
 
-# Verbose output
+# 详细输出
 prove -lv t/
 
-# Run specific test
+# 运行特定测试
 prove -lv t/unit/user.t
 
-# Recursive search
+# 递归搜索
 prove -lr t/
 
-# Parallel execution (8 jobs)
+# 并行执行（8 个作业）
 prove -lr -j8 t/
 
-# Run only failing tests from last run
+# 仅运行上次运行的失败测试
 prove -l --state=failed t/
 
-# Colored output with timer
+# 带计时器的着色输出
 prove -l --color --timer t/
 
-# TAP output for CI
+# CI 兼容 TAP 输出
 prove -l --formatter TAP::Formatter::JUnit t/ > results.xml
 ```
 
-### .proverc Configuration
+### .proverc 配置
 
 ```text
 -l
@@ -792,9 +791,9 @@ prove -l --formatter TAP::Formatter::JUnit t/ > results.xml
 --state=save
 ```
 
-## Fixtures and Setup/Teardown
+## Fixtures 和 Setup/Teardown
 
-### Subtest Isolation
+### 子测试隔离
 
 ```perl
 use v5.36;
@@ -812,13 +811,13 @@ subtest 'file processing' => sub {
     my $result = process_file("$file");
     is($result->{line_count}, 3, 'counts lines');
 
-    # Teardown happens automatically (CLEANUP => 1)
+    # Teardown 自动发生（CLEANUP => 1）
 };
 ```
 
-### Shared Test Helpers
+### 共享测试辅助
 
-Place reusable helpers in `t/lib/TestHelper.pm` and load with `use lib 't/lib'`. Export factory functions like `create_test_db()`, `create_temp_dir()`, and `fixture_path()` via `Exporter`.
+在 `t/lib/TestHelper.pm` 中放置可重用辅助，通过 `use lib 't/lib'` 加载。通过 `Exporter` 导出工厂函数如 `create_test_db()`、`create_temp_dir()` 和 `fixture_path()`。
 
 ## Mocking
 
@@ -832,7 +831,7 @@ use Test::MockModule;
 subtest 'mock external API' => sub {
     my $mock = Test::MockModule->new('MyApp::API');
 
-    # Good: Mock returns controlled data
+    # 好：Mock 返回受控数据
     $mock->mock(fetch_user => sub ($self, $id) {
         return { id => $id, name => 'Mock User', email => 'mock@test.com' };
     });
@@ -841,49 +840,49 @@ subtest 'mock external API' => sub {
     my $user = $api->fetch_user(42);
     is($user->{name}, 'Mock User', 'returns mocked user');
 
-    # Verify call count
+    # 验证调用计数
     my $call_count = 0;
     $mock->mock(fetch_user => sub { $call_count++; return {} });
     $api->fetch_user(1);
     $api->fetch_user(2);
     is($call_count, 2, 'fetch_user called twice');
 
-    # Mock is automatically restored when $mock goes out of scope
+    # $mock 超出作用域时自动恢复 mock
 };
 
-# Bad: Monkey-patching without restoration
-# *MyApp::API::fetch_user = sub { ... };  # NEVER — leaks across tests
+# 坏：在没有恢复的情况下猴子补丁
+# *MyApp::API::fetch_user = sub { ... };  # 绝不 — 泄漏到测试间
 ```
 
-For lightweight mock objects, use `Test::MockObject` to create injectable test doubles with `->mock()` and verify calls with `->called_ok()`.
+对于轻量级 mock 对象，使用 `Test::MockObject` 创建可注入测试双精度，带 `->mock()` 并用 `->called_ok()` 验证调用。
 
-## Coverage with Devel::Cover
+## 使用 Devel::Cover 的覆盖
 
-### Running Coverage
+### 运行覆盖
 
 ```bash
-# Basic coverage report
+# 基本覆盖报告
 cover -test
 
-# Or step by step
+# 或逐步
 perl -MDevel::Cover -Ilib t/unit/user.t
 cover
 
-# HTML report
+# HTML 报告
 cover -report html
 open cover_db/coverage.html
 
-# Specific thresholds
+# 特定阈值
 cover -test -report text | grep 'Total'
 
-# CI-friendly: fail under threshold
+# CI 友好：低于阈值失败
 cover -test && cover -report text -select '^lib/' \
   | perl -ne 'if (/Total.*?(\d+\.\d+)/) { exit 1 if $1 < 80 }'
 ```
 
-### Integration Testing
+### 集成测试
 
-Use in-memory SQLite for database tests, mock HTTP::Tiny for API tests.
+对数据库测试使用内存 SQLite，对 API 测试 mock HTTP::Tiny。
 
 ```perl
 use v5.36;
@@ -904,145 +903,144 @@ subtest 'database integration' => sub {
 done_testing;
 ```
 
-## Best Practices
+## 最佳实践
 
-### DO
+### 做
 
-- **Follow TDD**: Write tests before implementation (red-green-refactor)
-- **Use Test2::V0**: Modern assertions, better diagnostics
-- **Use subtests**: Group related assertions, isolate state
-- **Mock external dependencies**: Network, database, file system
-- **Use `prove -l`**: Always include lib/ in `@INC`
-- **Name tests clearly**: `'user login with invalid password fails'`
-- **Test edge cases**: Empty strings, undef, zero, boundary values
-- **Aim for 80%+ coverage**: Focus on business logic paths
-- **Keep tests fast**: Mock I/O, use in-memory databases
+- **遵循 TDD**：先写测试再实现（红-绿-重构）
+- **使用 Test2::V0**：现代断言，更好诊断
+- **使用子测试**：分组相关断言，隔离状态
+- **Mock 外部依赖**：网络、数据库、文件系统
+- **使用 `prove -l`**：始终在 @INC 中包含 lib/
+- **清晰命名测试**：`'user login with invalid password fails'`
+- **测试边界情况**：空字符串、undef、零、边界值
+- **目标 80%+ 覆盖**：专注业务逻辑路径
+- **保持测试快速**：Mock I/O，使用内存数据库
 
-### DON'T
+### 不要做
 
-- **Don't test implementation**: Test behavior and output, not internals
-- **Don't share state between subtests**: Each subtest should be independent
-- **Don't skip `done_testing`**: Ensures all planned tests ran
-- **Don't over-mock**: Mock boundaries only, not the code under test
-- **Don't use `Test::More` for new projects**: Prefer Test2::V0
-- **Don't ignore test failures**: All tests must pass before merge
-- **Don't test CPAN modules**: Trust libraries to work correctly
-- **Don't write brittle tests**: Avoid over-specific string matching
+- **不要测试实现**：测试行为和输出，而非内部
+- **不要在子测试间共享状态**：每个子测试应独立
+- **不要跳过 `done_testing`**：确保所有计划测试运行
+- **不要过度 mock**：仅 mock 边界，不 mock 被测代码
+- **不要为新项目使用 `Test::More`**：优先 Test2::V0
+- **不要忽略测试失败**：合并前所有测试必须通过
+- **不要测试 CPAN 模块**：信任库正确工作
+- **不要写脆弱测试**：避免过度特定的字符串匹配
 
-## Quick Reference
+## 快速参考
 
-| Task | Command / Pattern |
+| 任务 | 命令 / 模式 |
 |---|---|
-| Run all tests | `prove -lr t/` |
-| Run one test verbose | `prove -lv t/unit/user.t` |
-| Parallel test run | `prove -lr -j8 t/` |
-| Coverage report | `cover -test && cover -report html` |
-| Test equality | `is($got, $expected, 'label')` |
-| Deep comparison | `is($got, hash { field k => 'v'; etc() }, 'label')` |
-| Test exception | `like(dies { ... }, qr/msg/, 'label')` |
-| Test no exception | `ok(lives { ... }, 'label')` |
-| Mock a method | `Test::MockModule->new('Pkg')->mock(m => sub { ... })` |
-| Skip tests | `SKIP: { skip 'reason', $count unless $cond; ... }` |
-| TODO tests | `TODO: { local $TODO = 'reason'; ... }` |
+| 运行所有测试 | `prove -lr t/` |
+| 详细运行一个测试 | `prove -lv t/unit/user.t` |
+| 并行测试运行 | `prove -lr -j8 t/` |
+| 覆盖报告 | `cover -test && cover -report html` |
+| 测试相等 | `is($got, $expected, 'label')` |
+| 深度比较 | `is($got, hash { field k => 'v'; etc() }, 'label')` |
+| 测试异常 | `like(dies { ... }, qr/msg/, 'label')` |
+| 测试无异常 | `ok(lives { ... }, 'label')` |
+| Mock 方法 | `Test::MockModule->new('Pkg')->mock(m => sub { ... })` |
+| 跳过测试 | `SKIP: { skip 'reason', $count unless $cond; ... }` |
+| TODO 测试 | `TODO: { local $TODO = 'reason'; ... }` |
 
-## Common Pitfalls
+## 常见陷阱
 
-### Forgetting `done_testing`
+### 忘记 `done_testing`
 
 ```perl
-# Bad: Test file runs but doesn't verify all tests executed
+# 坏：测试文件运行但不验证所有测试执行
 use Test2::V0;
 is(1, 1, 'works');
-# Missing done_testing — silent bugs if test code is skipped
+# 缺少 done_testing — 如果测试代码被跳过则静默 bug
 
-# Good: Always end with done_testing
+# 好：始终以 done_testing 结束
 use Test2::V0;
 is(1, 1, 'works');
 done_testing;
 ```
 
-### Missing `-l` Flag
+### 缺少 `-l` 标志
 
 ```bash
-# Bad: Modules in lib/ not found
+# 坏：找不到 lib/ 中的模块
 prove t/unit/user.t
-# Can't locate MyApp/User.pm in @INC
+# Cannot locate MyApp/User.pm in @INC
 
-# Good: Include lib/ in @INC
+# 好：在 @INC 中包含 lib/
 prove -l t/unit/user.t
 ```
 
-### Over-Mocking
+### 过度 Mock
 
-Mock the *dependency*, not the code under test. If your test only verifies that a mock returns what you told it to, it tests nothing.
+Mock *依赖*，而非被测代码。如果测试仅验证 mock 返回你告诉它的值，它什么也没测。
 
-### Test Pollution
+### 测试污染
 
-Use `my` variables inside subtests — never `our` — to prevent state leaking between tests.
+在子测试内使用 `my` 变量 — 绝不 `our` — 防止状态在测试间泄漏。
 
-**Remember**: Tests are your safety net. Keep them fast, focused, and independent. Use Test2::V0 for new projects, prove for running, and Devel::Cover for accountability.
-
+**记住**：测试是你的安全网。保持它们快速、专注和独立。使用 Test2::V0 用于新项目，prove 用于运行，Devel::Cover 用于问责。
 
 ---
 
 ---
 name: perl-security
-description: Comprehensive Perl security covering taint mode, input validation, safe process execution, DBI parameterized queries, web security (XSS/SQLi/CSRF), and perlcritic security policies.
+description: 综合 Perl 安全覆盖污染模式、输入验证、安全进程执行、DBI 参数化查询、Web 安全（XSS/SQLi/CSRF）和 perlcritic 安全策略。
 origin: ECC
 ---
 
-# Perl Security Patterns
+# Perl 安全模式
 
-Comprehensive security guidelines for Perl applications covering input validation, injection prevention, and secure coding practices.
+涵盖输入验证、注入预防和安全编码实践的综合 Perl 应用安全指南。
 
-## When to Activate
+## 激活时机
 
-- Handling user input in Perl applications
-- Building Perl web applications (CGI, Mojolicious, Dancer2, Catalyst)
-- Reviewing Perl code for security vulnerabilities
-- Performing file operations with user-supplied paths
-- Executing system commands from Perl
-- Writing DBI database queries
+- 在 Perl 应用中处理用户输入
+- 构建 Perl Web 应用（CGI、Mojolicious、Dancer2、Catalyst）
+- 审查 Perl 代码的安全漏洞
+- 执行带用户提供路径的文件操作
+- 从 Perl 执行系统命令
+- 编写 DBI 数据库查询
 
-## How It Works
+## 工作原理
 
-Start with taint-aware input boundaries, then move outward: validate and untaint inputs, keep filesystem and process execution constrained, and use parameterized DBI queries everywhere. The examples below show the safe defaults this skill expects you to apply before shipping Perl code that touches user input, the shell, or the network.
+从污染感知输入边界开始，然后向外移动：验证和取消污染输入、保持文件系统和进程执行受限、在各处使用参数化 DBI 查询。以下示例显示此技能期望你在发货触碰用户输入、shell 或网络的 Perl 代码前应用的 安全默认设置。
 
-## Taint Mode
+## 污染模式
 
-Perl's taint mode (`-T`) tracks data from external sources and prevents it from being used in unsafe operations without explicit validation.
+Perl 的污染模式（`-T`）跟踪来自外部来源的数据并防止其在未经显式验证的情况下用于不安全操作。
 
-### Enabling Taint Mode
+### 启用污染模式
 
 ```perl
 #!/usr/bin/perl -T
 use v5.36;
 
-# Tainted: anything from outside the program
-my $input    = $ARGV[0];        # Tainted
-my $env_path = $ENV{PATH};      # Tainted
-my $form     = <STDIN>;         # Tainted
-my $query    = $ENV{QUERY_STRING}; # Tainted
+# 污染：来自程序外部的任何东西
+my $input    = $ARGV[0];        # 污染
+my $env_path = $ENV{PATH};      # 污染
+my $form     = <STDIN>;         # 污染
+my $query    = $ENV{QUERY_STRING}; # 污染
 
-# Sanitize PATH early (required in taint mode)
+# 早期清理 PATH（污染模式中必需）
 $ENV{PATH} = '/usr/local/bin:/usr/bin:/bin';
 delete @ENV{qw(IFS CDPATH ENV BASH_ENV)};
 ```
 
-### Untainting Pattern
+### 取消污染模式
 
 ```perl
 use v5.36;
 
-# Good: Validate and untaint with a specific regex
+# 好：使用特定 regex 验证和取消污染
 sub untaint_username($input) {
     if ($input =~ /^([a-zA-Z0-9_]{3,30})$/) {
-        return $1;  # $1 is untainted
+        return $1;  # $1 是非污染的
     }
     die "Invalid username: must be 3-30 alphanumeric characters\n";
 }
 
-# Good: Validate and untaint a file path
+# 好：验证和取消污染文件路径
 sub untaint_filename($input) {
     if ($input =~ m{^([a-zA-Z0-9._-]+)$}) {
         return $1;
@@ -1050,28 +1048,28 @@ sub untaint_filename($input) {
     die "Invalid filename: contains unsafe characters\n";
 }
 
-# Bad: Overly permissive untainting (defeats the purpose)
+# 坏：过于宽松的取消污染（破坏目的）
 sub bad_untaint($input) {
     $input =~ /^(.*)$/s;
-    return $1;  # Accepts ANYTHING — pointless
+    return $1;  # 接受任何东西 — 无意义
 }
 ```
 
-## Input Validation
+## 输入验证
 
-### Allowlist Over Blocklist
+### 允许列表优于拒绝列表
 
 ```perl
 use v5.36;
 
-# Good: Allowlist — define exactly what's permitted
+# 好：允许列表 — 精确定义允许的内容
 sub validate_sort_field($field) {
     my %allowed = map { $_ => 1 } qw(name email created_at updated_at);
     die "Invalid sort field: $field\n" unless $allowed{$field};
     return $field;
 }
 
-# Good: Validate with specific patterns
+# 好：用特定模式验证
 sub validate_email($email) {
     if ($email =~ /^([a-zA-Z0-9._%+-]+\@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})$/) {
         return $1;
@@ -1081,19 +1079,19 @@ sub validate_email($email) {
 
 sub validate_integer($input) {
     if ($input =~ /^(-?\d{1,10})$/) {
-        return $1 + 0;  # Coerce to number
+        return $1 + 0;  # 强制为数字
     }
     die "Invalid integer\n";
 }
 
-# Bad: Blocklist — always incomplete
+# 坏：拒绝列表 — 总是 incomplete
 sub bad_validate($input) {
-    die "Invalid" if $input =~ /[<>"';&|]/;  # Misses encoded attacks
+    die "Invalid" if $input =~ /[<>"';&|]/;  # 遗漏编码攻击
     return $input;
 }
 ```
 
-### Length Constraints
+### 长度约束
 
 ```perl
 use v5.36;
@@ -1105,29 +1103,29 @@ sub validate_comment($text) {
 }
 ```
 
-## Safe Regular Expressions
+## 安全正则表达式
 
-### ReDoS Prevention
+### ReDoS 预防
 
-Catastrophic backtracking occurs with nested quantifiers on overlapping patterns.
+灾难性回溯发生在重叠模式上的嵌套量词。
 
 ```perl
 use v5.36;
 
-# Bad: Vulnerable to ReDoS (exponential backtracking)
-my $bad_re = qr/^(a+)+$/;           # Nested quantifiers
-my $bad_re2 = qr/^([a-zA-Z]+)*$/;   # Nested quantifiers on class
-my $bad_re3 = qr/^(.*?,){10,}$/;    # Repeated greedy/lazy combo
+# 坏：易受 ReDoS 攻击（指数回溯）
+my $bad_re = qr/^(a+)+$/;           # 嵌套量词
+my $bad_re2 = qr/^([a-zA-Z]+)*$/;   # 类上嵌套量词
+my $bad_re3 = qr/^(.*?,){10,}$/;    # 重复贪婪/惰性组合
 
-# Good: Rewrite without nesting
-my $good_re = qr/^a+$/;             # Single quantifier
-my $good_re2 = qr/^[a-zA-Z]+$/;     # Single quantifier on class
+# 好：无嵌套重写
+my $good_re = qr/^a+$/;             # 单数量词
+my $good_re2 = qr/^[a-zA-Z]+$/;     # 类上单数量词
 
-# Good: Use possessive quantifiers or atomic groups to prevent backtracking
-my $safe_re = qr/^[a-zA-Z]++$/;             # Possessive (5.10+)
-my $safe_re2 = qr/^(?>a+)$/;                # Atomic group
+# 好：使用占有量词或原子组防止回溯
+my $safe_re = qr/^[a-zA-Z]++$/;             # 占有（5.10+）
+my $safe_re2 = qr/^(?>a+)$/;                # 原子组
 
-# Good: Enforce timeout on untrusted patterns
+# 好：在不受信任模式上强制超时
 use POSIX qw(alarm);
 sub safe_match($string, $pattern, $timeout = 2) {
     my $matched;
@@ -1143,14 +1141,14 @@ sub safe_match($string, $pattern, $timeout = 2) {
 }
 ```
 
-## Safe File Operations
+## 安全文件操作
 
-### Three-Argument Open
+### 三参数 Open
 
 ```perl
 use v5.36;
 
-# Good: Three-arg open, lexical filehandle, check return
+# 好：三参数 open、词法文件句柄、检查返回值
 sub read_file($path) {
     open my $fh, '<:encoding(UTF-8)', $path
         or die "Cannot open '$path': $!\n";
@@ -1160,14 +1158,14 @@ sub read_file($path) {
     return $content;
 }
 
-# Bad: Two-arg open with user data (command injection)
+# 坏：两参数 open with 用户数据（命令注入）
 sub bad_read($path) {
-    open my $fh, $path;        # If $path = "|rm -rf /", runs command!
-    open my $fh, "< $path";   # Shell metacharacter injection
+    open my $fh, $path;        # 如果 $path = "|rm -rf /"，运行命令！
+    open my $fh, "< $path";   # shell 元字符注入
 }
 ```
 
-### TOCTOU Prevention and Path Traversal
+### TOCTOU 预防和路径遍历
 
 ```perl
 use v5.36;
@@ -1175,14 +1173,14 @@ use Fcntl qw(:DEFAULT :flock);
 use File::Spec;
 use Cwd qw(realpath);
 
-# Atomic file creation
+# 原子文件创建
 sub create_file_safe($path) {
     sysopen(my $fh, $path, O_WRONLY | O_CREAT | O_EXCL, 0600)
         or die "Cannot create '$path': $!\n";
     return $fh;
 }
 
-# Validate path stays within allowed directory
+# 验证路径保持在允许目录内
 sub safe_path($base_dir, $user_path) {
     my $real = realpath(File::Spec->catfile($base_dir, $user_path))
         // die "Path does not exist\n";
@@ -1193,16 +1191,16 @@ sub safe_path($base_dir, $user_path) {
 }
 ```
 
-Use `File::Temp` for temporary files (`tempfile(UNLINK => 1)`) and `flock(LOCK_EX)` to prevent race conditions.
+使用 `File::Temp` 用于临时文件（`tempfile(UNLINK => 1)`）和 `flock(LOCK_EX)` 防止竞态条件。
 
-## Safe Process Execution
+## 安全进程执行
 
-### List-Form system and exec
+### 列表形式 system 和 exec
 
 ```perl
 use v5.36;
 
-# Good: List form — no shell interpolation
+# 好：列表形式 — 无 shell 插值
 sub run_command(@cmd) {
     system(@cmd) == 0
         or die "Command failed: @cmd\n";
@@ -1210,7 +1208,7 @@ sub run_command(@cmd) {
 
 run_command('grep', '-r', $user_pattern, '/var/log/app/');
 
-# Good: Capture output safely with IPC::Run3
+# 好：使用 IPC::Run3 安全捕获输出
 use IPC::Run3;
 sub capture_output(@cmd) {
     my ($stdout, $stderr);
@@ -1221,20 +1219,20 @@ sub capture_output(@cmd) {
     return $stdout;
 }
 
-# Bad: String form — shell injection!
+# 坏：字符串形式 — shell 注入！
 sub bad_search($pattern) {
-    system("grep -r '$pattern' /var/log/app/");  # If $pattern = "'; rm -rf / #"
+    system("grep -r '$pattern' /var/log/app/");  # 如果 $pattern = "'; rm -rf / #"
 }
 
-# Bad: Backticks with interpolation
-my $output = `ls $user_dir`;   # Shell injection risk
+# 坏：带插值的反引号
+my $output = `ls $user_dir`;   # shell 注入风险
 ```
 
-Also use `Capture::Tiny` for capturing stdout/stderr from external commands safely.
+也使用 `Capture::Tiny` 用于安全捕获外部命令的 stdout/stderr。
 
-## SQL Injection Prevention
+## SQL 注入预防
 
-### DBI Placeholders
+### DBI 占位符
 
 ```perl
 use v5.36;
@@ -1246,7 +1244,7 @@ my $dbh = DBI->connect($dsn, $user, $pass, {
     AutoCommit => 1,
 });
 
-# Good: Parameterized queries — always use placeholders
+# 好：参数化查询 — 始终使用占位符
 sub find_user($dbh, $email) {
     my $sth = $dbh->prepare('SELECT * FROM users WHERE email = ?');
     $sth->execute($email);
@@ -1261,21 +1259,21 @@ sub search_users($dbh, $name, $status) {
     return $sth->fetchall_arrayref({});
 }
 
-# Bad: String interpolation in SQL (SQLi vulnerability!)
+# 坏：SQL 中的字符串插值（SQLi 漏洞！）
 sub bad_find($dbh, $email) {
     my $sth = $dbh->prepare("SELECT * FROM users WHERE email = '$email'");
-    # If $email = "' OR 1=1 --", returns all users
+    # 如果 $email = "' OR 1=1 --"，返回所有用户
     $sth->execute;
     return $sth->fetchrow_hashref;
 }
 ```
 
-### Dynamic Column Allowlists
+### 动态列允许列表
 
 ```perl
 use v5.36;
 
-# Good: Validate column names against an allowlist
+# 好：针对允许列表验证列名
 sub order_by($dbh, $column, $direction) {
     my %allowed_cols = map { $_ => 1 } qw(name email created_at);
     my %allowed_dirs = map { $_ => 1 } qw(ASC DESC);
@@ -1288,18 +1286,18 @@ sub order_by($dbh, $column, $direction) {
     return $sth->fetchall_arrayref({});
 }
 
-# Bad: Directly interpolating user-chosen column
+# 坏：直接插值用户选择的列
 sub bad_order($dbh, $column) {
-    $dbh->prepare("SELECT * FROM users ORDER BY $column");  # SQLi!
+    $dbh->prepare("SELECT * FROM users ORDER BY $column");  # SQLi！
 }
 ```
 
-### DBIx::Class (ORM Safety)
+### DBIx::Class（ORM 安全）
 
 ```perl
 use v5.36;
 
-# DBIx::Class generates safe parameterized queries
+# DBIx::Class 生成安全参数化查询
 my @users = $schema->resultset('User')->search({
     status => 'active',
     email  => { -like => '%@example.com' },
@@ -1309,45 +1307,45 @@ my @users = $schema->resultset('User')->search({
 });
 ```
 
-## Web Security
+## Web 安全
 
-### XSS Prevention
+### XSS 预防
 
 ```perl
 use v5.36;
 use HTML::Entities qw(encode_entities);
 use URI::Escape qw(uri_escape_utf8);
 
-# Good: Encode output for HTML context
+# 好：为 HTML 上下文编码输出
 sub safe_html($user_input) {
     return encode_entities($user_input);
 }
 
-# Good: Encode for URL context
+# 好：为 URL 上下文编码
 sub safe_url_param($value) {
     return uri_escape_utf8($value);
 }
 
-# Good: Encode for JSON context
+# 好：为 JSON 上下文编码
 use JSON::MaybeXS qw(encode_json);
 sub safe_json($data) {
-    return encode_json($data);  # Handles escaping
+    return encode_json($data);  # 处理转义
 }
 
-# Template auto-escaping (Mojolicious)
-# <%= $user_input %>   — auto-escaped (safe)
-# <%== $raw_html %>    — raw output (dangerous, use only for trusted content)
+# 模板自动转义（Mojolicious）
+# <%= $user_input %>   — 自动转义（安全）
+# <%== $raw_html %>    — 原始输出（危险，仅用于可信内容）
 
-# Template auto-escaping (Template Toolkit)
-# [% user_input | html %]  — explicit HTML encoding
+# 模板自动转义（Template Toolkit）
+# [% user_input | html %]  — 显式 HTML 编码
 
-# Bad: Raw output in HTML
+# 坏：HTML 中原始输出
 sub bad_html($input) {
-    print "<div>$input</div>";  # XSS if $input contains <script>
+    print "<div>$input</div>";  # XSS 如果 $input 包含 <script>
 }
 ```
 
-### CSRF Protection
+### CSRF 保护
 
 ```perl
 use v5.36;
@@ -1359,16 +1357,16 @@ sub generate_csrf_token() {
 }
 ```
 
-Use constant-time comparison when verifying tokens. Most web frameworks (Mojolicious, Dancer2, Catalyst) provide built-in CSRF protection — prefer those over hand-rolled solutions.
+验证 token 时使用常量时间比较。大多数 Web 框架（Mojolicious、Dancer2、Catalyst）提供内置 CSRF 保护 — 优先使用这些而非手写解决方案。
 
-### Session and Header Security
+### 会话和头安全
 
 ```perl
 use v5.36;
 
-# Mojolicious session + headers
+# Mojolicious 会话 + 头
 $app->secrets(['long-random-secret-rotated-regularly']);
-$app->sessions->secure(1);          # HTTPS only
+$app->sessions->secure(1);          # 仅 HTTPS
 $app->sessions->samesite('Lax');
 
 $app->hook(after_dispatch => sub ($c) {
@@ -1379,112 +1377,110 @@ $app->hook(after_dispatch => sub ($c) {
 });
 ```
 
-## Output Encoding
+## 输出编码
 
-Always encode output for its context: `HTML::Entities::encode_entities()` for HTML, `URI::Escape::uri_escape_utf8()` for URLs, `JSON::MaybeXS::encode_json()` for JSON.
+始终为其上下文编码输出：`HTML::Entities::encode_entities()` 用于 HTML，`URI::Escape::uri_escape_utf8()` 用于 URLs，`JSON::MaybeXS::encode_json()` 用于 JSON。
 
-## CPAN Module Security
+## CPAN 模块安全
 
-- **Pin versions** in cpanfile: `requires 'DBI', '== 1.643';`
-- **Prefer maintained modules**: Check MetaCPAN for recent releases
-- **Minimize dependencies**: Each dependency is an attack surface
+- **在 cpanfile 中固定版本**：`requires 'DBI', '== 1.643';`
+- **优先维护的模块**：检查 MetaCPAN 近期发布
+- **最小化依赖**：每个依赖都是一个攻击面
 
-## Security Tooling
+## 安全工具
 
-### perlcritic Security Policies
+### perlcritic 安全策略
 
 ```ini
-# .perlcriticrc — security-focused configuration
+# .perlcriticrc — 安全聚焦配置
 severity = 3
 theme = security + core
 
-# Require three-arg open
+# 要求三参数 open
 [InputOutput::RequireThreeArgOpen]
 severity = 5
 
-# Require checked system calls
+# 要求检查系统调用
 [InputOutput::RequireCheckedSyscalls]
 functions = :builtins
 severity = 4
 
-# Prohibit string eval
+# 禁止字符串 eval
 [BuiltinFunctions::ProhibitStringyEval]
 severity = 5
 
-# Prohibit backtick operators
+# 禁止反引号操作符
 [InputOutput::ProhibitBacktickOperators]
 severity = 4
 
-# Require taint checking in CGI
+# CGI 中要求污染检查
 [Modules::RequireTaintChecking]
 severity = 5
 
-# Prohibit two-arg open
+# 禁止两参数 open
 [InputOutput::ProhibitTwoArgOpen]
 severity = 5
 
-# Prohibit bare-word filehandles
+# 禁止裸词文件句柄
 [InputOutput::ProhibitBarewordFileHandles]
 severity = 5
 ```
 
-### Running perlcritic
+### 运行 perlcritic
 
 ```bash
-# Check a file
+# 检查一个文件
 perlcritic --severity 3 --theme security lib/MyApp/Handler.pm
 
-# Check entire project
+# 检查整个项目
 perlcritic --severity 3 --theme security lib/
 
-# CI integration
+# CI 集成
 perlcritic --severity 4 --theme security --quiet lib/ || exit 1
 ```
 
-## Quick Security Checklist
+## 快速安全检查清单
 
-| Check | What to Verify |
+| 检查 | 验证什么 |
 |---|---|
-| Taint mode | `-T` flag on CGI/web scripts |
-| Input validation | Allowlist patterns, length limits |
-| File operations | Three-arg open, path traversal checks |
-| Process execution | List-form system, no shell interpolation |
-| SQL queries | DBI placeholders, never interpolate |
-| HTML output | `encode_entities()`, template auto-escape |
-| CSRF tokens | Generated, verified on state-changing requests |
-| Session config | Secure, HttpOnly, SameSite cookies |
-| HTTP headers | CSP, X-Frame-Options, HSTS |
-| Dependencies | Pinned versions, audited modules |
-| Regex safety | No nested quantifiers, anchored patterns |
-| Error messages | No stack traces or paths leaked to users |
+| 污染模式 | CGI/Web 脚本上的 `-T` 标志 |
+| 输入验证 | 允许列表模式、长度限制 |
+| 文件操作 | 三参数 open、路径遍历检查 |
+| 进程执行 | 列表形式 system，无 shell 插值 |
+| SQL 查询 | DBI 占位符，绝不插值 |
+| HTML 输出 | `encode_entities()`、模板自动转义 |
+| CSRF token | 生成，在状态改变请求时验证 |
+| 会话配置 | 安全、HttpOnly、SameSite cookies |
+| HTTP 头 | CSP、X-Frame-Options、HSTS |
+| 依赖 | 固定版本、审计模块 |
+| Regex 安全 | 无嵌套量词、锚定模式 |
+| 错误消息 | 无堆栈跟踪或路径泄露给用户 |
 
-## Anti-Patterns
+## 反模式
 
 ```perl
-# 1. Two-arg open with user data (command injection)
-open my $fh, $user_input;               # CRITICAL vulnerability
+# 1. 带用户数据的两参数 open（命令注入）
+open my $fh, $user_input;               # 关键漏洞
 
-# 2. String-form system (shell injection)
-system("convert $user_file output.png"); # CRITICAL vulnerability
+# 2. 字符串形式 system（shell 注入）
+system("convert $user_file output.png"); # 关键漏洞
 
-# 3. SQL string interpolation
+# 3. SQL 字符串插值
 $dbh->do("DELETE FROM users WHERE id = $id");  # SQLi
 
-# 4. eval with user input (code injection)
-eval $user_code;                         # Remote code execution
+# 4. 带用户输入的 eval（代码注入）
+eval $user_code;                         # 远程代码执行
 
-# 5. Trusting $ENV without sanitizing
-my $path = $ENV{UPLOAD_DIR};             # Could be manipulated
-system("ls $path");                      # Double vulnerability
+# 5. 不清理信任 $ENV
+my $path = $ENV{UPLOAD_DIR};             # 可能被操纵
+system("ls $path");                      # 双重漏洞
 
-# 6. Disabling taint without validation
-($input) = $input =~ /(.*)/s;           # Lazy untaint — defeats purpose
+# 6. 无验证禁用污染
+($input) = $input =~ /(.*)/s;           # 惰性取消污染 — 破坏目的
 
-# 7. Raw user data in HTML
+# 7. HTML 中原始用户数据
 print "<div>Welcome, $username!</div>";  # XSS
 
-# 8. Unvalidated redirects
-print $cgi->redirect($user_url);         # Open redirect
+# 8. 未验证的重定向
+print $cgi->redirect($user_url);         # 开放重定向
 ```
-
-**Remember**: Perl's flexibility is powerful but requires discipline. Use taint mode for web-facing code, validate all input with allowlists, use DBI placeholders for every query, and encode all output for its context. Defense in depth — never rely on a single layer.

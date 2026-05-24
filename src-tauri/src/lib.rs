@@ -34,7 +34,17 @@ fn hidden_cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
     }
     cmd
 }
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
+
+pub(crate) trait LockMap<T> {
+    fn lock_str(&self) -> Result<MutexGuard<'_, T>, String>;
+}
+
+impl<T> LockMap<T> for Mutex<T> {
+    fn lock_str(&self) -> Result<MutexGuard<'_, T>, String> {
+        self.lock().map_err(|e| format!("mutex poisoned: {}", e))
+    }
+}
 use tokio::sync::{oneshot, RwLock};
 use tauri::{State, Window, AppHandle, Emitter};
 use futures::FutureExt;
@@ -108,21 +118,21 @@ pub struct ConversationBookmark {
 
 #[tauri::command]
 fn minimize_window(window: Window) {
-    window.minimize().unwrap();
+    let _ = window.minimize();
 }
 
 #[tauri::command]
 fn maximize_window(window: Window) {
-    if window.is_maximized().unwrap() {
-        window.unmaximize().unwrap();
+    if window.is_maximized().unwrap_or(false) {
+        let _ = window.unmaximize();
     } else {
-        window.maximize().unwrap();
+        let _ = window.maximize();
     }
 }
 
 #[tauri::command]
 fn close_window(window: Window) {
-    window.close().unwrap();
+    let _ = window.close();
 }
 
 #[tauri::command]
@@ -244,12 +254,15 @@ fn add_message(state: State<AppState>, session_id: i64, role: String, content: S
 }
 
 #[tauri::command]
-fn get_messages(state: State<AppState>, session_id: i64) -> Result<Vec<ChatMessage>, String> {
+fn get_messages(state: State<AppState>, session_id: i64, offset: Option<i64>, limit: Option<i64>) -> Result<Vec<ChatMessage>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    let mut stmt = conn.prepare(
-        "SELECT id, session_id, role, content, tool_calls, thinking, attachments, raw_json, created_at FROM chat_message WHERE session_id = ?1 ORDER BY created_at ASC"
-    ).map_err(|e| e.to_string())?;
-    let messages = stmt.query_map([session_id], |row| {
+    let off = offset.unwrap_or(0).max(0);
+    let lim = limit.unwrap_or(100).max(1).min(1000);
+    // Load newest messages first (DESC) with limit+offset, then reorder to ASC for display.
+    // offset=0 means "newest N", offset=N means "next N older".
+    let sql = "SELECT id, session_id, role, content, tool_calls, thinking, attachments, raw_json, created_at FROM (SELECT * FROM chat_message WHERE session_id = ?1 ORDER BY created_at DESC LIMIT ?2 OFFSET ?3) ORDER BY created_at ASC";
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let messages = stmt.query_map(rusqlite::params![session_id, lim, off], |row| {
         let created_at: String = row.get(8)?;
         Ok(ChatMessage {
             id: row.get(0)?,
@@ -266,6 +279,16 @@ fn get_messages(state: State<AppState>, session_id: i64) -> Result<Vec<ChatMessa
     .collect::<Result<Vec<_>, _>>()
     .map_err(|e| e.to_string())?;
     Ok(messages)
+}
+
+#[tauri::command]
+fn get_message_count(state: State<AppState>, session_id: i64) -> Result<i64, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    conn.query_row(
+        "SELECT COUNT(*) FROM chat_message WHERE session_id = ?1",
+        [session_id],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -928,7 +951,7 @@ fn search_recursive(path: &str, pattern: &str, filter: &str, matches: &mut Vec<S
                     .map(|e| e.to_string_lossy().to_string())
                     .unwrap_or_default();
                 let filter_exts: Vec<&str> = filter.split(',').map(|s| s.trim().trim_start_matches('.')).collect();
-                if !filter_exts.iter().any(|f| f == &ext || ext.is_empty()) && !file_name.contains(&filter) {
+                if !filter_exts.iter().any(|f| f == &ext || ext.is_empty()) && !file_name.contains(filter) {
                     continue;
                 }
             }
@@ -1263,11 +1286,10 @@ fn find_replace_recursive(dir: &str, find: &str, replace: &str, filter_exts: &[&
             find_replace_recursive(&path.to_string_lossy(), find, replace, filter_exts, use_regex, results, depth + 1, max_depth)?;
         } else if path.is_file() {
             let ext = path.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
-            if !filter_exts.is_empty() && !filter_exts.iter().any(|f| *f == ext || ext.is_empty()) && !name.contains(&filter_exts.iter().next().unwrap_or(&"*").to_string()) {
-                if !name.contains(&filter_exts[0]) && filter_exts[0] != "*" {
+            if !filter_exts.is_empty() && !filter_exts.iter().any(|f| *f == ext || ext.is_empty()) && !name.contains(&filter_exts.iter().next().unwrap_or(&"*").to_string())
+                && !name.contains(filter_exts[0]) && filter_exts[0] != "*" {
                     continue;
                 }
-            }
 
             let content = match std::fs::read_to_string(&path) {
                 Ok(c) => c,
@@ -1633,12 +1655,19 @@ async fn agent_chat_stream(
 }
 
 #[tauri::command]
+fn open_devtools(window: tauri::WebviewWindow) -> Result<(), String> {
+    window.open_devtools();
+    Ok(())
+}
+
+#[tauri::command]
 fn abort_stream(state: State<'_, AppState>, session_id: i64) -> Result<(), String> {
-    let registry = state.cancel_registry.lock().map_err(|e| e.to_string())?;
+    let mut registry = state.cancel_registry.lock().map_err(|e| e.to_string())?;
     if let Some(tx) = registry.get(&session_id) {
         let _ = tx.send(true);
-        eprintln!("[abort_stream] Cancel signaled for session {}", session_id);
     }
+    registry.remove(&session_id);
+    eprintln!("[abort_stream] Cancel signaled and registry cleaned for session {}", session_id);
     Ok(())
 }
 
@@ -1846,7 +1875,14 @@ async fn respond_permission(
         "deny" => PermissionAction::Deny,
         _ => return Err(format!("Invalid action: {}", action)),
     };
-    state.permission_service.lock().map_err(|e| e.to_string())?.resolve_pending(&id, &tool, act, always);
+    let resolved = state.permission_service.lock().map_err(|e| e.to_string())?.resolve_pending(&id, &tool, act, always);
+    if resolved && always && act == PermissionAction::Allow {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR IGNORE INTO permission_rules (tool, pattern) VALUES (?1, ?2)",
+            rusqlite::params![tool, "*"],
+        ).ok();
+    }
     Ok(())
 }
 
@@ -1900,7 +1936,7 @@ fn char_to_val(c: Option<u8>) -> Result<u8, String> {
 
 fn base64_encode_fast(bytes: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut result = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
@@ -2308,6 +2344,15 @@ pub fn run() {
             custom_model TEXT NOT NULL DEFAULT ''
         )", [], ).expect("Failed to create app_config table");
 
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS permission_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tool TEXT NOT NULL,
+            pattern TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(tool, pattern)
+        )", [], ).expect("Failed to create permission_rules table");
+
     // ── Schema version tracking ─────────────────────────────────────────
 
     conn.execute(
@@ -2360,6 +2405,14 @@ pub fn run() {
         Migration { version: 8, desc: "file_snapshot.version",
             cond: "SELECT COUNT(*) FROM pragma_table_info('file_snapshot') WHERE name='version'",
             sql: "ALTER TABLE file_snapshot ADD COLUMN version INTEGER NOT NULL DEFAULT 1" },
+        // V9: permission_rules table
+        Migration { version: 9, desc: "permission_rules",
+            cond: "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='permission_rules'",
+            sql: "CREATE TABLE permission_rules (id INTEGER PRIMARY KEY AUTOINCREMENT, tool TEXT NOT NULL, pattern TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(tool, pattern))" },
+        // V10: chat_message session_id index for fast per-session queries
+        Migration { version: 10, desc: "chat_message.session_id index",
+            cond: "SELECT COUNT(*) FROM pragma_index_list('chat_message') WHERE name='idx_chat_message_session'",
+            sql: "CREATE INDEX idx_chat_message_session ON chat_message(session_id)" },
     ];
 
     for m in migrations {
@@ -2401,6 +2454,15 @@ pub fn run() {
         _ => PermissionMode::Normal,
     };
     perm_svc.set_mode(p_mode);
+
+    // Load persisted permission rules
+    if let Ok(mut stmt) = conn.prepare("SELECT tool, pattern FROM permission_rules") {
+        if let Ok(rows) = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))) {
+            let rules: Vec<(String, String)> = rows.filter_map(|r| r.ok()).collect();
+            perm_svc.load_rules_batch(&rules);
+            eprintln!("[permission] Loaded {} persisted rules", rules.len());
+        }
+    }
 
     let skill_service = Arc::new(SkillService::new());
 
@@ -2452,6 +2514,7 @@ pub fn run() {
             get_agent_sessions,
             add_message,
             get_messages,
+            get_message_count,
             delete_message,
             clear_session_history,
             compact_session,
@@ -2480,6 +2543,7 @@ pub fn run() {
             set_agent_model_config,
             delete_agent_model_config,
             agent_chat_stream,
+            open_devtools,
             abort_stream,
             read_file,
             write_file,

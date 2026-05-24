@@ -14,16 +14,50 @@ export interface AgentSession {
   created_at: string
 }
 
+export type MessageRole = 'user' | 'assistant' | 'tool' | 'system'
+
 export interface ChatMessage {
   id: number
   session_id: number
-  role: string
+  role: MessageRole
   content: string
   thinking?: string
-  tool_calls?: string
+  tool_calls?: string  // JSON array of ToolCall objects
   attachments?: string  // JSON array of {name, path, kind}
   raw_json?: string  // full JSON of content block array for cache-aware reconstruction
   created_at: string
+}
+
+/** UI-layer message with transient display-only fields */
+export interface UIMessage extends ChatMessage {
+  loading?: boolean
+  cmdResult?: string
+}
+
+export interface Bookmark {
+  id: number
+  session_id: number
+  name: string
+  file_snapshots: string
+  message_count: number
+  total_bytes: number
+  created_at: string
+}
+
+export interface EditEntry {
+  id: number
+  session_id: number
+  tool: string
+  file: string
+  old_content: string
+  new_content: string
+  created_at: string
+}
+
+export interface CompactResult {
+  before: number
+  after: number
+  messages: number
 }
 
 export const db = {
@@ -48,7 +82,7 @@ export const db = {
   },
 
   async getAgentSessions(groupChatId: number, agentType?: string): Promise<AgentSession[]> {
-    const params: Record<string, any> = { groupChatId }
+    const params: { groupChatId: number; agentType?: string } = { groupChatId }
     if (agentType !== undefined) {
       params.agentType = agentType
     }
@@ -59,8 +93,12 @@ export const db = {
     return invoke('add_message', { sessionId, role, content, toolCalls: toolCalls || null, thinking: thinking || null, attachments: attachments || null, rawJson: rawJson || null })
   },
 
-  async getMessages(sessionId: number): Promise<ChatMessage[]> {
-    return invoke('get_messages', { sessionId })
+  async getMessages(sessionId: number, offset?: number, limit?: number): Promise<ChatMessage[]> {
+    return invoke('get_messages', { sessionId, offset: offset ?? null, limit: limit ?? null })
+  },
+
+  async getMessageCount(sessionId: number): Promise<number> {
+    return invoke('get_message_count', { sessionId })
   },
 
   async deleteMessage(id: number): Promise<void> {
@@ -72,10 +110,10 @@ export const db = {
   },
 
   // Undo edit
-  async undoLastEdit(sessionId: number): Promise<any> {
+  async undoLastEdit(sessionId: number): Promise<EditEntry | null> {
     return invoke('undo_last_edit', { sessionId })
   },
-  async listEdits(sessionId: number): Promise<any[]> {
+  async listEdits(sessionId: number): Promise<EditEntry[]> {
     return invoke('list_edits', { sessionId })
   },
 
@@ -84,16 +122,16 @@ export const db = {
     return invoke('rewind_conversation', { sessionId, messageId })
   },
 
-  async compactSession(sessionId: number): Promise<{ before: number; after: number; messages: number }> {
+  async compactSession(sessionId: number): Promise<CompactResult> {
     const result: string = await invoke('compact_session', { sessionId })
-    return JSON.parse(result)
+    return JSON.parse(result) as CompactResult
   },
 
   // Bookmarks
-  async saveBookmark(sessionId: number, name: string, workspace: string): Promise<any> {
+  async saveBookmark(sessionId: number, name: string, workspace: string): Promise<Bookmark> {
     return invoke('save_bookmark', { sessionId, name, workspace })
   },
-  async listBookmarks(sessionId: number): Promise<any[]> {
+  async listBookmarks(sessionId: number): Promise<Bookmark[]> {
     return invoke('list_bookmarks', { sessionId })
   },
   async restoreBookmark(bookmarkId: number, workspace: string): Promise<void> {

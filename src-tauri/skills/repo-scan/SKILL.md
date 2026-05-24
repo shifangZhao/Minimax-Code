@@ -1,24 +1,24 @@
 ---
 name: repo-scan
-description: Cross-stack source code asset audit — classifies every file, detects embedded third-party libraries, and delivers actionable four-level verdicts per module with interactive HTML reports.
+description: 跨技术栈源代码资产审计 — 对每个文件分类、检测嵌入的第三方库，并通过交互式 HTML 报告为每个模块提供可操作的四级裁决。
 origin: community
 ---
 
 # repo-scan
 
-> Every ecosystem has its own dependency manager, but no tool looks across C++, Android, iOS, and Web to tell you: how much code is actually yours, what's third-party, and what's dead weight.
+> 每个生态系统都有自己的依赖管理器，但没有工具能跨 C++、Android、iOS 和 Web 告诉你：有多少代码是你自己的、什么是第三方、什么是死代码。
 
-## When to Use
+## 何时使用
 
-- Taking over a large legacy codebase and need a structural overview
-- Before major refactoring — identify what's core, what's duplicate, what's dead
-- Auditing third-party dependencies embedded directly in source (not declared in package managers)
-- Preparing architecture decision records for monorepo reorganization
+- 接管大型遗留代码库并需要结构概览
+- 在重大重构前 — 识别什么是核心、什么是重复、什么是死代码
+- 审计直接嵌入在源代码中的第三方依赖（未在包管理器中声明）
+- 为 monorepo 重组准备架构决策记录
 
-## Installation
+## 安装
 
 ```bash
-# Fetch only the pinned commit for reproducibility
+# 仅获取固定提交以确保可重复性
 mkdir -p ~/.claude/skills/repo-scan
 git init repo-scan
 cd repo-scan
@@ -28,51 +28,51 @@ git checkout --detach FETCH_HEAD
 cp -r . ~/.claude/skills/repo-scan
 ```
 
-> Review the source before installing any agent skill.
+> 安装任何智能体 skill 前先审查源代码。
 
-## Core Capabilities
+## 核心能力
 
-| Capability | Description |
+| 能力 | 描述 |
 |---|---|
-| **Cross-stack scanning** | C/C++, Java/Android, iOS (OC/Swift), Web (TS/JS/Vue) in one pass |
-| **File classification** | Every file tagged as project code, third-party, or build artifact |
-| **Library detection** | 50+ known libraries (FFmpeg, Boost, OpenSSL…) with version extraction |
-| **Four-level verdicts** | Core Asset / Extract & Merge / Rebuild / Deprecate |
-| **HTML reports** | Interactive dark-theme pages with drill-down navigation |
-| **Monorepo support** | Hierarchical scanning with summary + sub-project reports |
+| **跨技术栈扫描** | 一次通过扫描 C/C++、Java/Android、iOS (OC/Swift)、Web (TS/JS/Vue) |
+| **文件分类** | 每个文件标记为项目代码、第三方或构建产物 |
+| **库检测** | 50+ 已知库（FFmpeg、Boost、OpenSSL…）带版本提取 |
+| **四级裁决** | 核心资产 / 提取并合并 / 重建 / 废弃 |
+| **HTML 报告** | 带深入导航的交互式深色主题页面 |
+| **Monorepo 支持** | 层级扫描，带摘要 + 子项目报告 |
 
-## Analysis Depth Levels
+## 分析深度级别
 
-| Level | Files Read | Use Case |
+| 级别 | 读取文件数 | 用例 |
 |---|---|---|
-| `fast` | 1-2 per module | Quick inventory of huge directories |
-| `standard` | 2-5 per module | Default audit with full dependency + architecture checks |
-| `deep` | 5-10 per module | Adds thread safety, memory management, API consistency |
-| `full` | All files | Pre-merge comprehensive review |
+| `fast` | 每个模块 1-2 个 | 巨型目录的快速清单 |
+| `standard` | 每个模块 2-5 个 | 带完整依赖和架构检查的默认审计 |
+| `deep` | 每个模块 5-10 个 | 增加线程安全、内存管理、API 一致性 |
+| `full` | 所有文件 | 预合并综合审查 |
 
-## How It Works
+## 工作原理
 
-1. **Classify the repo surface**: enumerate files, then tag each as project code, embedded third-party code, or build artifact.
-2. **Detect embedded libraries**: inspect directory names, headers, license files, and version markers to identify bundled dependencies and likely versions.
-3. **Score each module**: group files by module or subsystem, then assign one of the four verdicts based on ownership, duplication, and maintenance cost.
-4. **Highlight structural risks**: call out dead-weight artifacts, duplicated wrappers, outdated vendored code, and modules that should be extracted, rebuilt, or deprecated.
-5. **Produce the report**: return a concise summary plus the interactive HTML output with per-module drill-down so the audit can be reviewed asynchronously.
+1. **分类仓库表面**：枚举文件，然后将每个文件标记为项目代码、嵌入第三方代码或构建产物。
+2. **检测嵌入库**：检查目录名、头文件、许可证文件和版本标记以识别捆绑依赖和可能版本。
+3. **对每个模块评分**：按模块或子系统对文件分组，然后根据所有权、重复和维护成本分配四个裁决之一。
+4. **突出结构风险**：指出死代码产物、重复包装器、过时的 vendored 代码和应该被提取、重建或废弃的模块。
+5. **生成报告**：返回简洁摘要以及交互式 HTML 输出，带每个模块的深入以便审计可以异步审查。
 
-## Examples
+## 示例
 
-On a 50,000-file C++ monorepo:
-- Found FFmpeg 2.x (2015 vintage) still in production
-- Discovered the same SDK wrapper duplicated 3 times
-- Identified 636 MB of committed Debug/ipch/obj build artifacts
-- Classified: 3 MB project code vs 596 MB third-party
+在 50,000 文件的 C++ monorepo 上：
+- 发现 FFmpeg 2.x（2015 年版本）仍在生产中
+- 发现同一个 SDK 包装器重复 3 次
+- 识别了 636 MB 已提交的 Debug/ipch/obj 构建产物
+- 分类：3 MB 项目代码 vs 596 MB 第三方
 
-## Best Practices
+## 最佳实践
 
-- Start with `standard` depth for first-time audits
-- Use `fast` for monorepos with 100+ modules to get a quick inventory
-- Run `deep` incrementally on modules flagged for refactoring
-- Review the cross-module analysis for duplicate detection across sub-projects
+- 首次审计从 `standard` 深度开始
+- 对有 100+ 模块的 monorepo 使用 `fast` 以获得快速清单
+- 对标记为重构的模块增量运行 `deep`
+- 审查跨模块分析以检测子项目间的重复
 
-## Links
+## 链接
 
-- [GitHub Repository](https://github.com/haibindev/repo-scan)
+- [GitHub 仓库](https://github.com/haibindev/repo-scan)

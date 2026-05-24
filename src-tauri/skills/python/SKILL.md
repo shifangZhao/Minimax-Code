@@ -1,44 +1,44 @@
 ---
 name: python-patterns
-description: Pythonic idioms, PEP 8 standards, type hints, and best practices for building robust, efficient, and maintainable Python applications.
+description: Python 惯用语法、PEP 8 标准、类型提示和最佳实践，用于构建健壮、高效和可维护的 Python 应用程序。
 origin: ECC
 ---
 
-# Python Development Patterns
+# Python 开发模式
 
-Idiomatic Python patterns and best practices for building robust, efficient, and maintainable applications.
+用于构建健壮、高效和可维护应用程序的惯用 Python 模式和最佳实践。
 
-## When to Activate
+## 激活时机
 
-- Writing new Python code
-- Reviewing Python code
-- Refactoring existing Python code
-- Designing Python packages/modules
+- 编写新的 Python 代码
+- 审查 Python 代码
+- 重构现有 Python 代码
+- 设计 Python 包/模块
 
-## Core Principles
+## 核心原则
 
-### 1. Readability Counts
+### 1. 可读性至关重要
 
-Python prioritizes readability. Code should be obvious and easy to understand.
+Python 优先考虑可读性。代码应该明显且易于理解。
 
 ```python
-# Good: Clear and readable
+# 好：清晰可读
 def get_active_users(users: list[User]) -> list[User]:
     """Return only active users from the provided list."""
     return [user for user in users if user.is_active]
 
 
-# Bad: Clever but confusing
+# 坏：巧妙但混乱
 def get_active_users(u):
     return [x for x in u if x.a]
 ```
 
-### 2. Explicit is Better Than Implicit
+### 2. 显式优于隐式
 
-Avoid magic; be clear about what your code does.
+避免魔法；要清晰说明你的代码做什么。
 
 ```python
-# Good: Explicit configuration
+# 好：显式配置
 import logging
 
 logging.basicConfig(
@@ -46,24 +46,24 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
-# Bad: Hidden side effects
+# 坏：隐藏副作用
 import some_module
-some_module.setup()  # What does this do?
+some_module.setup()  # 这是做什么的？
 ```
 
-### 3. EAFP - Easier to Ask Forgiveness Than Permission
+### 3. EAFP — 请求原谅比请求许可更容易
 
-Python prefers exception handling over checking conditions.
+Python 优先使用异常处理而非检查条件。
 
 ```python
-# Good: EAFP style
+# 好：EAFP 风格
 def get_value(dictionary: dict, key: str) -> Any:
     try:
         return dictionary[key]
     except KeyError:
         return default_value
 
-# Bad: LBYL (Look Before You Leap) style
+# 坏：LBYL（先看后跳）风格
 def get_value(dictionary: dict, key: str) -> Any:
     if key in dictionary:
         return dictionary[key]
@@ -71,9 +71,9 @@ def get_value(dictionary: dict, key: str) -> Any:
         return default_value
 ```
 
-## Type Hints
+## 类型提示
 
-### Basic Type Annotations
+### 基本类型注解
 
 ```python
 from typing import Optional, List, Dict, Any
@@ -89,32 +89,32 @@ def process_user(
     return User(user_id, data)
 ```
 
-### Modern Type Hints (Python 3.9+)
+### 现代类型提示（Python 3.9+）
 
 ```python
-# Python 3.9+ - Use built-in types
+# Python 3.9+ - 使用内置类型
 def process_items(items: list[str]) -> dict[str, int]:
     return {item: len(item) for item in items}
 
-# Python 3.8 and earlier - Use typing module
+# Python 3.8 及更早 - 使用 typing 模块
 from typing import List, Dict
 
 def process_items(items: List[str]) -> Dict[str, int]:
     return {item: len(item) for item in items}
 ```
 
-### Type Aliases and TypeVar
+### 类型别名和 TypeVar
 
 ```python
 from typing import TypeVar, Union
 
-# Type alias for complex types
+# 复杂类型的类型别名
 JSON = Union[dict[str, Any], list[Any], str, int, float, bool, None]
 
 def parse_json(data: str) -> JSON:
     return json.loads(data)
 
-# Generic types
+# 泛型类型
 T = TypeVar('T')
 
 def first(items: list[T]) -> T | None:
@@ -122,7 +122,7 @@ def first(items: list[T]) -> T | None:
     return items[0] if items else None
 ```
 
-### Protocol-Based Duck Typing
+### 基于协议的鸭子类型
 
 ```python
 from typing import Protocol
@@ -136,12 +136,12 @@ def render_all(items: list[Renderable]) -> str:
     return "\n".join(item.render() for item in items)
 ```
 
-## Error Handling Patterns
+## 错误处理模式
 
-### Specific Exception Handling
+### 特定异常处理
 
 ```python
-# Good: Catch specific exceptions
+# 好：捕获特定异常
 def load_config(path: str) -> Config:
     try:
         with open(path) as f:
@@ -151,42 +151,42 @@ def load_config(path: str) -> Config:
     except json.JSONDecodeError as e:
         raise ConfigError(f"Invalid JSON in config: {path}") from e
 
-# Bad: Bare except
+# 坏：裸 except
 def load_config(path: str) -> Config:
     try:
         with open(path) as f:
             return Config.from_json(f.read())
     except:
-        return None  # Silent failure!
+        return None  # 静默失败！
 ```
 
-### Exception Chaining
+### 异常链
 
 ```python
 def process_data(data: str) -> Result:
     try:
         parsed = json.loads(data)
     except json.JSONDecodeError as e:
-        # Chain exceptions to preserve the traceback
+        # 链异常以保留 traceback
         raise ValueError(f"Failed to parse data: {data}") from e
 ```
 
-### Custom Exception Hierarchy
+### 自定义异常层次结构
 
 ```python
 class AppError(Exception):
-    """Base exception for all application errors."""
+    """所有应用异常的基类。"""
     pass
 
 class ValidationError(AppError):
-    """Raised when input validation fails."""
+    """输入验证失败时抛出。"""
     pass
 
 class NotFoundError(AppError):
-    """Raised when a requested resource is not found."""
+    """请求的资源未找到时抛出。"""
     pass
 
-# Usage
+# 使用
 def get_user(user_id: str) -> User:
     user = db.find_user(user_id)
     if not user:
@@ -194,17 +194,17 @@ def get_user(user_id: str) -> User:
     return user
 ```
 
-## Context Managers
+## 上下文管理器
 
-### Resource Management
+### 资源管理
 
 ```python
-# Good: Using context managers
+# 好：使用上下文管理器
 def process_file(path: str) -> str:
     with open(path, 'r') as f:
         return f.read()
 
-# Bad: Manual resource management
+# 坏：手动资源管理
 def process_file(path: str) -> str:
     f = open(path, 'r')
     try:
@@ -213,25 +213,25 @@ def process_file(path: str) -> str:
         f.close()
 ```
 
-### Custom Context Managers
+### 自定义上下文管理器
 
 ```python
 from contextlib import contextmanager
 
 @contextmanager
 def timer(name: str):
-    """Context manager to time a block of code."""
+    """计时代码块的上下文管理器。"""
     start = time.perf_counter()
     yield
     elapsed = time.perf_counter() - start
     print(f"{name} took {elapsed:.4f} seconds")
 
-# Usage
+# 使用
 with timer("data processing"):
     process_large_dataset()
 ```
 
-### Context Manager Classes
+### 上下文管理器类
 
 ```python
 class DatabaseTransaction:
@@ -247,33 +247,33 @@ class DatabaseTransaction:
             self.connection.commit()
         else:
             self.connection.rollback()
-        return False  # Don't suppress exceptions
+        return False  # 不要抑制异常
 
-# Usage
+# 使用
 with DatabaseTransaction(conn):
     user = conn.create_user(user_data)
     conn.create_profile(user.id, profile_data)
 ```
 
-## Comprehensions and Generators
+## 推导式和生成器
 
-### List Comprehensions
+### 列表推导式
 
 ```python
-# Good: List comprehension for simple transformations
+# 好：简单转换的列表推导式
 names = [user.name for user in users if user.is_active]
 
-# Bad: Manual loop
+# 坏：手动循环
 names = []
 for user in users:
     if user.is_active:
         names.append(user.name)
 
-# Complex comprehensions should be expanded
-# Bad: Too complex
+# 复杂推导式应展开
+# 坏：太复杂
 result = [x * 2 for x in items if x > 0 if x % 2 == 0]
 
-# Good: Use a generator function
+# 好：使用生成器函数
 def filter_and_transform(items: Iterable[int]) -> list[int]:
     result = []
     for x in items:
@@ -282,33 +282,33 @@ def filter_and_transform(items: Iterable[int]) -> list[int]:
     return result
 ```
 
-### Generator Expressions
+### 生成器表达式
 
 ```python
-# Good: Generator for lazy evaluation
+# 好：惰性求值的生成器
 total = sum(x * x for x in range(1_000_000))
 
-# Bad: Creates large intermediate list
+# 坏：创建大型中间列表
 total = sum([x * x for x in range(1_000_000)])
 ```
 
-### Generator Functions
+### 生成器函数
 
 ```python
 def read_large_file(path: str) -> Iterator[str]:
-    """Read a large file line by line."""
+    """逐行读取大文件。"""
     with open(path) as f:
         for line in f:
             yield line.strip()
 
-# Usage
+# 使用
 for line in read_large_file("huge.txt"):
     process(line)
 ```
 
-## Data Classes and Named Tuples
+## 数据类和命名元组
 
-### Data Classes
+### 数据类
 
 ```python
 from dataclasses import dataclass, field
@@ -316,14 +316,14 @@ from datetime import datetime
 
 @dataclass
 class User:
-    """User entity with automatic __init__, __repr__, and __eq__."""
+    """带自动 __init__、__repr__ 和 __eq__ 的用户实体。"""
     id: str
     name: str
     email: str
     created_at: datetime = field(default_factory=datetime.now)
     is_active: bool = True
 
-# Usage
+# 使用
 user = User(
     id="123",
     name="Alice",
@@ -331,7 +331,7 @@ user = User(
 )
 ```
 
-### Data Classes with Validation
+### 带验证的数据类
 
 ```python
 @dataclass
@@ -340,43 +340,43 @@ class User:
     age: int
 
     def __post_init__(self):
-        # Validate email format
+        # 验证 email 格式
         if "@" not in self.email:
             raise ValueError(f"Invalid email: {self.email}")
-        # Validate age range
+        # 验证 age 范围
         if self.age < 0 or self.age > 150:
             raise ValueError(f"Invalid age: {self.age}")
 ```
 
-### Named Tuples
+### 命名元组
 
 ```python
 from typing import NamedTuple
 
 class Point(NamedTuple):
-    """Immutable 2D point."""
+    """不可变 2D 点。"""
     x: float
     y: float
 
     def distance(self, other: 'Point') -> float:
         return ((self.x - other.x) ** 2 + (self.y - other.y) ** 2) ** 0.5
 
-# Usage
+# 使用
 p1 = Point(0, 0)
 p2 = Point(3, 4)
 print(p1.distance(p2))  # 5.0
 ```
 
-## Decorators
+## 装饰器
 
-### Function Decorators
+### 函数装饰器
 
 ```python
 import functools
 import time
 
 def timer(func: Callable) -> Callable:
-    """Decorator to time function execution."""
+    """计时函数执行的装饰器。"""
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         start = time.perf_counter()
@@ -390,14 +390,14 @@ def timer(func: Callable) -> Callable:
 def slow_function():
     time.sleep(1)
 
-# slow_function() prints: slow_function took 1.0012s
+# slow_function() 打印: slow_function took 1.0012s
 ```
 
-### Parameterized Decorators
+### 参数化装饰器
 
 ```python
 def repeat(times: int):
-    """Decorator to repeat a function multiple times."""
+    """重复函数多次的装饰器。"""
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
@@ -412,14 +412,14 @@ def repeat(times: int):
 def greet(name: str) -> str:
     return f"Hello, {name}!"
 
-# greet("Alice") returns ["Hello, Alice!", "Hello, Alice!", "Hello, Alice!"]
+# greet("Alice") 返回 ["Hello, Alice!", "Hello, Alice!", "Hello, Alice!"]
 ```
 
-### Class-Based Decorators
+### 基于类的装饰器
 
 ```python
 class CountCalls:
-    """Decorator that counts how many times a function is called."""
+    """计数函数被调用次数的装饰器。"""
     def __init__(self, func: Callable):
         functools.update_wrapper(self, func)
         self.func = func
@@ -434,25 +434,25 @@ class CountCalls:
 def process():
     pass
 
-# Each call to process() prints the call count
+# 每次调用 process() 打印调用计数
 ```
 
-## Concurrency Patterns
+## 并发模式
 
-### Threading for I/O-Bound Tasks
+### 用于 I/O 密集型任务的线程
 
 ```python
 import concurrent.futures
 import threading
 
 def fetch_url(url: str) -> str:
-    """Fetch a URL (I/O-bound operation)."""
+    """获取 URL（I/O 密集型操作）。"""
     import urllib.request
     with urllib.request.urlopen(url) as response:
         return response.read().decode()
 
 def fetch_all_urls(urls: list[str]) -> dict[str, str]:
-    """Fetch multiple URLs concurrently using threads."""
+    """使用线程并发获取多个 URL。"""
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         future_to_url = {executor.submit(fetch_url, url): url for url in urls}
         results = {}
@@ -465,42 +465,42 @@ def fetch_all_urls(urls: list[str]) -> dict[str, str]:
     return results
 ```
 
-### Multiprocessing for CPU-Bound Tasks
+### 用于 CPU 密集型任务的多进程
 
 ```python
 def process_data(data: list[int]) -> int:
-    """CPU-intensive computation."""
+    """CPU 密集型计算。"""
     return sum(x ** 2 for x in data)
 
 def process_all(datasets: list[list[int]]) -> list[int]:
-    """Process multiple datasets using multiple processes."""
+    """使用多进程处理多个数据集。"""
     with concurrent.futures.ProcessPoolExecutor() as executor:
         results = list(executor.map(process_data, datasets))
     return results
 ```
 
-### Async/Await for Concurrent I/O
+### 用于并发 I/O 的 Async/Await
 
 ```python
 import asyncio
 
 async def fetch_async(url: str) -> str:
-    """Fetch a URL asynchronously."""
+    """异步获取 URL。"""
     import aiohttp
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
             return await response.text()
 
 async def fetch_all(urls: list[str]) -> dict[str, str]:
-    """Fetch multiple URLs concurrently."""
+    """并发获取多个 URL。"""
     tasks = [fetch_async(url) for url in urls]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     return dict(zip(urls, results))
 ```
 
-## Package Organization
+## 包组织
 
-### Standard Project Layout
+### 标准项目布局
 
 ```
 myproject/
@@ -527,10 +527,10 @@ myproject/
 └── .gitignore
 ```
 
-### Import Conventions
+### 导入约定
 
 ```python
-# Good: Import order - stdlib, third-party, local
+# 好：导入顺序 - 标准库、第三方、本地
 import os
 import sys
 from pathlib import Path
@@ -541,11 +541,11 @@ from fastapi import FastAPI
 from mypackage.models import User
 from mypackage.utils import format_name
 
-# Good: Use isort for automatic import sorting
+# 好：使用 isort 自动排序导入
 # pip install isort
 ```
 
-### __init__.py for Package Exports
+### __init__.py 用于包导出
 
 ```python
 # mypackage/__init__.py
@@ -553,25 +553,25 @@ from mypackage.utils import format_name
 
 __version__ = "1.0.0"
 
-# Export main classes/functions at package level
+# 在包级别导出主要类/函数
 from mypackage.models import User, Post
 from mypackage.utils import format_name
 
 __all__ = ["User", "Post", "format_name"]
 ```
 
-## Memory and Performance
+## 内存和性能
 
-### Using __slots__ for Memory Efficiency
+### 使用 __slots__ 提高内存效率
 
 ```python
-# Bad: Regular class uses __dict__ (more memory)
+# 坏：常规类使用 __dict__（更多内存）
 class Point:
     def __init__(self, x: float, y: float):
         self.x = x
         self.y = y
 
-# Good: __slots__ reduces memory usage
+# 好：__slots__ 减少内存使用
 class Point:
     __slots__ = ['x', 'y']
 
@@ -580,33 +580,33 @@ class Point:
         self.y = y
 ```
 
-### Generator for Large Data
+### 用于大数据集的生成器
 
 ```python
-# Bad: Returns full list in memory
+# 坏：返回内存中的完整列表
 def read_lines(path: str) -> list[str]:
     with open(path) as f:
         return [line.strip() for line in f]
 
-# Good: Yields lines one at a time
+# 好：逐行 yield
 def read_lines(path: str) -> Iterator[str]:
     with open(path) as f:
         for line in f:
             yield line.strip()
 ```
 
-### Avoid String Concatenation in Loops
+### 避免循环中的字符串连接
 
 ```python
-# Bad: O(n²) due to string immutability
+# 坏：由于字符串不可变性 O(n²)
 result = ""
 for item in items:
     result += str(item)
 
-# Good: O(n) using join
+# 好：使用 join 的 O(n)
 result = "".join(str(item) for item in items)
 
-# Good: Using StringIO for building
+# 好：使用 StringIO 构建
 from io import StringIO
 
 buffer = StringIO()
@@ -615,12 +615,12 @@ for item in items:
 result = buffer.getvalue()
 ```
 
-## Python Tooling Integration
+## Python 工具集成
 
-### Essential Commands
+### 基本命令
 
 ```bash
-# Code formatting
+# 代码格式化
 black .
 isort .
 
@@ -628,21 +628,21 @@ isort .
 ruff check .
 pylint mypackage/
 
-# Type checking
+# 类型检查
 mypy .
 
-# Testing
+# 测试
 pytest --cov=mypackage --cov-report=html
 
-# Security scanning
+# 安全扫描
 bandit -r .
 
-# Dependency management
+# 依赖管理
 pip-audit
 safety check
 ```
 
-### pyproject.toml Configuration
+### pyproject.toml 配置
 
 ```toml
 [project]
@@ -682,129 +682,128 @@ testpaths = ["tests"]
 addopts = "--cov=mypackage --cov-report=term-missing"
 ```
 
-## Quick Reference: Python Idioms
+## 快速参考：Python 惯用语法
 
-| Idiom | Description |
+| 惯用语法 | 描述 |
 |-------|-------------|
-| EAFP | Easier to Ask Forgiveness than Permission |
-| Context managers | Use `with` for resource management |
-| List comprehensions | For simple transformations |
-| Generators | For lazy evaluation and large datasets |
-| Type hints | Annotate function signatures |
-| Dataclasses | For data containers with auto-generated methods |
-| `__slots__` | For memory optimization |
-| f-strings | For string formatting (Python 3.6+) |
-| `pathlib.Path` | For path operations (Python 3.4+) |
-| `enumerate` | For index-element pairs in loops |
+| EAFP | 请求原谅比请求许可更容易 |
+| 上下文管理器 | 使用 `with` 进行资源管理 |
+| 列表推导式 | 用于简单转换 |
+| 生成器 | 惰性求值和大数据集 |
+| 类型提示 | 注解函数签名 |
+| 数据类 | 带自动生成方法的数据容器 |
+| `__slots__` | 用于内存优化 |
+| f-strings | 用于字符串格式化（Python 3.6+） |
+| `pathlib.Path` | 用于路径操作（Python 3.4+） |
+| `enumerate` | 用于循环中的索引-元素对 |
 
-## Anti-Patterns to Avoid
+## 应避免的反模式
 
 ```python
-# Bad: Mutable default arguments
+# 坏：可变默认参数
 def append_to(item, items=[]):
     items.append(item)
     return items
 
-# Good: Use None and create new list
+# 好：使用 None 并创建新列表
 def append_to(item, items=None):
     if items is None:
         items = []
     items.append(item)
     return items
 
-# Bad: Checking type with type()
+# 坏：使用 type() 检查类型
 if type(obj) == list:
     process(obj)
 
-# Good: Use isinstance
+# 好：使用 isinstance
 if isinstance(obj, list):
     process(obj)
 
-# Bad: Comparing to None with ==
+# 坏：使用 == 比较 None
 if value == None:
     process()
 
-# Good: Use is
+# 好：使用 is
 if value is None:
     process()
 
-# Bad: from module import *
+# 坏：from module import *
 from os.path import *
 
-# Good: Explicit imports
+# 好：显式导入
 from os.path import join, exists
 
-# Bad: Bare except
+# 坏：裸 except
 try:
     risky_operation()
 except:
     pass
 
-# Good: Specific exception
+# 好：特定异常
 try:
     risky_operation()
 except SpecificError as e:
     logger.error(f"Operation failed: {e}")
 ```
 
-__Remember__: Python code should be readable, explicit, and follow the principle of least surprise. When in doubt, prioritize clarity over cleverness.
-
+__记住__：Python 代码应该可读、显式并遵循最小意外原则。当有疑问时，优先清晰而非巧妙。
 
 ---
 
 ---
 name: python-testing
-description: Python testing strategies using pytest, TDD methodology, fixtures, mocking, parametrization, and coverage requirements.
+description: Python 测试策略，使用 pytest、TDD 方法论、fixtures、mocking、参数化和覆盖率要求。
 origin: ECC
 ---
 
-# Python Testing Patterns
+# Python 测试模式
 
-Comprehensive testing strategies for Python applications using pytest, TDD methodology, and best practices.
+使用 pytest、TDD 方法论和最佳实践的综合 Python 应用测试策略。
 
-## When to Activate
+## 激活时机
 
-- Writing new Python code (follow TDD: red, green, refactor)
-- Designing test suites for Python projects
-- Reviewing Python test coverage
-- Setting up testing infrastructure
+- 编写新 Python 代码（遵循 TDD：红、绿、重构）
+- 为 Python 项目设计测试套件
+- 审查 Python 测试覆盖
+- 设置测试基础设施
 
-## Core Testing Philosophy
+## 核心测试哲学
 
-### Test-Driven Development (TDD)
+### 测试驱动开发（TDD）
 
-Always follow the TDD cycle:
+始终遵循 TDD 循环：
 
-1. **RED**: Write a failing test for the desired behavior
-2. **GREEN**: Write minimal code to make the test pass
-3. **REFACTOR**: Improve code while keeping tests green
+1. **RED**：为期望行为写一个失败的测试
+2. **GREEN**：写最小代码使测试通过
+3. **REFACTOR**：在保持测试绿色时改进代码
 
 ```python
-# Step 1: Write failing test (RED)
+# 步骤 1：写失败的测试（RED）
 def test_add_numbers():
     result = add(2, 3)
     assert result == 5
 
-# Step 2: Write minimal implementation (GREEN)
+# 步骤 2：写最小实现（GREEN）
 def add(a, b):
     return a + b
 
-# Step 3: Refactor if needed (REFACTOR)
+# 步骤 3：如需要则重构（REFACTOR）
 ```
 
-### Coverage Requirements
+### 覆盖率要求
 
-- **Target**: 80%+ code coverage
-- **Critical paths**: 100% coverage required
-- Use `pytest --cov` to measure coverage
+- **目标**：80%+ 代码覆盖率
+- **关键路径**：需要 100% 覆盖
+- 使用 `pytest --cov` 测量覆盖率
 
 ```bash
 pytest --cov=mypackage --cov-report=term-missing --cov-report=html
 ```
 
-## pytest Fundamentals
+## pytest 基础
 
-### Basic Test Structure
+### 基本测试结构
 
 ```python
 import pytest
@@ -826,42 +825,42 @@ def test_list_append():
     assert len(items) == 4
 ```
 
-### Assertions
+### 断言
 
 ```python
-# Equality
+# 相等
 assert result == expected
 
-# Inequality
+# 不等
 assert result != unexpected
 
-# Truthiness
+# 真值
 assert result  # Truthy
 assert not result  # Falsy
-assert result is True  # Exactly True
-assert result is False  # Exactly False
-assert result is None  # Exactly None
+assert result is True  # 正好 True
+assert result is False  # 正好 False
+assert result is None  # 正好 None
 
-# Membership
+# 成员
 assert item in collection
 assert item not in collection
 
-# Comparisons
+# 比较
 assert result > 0
 assert 0 <= result <= 100
 
-# Type checking
+# 类型检查
 assert isinstance(result, str)
 
-# Exception testing (preferred approach)
+# 异常测试（首选方法）
 with pytest.raises(ValueError):
     raise ValueError("error message")
 
-# Check exception message
+# 检查异常消息
 with pytest.raises(ValueError, match="invalid input"):
     raise ValueError("invalid input provided")
 
-# Check exception attributes
+# 检查异常属性
 with pytest.raises(ValueError) as exc_info:
     raise ValueError("error message")
 assert str(exc_info.value) == "error message"
@@ -869,7 +868,7 @@ assert str(exc_info.value) == "error message"
 
 ## Fixtures
 
-### Basic Fixture Usage
+### 基本 Fixture 使用
 
 ```python
 import pytest
@@ -885,7 +884,7 @@ def test_sample_data(sample_data):
     assert sample_data["age"] == 30
 ```
 
-### Fixture with Setup/Teardown
+### 带 Setup/Teardown 的 Fixture
 
 ```python
 @pytest.fixture
@@ -907,17 +906,17 @@ def test_database_query(database):
     assert len(result) > 0
 ```
 
-### Fixture Scopes
+### Fixture 作用域
 
 ```python
-# Function scope (default) - runs for each test
+# 函数作用域（默认）- 每个测试运行一次
 @pytest.fixture
 def temp_file():
     with open("temp.txt", "w") as f:
         yield f
     os.remove("temp.txt")
 
-# Module scope - runs once per module
+# 模块作用域 - 每个模块运行一次
 @pytest.fixture(scope="module")
 def module_db():
     db = Database(":memory:")
@@ -925,7 +924,7 @@ def module_db():
     yield db
     db.close()
 
-# Session scope - runs once per test session
+# 会话作用域 - 每个测试会话运行一次
 @pytest.fixture(scope="session")
 def shared_resource():
     resource = ExpensiveResource()
@@ -933,7 +932,7 @@ def shared_resource():
     resource.cleanup()
 ```
 
-### Fixture with Parameters
+### 带参数的 Fixture
 
 ```python
 @pytest.fixture(params=[1, 2, 3])
@@ -946,7 +945,7 @@ def test_numbers(number):
     assert number > 0
 ```
 
-### Using Multiple Fixtures
+### 使用多个 Fixtures
 
 ```python
 @pytest.fixture
@@ -977,7 +976,7 @@ def test_without_fixture_call():
     assert Config.get_setting("debug") is False
 ```
 
-### Conftest.py for Shared Fixtures
+### Conftest.py 用于共享 Fixtures
 
 ```python
 # tests/conftest.py
@@ -1001,9 +1000,9 @@ def auth_headers(client):
     return {"Authorization": f"Bearer {token}"}
 ```
 
-## Parametrization
+## 参数化
 
-### Basic Parametrization
+### 基本参数化
 
 ```python
 @pytest.mark.parametrize("input,expected", [
@@ -1016,7 +1015,7 @@ def test_uppercase(input, expected):
     assert input.upper() == expected
 ```
 
-### Multiple Parameters
+### 多个参数
 
 ```python
 @pytest.mark.parametrize("a,b,expected", [
@@ -1030,7 +1029,7 @@ def test_add(a, b, expected):
     assert add(a, b) == expected
 ```
 
-### Parametrize with IDs
+### 带 ID 的参数化
 
 ```python
 @pytest.mark.parametrize("input,expected", [
@@ -1043,7 +1042,7 @@ def test_email_validation(input, expected):
     assert is_valid_email(input) is expected
 ```
 
-### Parametrized Fixtures
+### 参数化 Fixtures
 
 ```python
 @pytest.fixture(params=["sqlite", "postgresql", "mysql"])
@@ -1062,509 +1061,132 @@ def test_database_operations(db):
     assert result is not None
 ```
 
-## Markers and Test Selection
+## 标记和测试选择
 
-### Custom Markers
+### 自定义标记
 
 ```python
-# Mark slow tests
+# 标记慢测试
 @pytest.mark.slow
 def test_slow_operation():
     time.sleep(5)
 
-# Mark integration tests
+# 标记集成测试
 @pytest.mark.integration
 def test_api_integration():
     response = requests.get("https://api.example.com")
     assert response.status_code == 200
 
-# Mark unit tests
+# 标记单元测试
 @pytest.mark.unit
 def test_unit_logic():
     assert calculate(2, 3) == 5
 ```
 
-### Run Specific Tests
+### 运行特定测试
 
 ```bash
-# Run only fast tests
+# 仅运行快速测试
 pytest -m "not slow"
 
-# Run only integration tests
+# 仅运行集成测试
 pytest -m integration
 
-# Run integration or slow tests
+# 运行集成或慢测试
 pytest -m "integration or slow"
 
-# Run tests marked as unit but not slow
+# 运行标记为 unit 但非 slow 的测试
 pytest -m "unit and not slow"
 ```
 
-### Configure Markers in pytest.ini
+## Mocking
 
-```ini
-[pytest]
-markers =
-    slow: marks tests as slow
-    integration: marks tests as integration tests
-    unit: marks tests as unit tests
-    django: marks tests as requiring Django
-```
-
-## Mocking and Patching
-
-### Mocking Functions
+### 使用 unittest.mock
 
 ```python
-from unittest.mock import patch, Mock
+from unittest.mock import Mock, patch, MagicMock
 
-@patch("mypackage.external_api_call")
-def test_with_mock(api_call_mock):
-    """Test with mocked external API."""
-    api_call_mock.return_value = {"status": "success"}
+def test_user_repository():
+    # 创建 mock
+    mock_db = Mock()
+    mock_db.find_user.return_value = User(id=1, name="Alice")
 
-    result = my_function()
+    # 使用 mock
+    repo = UserRepository(mock_db)
+    user = repo.find_user(1)
 
-    api_call_mock.assert_called_once()
-    assert result["status"] == "success"
+    assert user.name == "Alice"
+    mock_db.find_user.assert_called_once_with(1)
+
+def test_with_patch():
+    @patch('myapp.external_api.fetch')
+    def test_external_call(mock_fetch):
+        mock_fetch.return_value = {"status": "ok"}
+
+        result = call_external_api()
+        assert result["status"] == "ok"
+        mock_fetch.assert_called_once()
 ```
 
-### Mocking Return Values
-
-```python
-@patch("mypackage.Database.connect")
-def test_database_connection(connect_mock):
-    """Test with mocked database connection."""
-    connect_mock.return_value = MockConnection()
-
-    db = Database()
-    db.connect()
-
-    connect_mock.assert_called_once_with("localhost")
-```
-
-### Mocking Exceptions
-
-```python
-@patch("mypackage.api_call")
-def test_api_error_handling(api_call_mock):
-    """Test error handling with mocked exception."""
-    api_call_mock.side_effect = ConnectionError("Network error")
-
-    with pytest.raises(ConnectionError):
-        api_call()
-
-    api_call_mock.assert_called_once()
-```
-
-### Mocking Context Managers
-
-```python
-@patch("builtins.open", new_callable=mock_open)
-def test_file_reading(mock_file):
-    """Test file reading with mocked open."""
-    mock_file.return_value.read.return_value = "file content"
-
-    result = read_file("test.txt")
-
-    mock_file.assert_called_once_with("test.txt", "r")
-    assert result == "file content"
-```
-
-### Using Autospec
-
-```python
-@patch("mypackage.DBConnection", autospec=True)
-def test_autospec(db_mock):
-    """Test with autospec to catch API misuse."""
-    db = db_mock.return_value
-    db.query("SELECT * FROM users")
-
-    # This would fail if DBConnection doesn't have query method
-    db_mock.assert_called_once()
-```
-
-### Mock Class Instances
-
-```python
-class TestUserService:
-    @patch("mypackage.UserRepository")
-    def test_create_user(self, repo_mock):
-        """Test user creation with mocked repository."""
-        repo_mock.return_value.save.return_value = User(id=1, name="Alice")
-
-        service = UserService(repo_mock.return_value)
-        user = service.create_user(name="Alice")
-
-        assert user.name == "Alice"
-        repo_mock.return_value.save.assert_called_once()
-```
-
-### Mock Property
+### Fixture 中的 Mock
 
 ```python
 @pytest.fixture
-def mock_config():
-    """Create a mock with a property."""
-    config = Mock()
-    type(config).debug = PropertyMock(return_value=True)
-    type(config).api_key = PropertyMock(return_value="test-key")
-    return config
+def mock_db():
+    return Mock(spec=Database)
 
-def test_with_mock_config(mock_config):
-    """Test with mocked config properties."""
-    assert mock_config.debug is True
-    assert mock_config.api_key == "test-key"
+def test_with_mock_db(mock_db):
+    mock_db.query.return_value = [{"id": 1, "name": "Alice"}]
+
+    service = UserService(mock_db)
+    users = service.get_all()
+
+    assert len(users) == 1
+    assert users[0].name == "Alice"
 ```
 
-## Testing Async Code
-
-### Async Tests with pytest-asyncio
+## 异步测试
 
 ```python
 import pytest
 
 @pytest.mark.asyncio
-async def test_async_function():
-    """Test async function."""
-    result = await async_add(2, 3)
-    assert result == 5
+async def test_async_fetch():
+    result = await fetch_data()
+    assert result is not None
 
-@pytest.mark.asyncio
-async def test_async_with_fixture(async_client):
-    """Test async with async fixture."""
-    response = await async_client.get("/api/users")
-    assert response.status_code == 200
+# 或者使用 pytest-asyncio 模式
+pytest_plugins = ['pytest_asyncio']
 ```
 
-### Async Fixture
-
-```python
-@pytest.fixture
-async def async_client():
-    """Async fixture providing async test client."""
-    app = create_app()
-    async with app.test_client() as client:
-        yield client
-
-@pytest.mark.asyncio
-async def test_api_endpoint(async_client):
-    """Test using async fixture."""
-    response = await async_client.get("/api/data")
-    assert response.status_code == 200
-```
-
-### Mocking Async Functions
-
-```python
-@pytest.mark.asyncio
-@patch("mypackage.async_api_call")
-async def test_async_mock(api_call_mock):
-    """Test async function with mock."""
-    api_call_mock.return_value = {"status": "ok"}
-
-    result = await my_async_function()
-
-    api_call_mock.assert_awaited_once()
-    assert result["status"] == "ok"
-```
-
-## Testing Exceptions
-
-### Testing Expected Exceptions
-
-```python
-def test_divide_by_zero():
-    """Test that dividing by zero raises ZeroDivisionError."""
-    with pytest.raises(ZeroDivisionError):
-        divide(10, 0)
-
-def test_custom_exception():
-    """Test custom exception with message."""
-    with pytest.raises(ValueError, match="invalid input"):
-        validate_input("invalid")
-```
-
-### Testing Exception Attributes
-
-```python
-def test_exception_with_details():
-    """Test exception with custom attributes."""
-    with pytest.raises(CustomError) as exc_info:
-        raise CustomError("error", code=400)
-
-    assert exc_info.value.code == 400
-    assert "error" in str(exc_info.value)
-```
-
-## Testing Side Effects
-
-### Testing File Operations
-
-```python
-import tempfile
-import os
-
-def test_file_processing():
-    """Test file processing with temp file."""
-    with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as f:
-        f.write("test content")
-        temp_path = f.name
-
-    try:
-        result = process_file(temp_path)
-        assert result == "processed: test content"
-    finally:
-        os.unlink(temp_path)
-```
-
-### Testing with pytest's tmp_path Fixture
-
-```python
-def test_with_tmp_path(tmp_path):
-    """Test using pytest's built-in temp path fixture."""
-    test_file = tmp_path / "test.txt"
-    test_file.write_text("hello world")
-
-    result = process_file(str(test_file))
-    assert result == "hello world"
-    # tmp_path automatically cleaned up
-```
-
-### Testing with tmpdir Fixture
-
-```python
-def test_with_tmpdir(tmpdir):
-    """Test using pytest's tmpdir fixture."""
-    test_file = tmpdir.join("test.txt")
-    test_file.write("data")
-
-    result = process_file(str(test_file))
-    assert result == "data"
-```
-
-## Test Organization
-
-### Directory Structure
-
-```
-tests/
-├── conftest.py                 # Shared fixtures
-├── __init__.py
-├── unit/                       # Unit tests
-│   ├── __init__.py
-│   ├── test_models.py
-│   ├── test_utils.py
-│   └── test_services.py
-├── integration/                # Integration tests
-│   ├── __init__.py
-│   ├── test_api.py
-│   └── test_database.py
-└── e2e/                        # End-to-end tests
-    ├── __init__.py
-    └── test_user_flow.py
-```
-
-### Test Classes
-
-```python
-class TestUserService:
-    """Group related tests in a class."""
-
-    @pytest.fixture(autouse=True)
-    def setup(self):
-        """Setup runs before each test in this class."""
-        self.service = UserService()
-
-    def test_create_user(self):
-        """Test user creation."""
-        user = self.service.create_user("Alice")
-        assert user.name == "Alice"
-
-    def test_delete_user(self):
-        """Test user deletion."""
-        user = User(id=1, name="Bob")
-        self.service.delete_user(user)
-        assert not self.service.user_exists(1)
-```
-
-## Best Practices
-
-### DO
-
-- **Follow TDD**: Write tests before code (red-green-refactor)
-- **Test one thing**: Each test should verify a single behavior
-- **Use descriptive names**: `test_user_login_with_invalid_credentials_fails`
-- **Use fixtures**: Eliminate duplication with fixtures
-- **Mock external dependencies**: Don't depend on external services
-- **Test edge cases**: Empty inputs, None values, boundary conditions
-- **Aim for 80%+ coverage**: Focus on critical paths
-- **Keep tests fast**: Use marks to separate slow tests
-
-### DON'T
-
-- **Don't test implementation**: Test behavior, not internals
-- **Don't use complex conditionals in tests**: Keep tests simple
-- **Don't ignore test failures**: All tests must pass
-- **Don't test third-party code**: Trust libraries to work
-- **Don't share state between tests**: Tests should be independent
-- **Don't catch exceptions in tests**: Use `pytest.raises`
-- **Don't use print statements**: Use assertions and pytest output
-- **Don't write tests that are too brittle**: Avoid over-specific mocks
-
-## Common Patterns
-
-### Testing API Endpoints (FastAPI/Flask)
-
-```python
-@pytest.fixture
-def client():
-    app = create_app(testing=True)
-    return app.test_client()
-
-def test_get_user(client):
-    response = client.get("/api/users/1")
-    assert response.status_code == 200
-    assert response.json["id"] == 1
-
-def test_create_user(client):
-    response = client.post("/api/users", json={
-        "name": "Alice",
-        "email": "alice@example.com"
-    })
-    assert response.status_code == 201
-    assert response.json["name"] == "Alice"
-```
-
-### Testing Database Operations
-
-```python
-@pytest.fixture
-def db_session():
-    """Create a test database session."""
-    session = Session(bind=engine)
-    session.begin_nested()
-    yield session
-    session.rollback()
-    session.close()
-
-def test_create_user(db_session):
-    user = User(name="Alice", email="alice@example.com")
-    db_session.add(user)
-    db_session.commit()
-
-    retrieved = db_session.query(User).filter_by(name="Alice").first()
-    assert retrieved.email == "alice@example.com"
-```
-
-### Testing Class Methods
-
-```python
-class TestCalculator:
-    @pytest.fixture
-    def calculator(self):
-        return Calculator()
-
-    def test_add(self, calculator):
-        assert calculator.add(2, 3) == 5
-
-    def test_divide_by_zero(self, calculator):
-        with pytest.raises(ZeroDivisionError):
-            calculator.divide(10, 0)
-```
-
-## pytest Configuration
-
-### pytest.ini
-
-```ini
-[pytest]
-testpaths = tests
-python_files = test_*.py
-python_classes = Test*
-python_functions = test_*
-addopts =
-    --strict-markers
-    --disable-warnings
-    --cov=mypackage
-    --cov-report=term-missing
-    --cov-report=html
-markers =
-    slow: marks tests as slow
-    integration: marks tests as integration tests
-    unit: marks tests as unit tests
-```
-
-### pyproject.toml
-
-```toml
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-python_files = ["test_*.py"]
-python_classes = ["Test*"]
-python_functions = ["test_*"]
-addopts = [
-    "--strict-markers",
-    "--cov=mypackage",
-    "--cov-report=term-missing",
-    "--cov-report=html",
-]
-markers = [
-    "slow: marks tests as slow",
-    "integration: marks tests as integration tests",
-    "unit: marks tests as unit tests",
-]
-```
-
-## Running Tests
+## 覆盖率
 
 ```bash
-# Run all tests
-pytest
+# 运行带覆盖的测试
+pytest --cov=mypackage --cov-report=term-missing --cov-report=html
 
-# Run specific file
-pytest tests/test_utils.py
+# 最低覆盖率检查
+pytest --cov=mypackage --cov-fail-under=80
 
-# Run specific test
-pytest tests/test_utils.py::test_function
-
-# Run with verbose output
-pytest -v
-
-# Run with coverage
-pytest --cov=mypackage --cov-report=html
-
-# Run only fast tests
-pytest -m "not slow"
-
-# Run until first failure
-pytest -x
-
-# Run and stop on N failures
-pytest --maxfail=3
-
-# Run last failed tests
-pytest --lf
-
-# Run tests with pattern
-pytest -k "test_user"
-
-# Run with debugger on failure
-pytest --pdb
+# 仅报告已更改文件的覆盖
+pytest --cov=mypackage --cov-report=term-missing --cov-branch
 ```
 
-## Quick Reference
+## 最佳实践
 
-| Pattern | Usage |
-|---------|-------|
-| `pytest.raises()` | Test expected exceptions |
-| `@pytest.fixture()` | Create reusable test fixtures |
-| `@pytest.mark.parametrize()` | Run tests with multiple inputs |
-| `@pytest.mark.slow` | Mark slow tests |
-| `pytest -m "not slow"` | Skip slow tests |
-| `@patch()` | Mock functions and classes |
-| `tmp_path` fixture | Automatic temp directory |
-| `pytest --cov` | Generate coverage report |
-| `assert` | Simple and readable assertions |
+- **每个测试一个断言** — 保持测试简短专注（可选，但建议）
+- **AAA 模式** — Arrange（准备）、Act（行动）、Assert（断言）
+- **描述性测试名称** — 测试名称应描述预期行为
+- **隔离** — 每个测试独立运行，无隐藏依赖
+- **快速** — 单元测试应毫秒级运行
+- **确定性** — 无随机失败，无依赖时间
+- **Mock 外部依赖** — 不连接真实数据库或 API
 
-**Remember**: Tests are code too. Keep them clean, readable, and maintainable. Good tests catch bugs; great tests prevent them.
+## 应避免的反模式
+
+- **不要** 测试实现细节 — 测试行为和输出
+- **不要** 在测试间共享可变状态
+- **不要** 跳过 `pytest.ini` 或 `pyproject.toml` 配置
+- **不要** 使用 `time.sleep` 等待异步操作 — 使用 `pytest.mark.asyncio`
+- **不要** 为简单函数写过多测试 — 优先有意义的覆盖
+- **不要** 忽略失败的测试 — 立即修复

@@ -559,13 +559,13 @@ impl AgentService {
             let mut merged: Vec<serde_json::Value> = Vec::new();
             for msg in api_messages.drain(..) {
                 let is_tool_result_msg = msg["role"] == "user"
-                    && msg["content"].as_array().map_or(false, |b: &Vec<serde_json::Value>| {
+                    && msg["content"].as_array().is_some_and(|b: &Vec<serde_json::Value>| {
                         !b.is_empty() && b.iter().all(|x| x["type"] == "tool_result")
                     });
                 if is_tool_result_msg {
                     if let Some(last) = merged.last_mut() {
                         let last_is_tool_result = last["role"] == "user"
-                            && last["content"].as_array().map_or(false, |b: &Vec<serde_json::Value>| {
+                            && last["content"].as_array().is_some_and(|b: &Vec<serde_json::Value>| {
                                 !b.is_empty() && b.iter().all(|x| x["type"] == "tool_result")
                             });
                         if last_is_tool_result {
@@ -701,6 +701,7 @@ impl AgentService {
 
             // Collapse Drain: retry with aggressive compression on context overflow
             let mut collapse_level = 0usize;
+            let mut retry_count = 0u32;
             let response: reqwest::Response = loop {
                 let request_body = json!({
                     "model": self.model,
@@ -711,7 +712,13 @@ impl AgentService {
                     "stream": true,
                     "tools": tools,
                 });
-                let request_body_str = serde_json::to_string(&request_body).unwrap();
+                let request_body_str = match serde_json::to_string(&request_body) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        emit(&app, &session_key, StreamEvent::Error { content: format!("Internal error: {}", e) });
+                        return;
+                    }
+                };
 
                 let est = estimate_request_tokens(&api_messages, &system_json, &tools_json);
                 eprintln!("[stream_chat] Model: {}, Ctx: {}K, Messages: {}, EstTokens: {}", self.model, self.context_window / 1000, api_messages.len(), est);
@@ -742,8 +749,16 @@ impl AgentService {
                             compress_context_aggressive(agent_type, &mut api_messages, collapse_level, summary);
                             continue;
                         }
-                        eprintln!("[stream_chat] Request failed: {}", e);
-                        let ev = StreamEvent::Error { content: format!("Request failed: {}", e) };
+                        // Retry on transient network errors (timeout, connection reset, DNS, etc.)
+                        if retry_count < 10 {
+                            retry_count += 1;
+                            let delay = (retry_count * 2) as u64;
+                            eprintln!("[stream_chat] Transient network error (retry {}/{}): {} — waiting {}s", retry_count, 10, e, delay);
+                            tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                            continue;
+                        }
+                        eprintln!("[stream_chat] Request failed after {} retries: {}", retry_count, e);
+                        let ev = StreamEvent::Error { content: format!("Request failed after {} retries: {}", retry_count, e) };
                         emit(&app, &session_key, ev);
                         return;
                     }
@@ -776,12 +791,24 @@ impl AgentService {
                     continue;
                 }
 
+                // Retry on transient HTTP errors (429 rate limit, 5xx server errors)
+                let is_transient = status.as_u16() == 429
+                    || status.as_u16() >= 500;
+                if is_transient && retry_count < 10 {
+                    retry_count += 1;
+                    let delay = (retry_count * 2) as u64;
+                    eprintln!("[stream_chat] Transient HTTP {} (retry {}/{}): {} — waiting {}s", status.as_u16(), retry_count, 10, err_text, delay);
+                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                    continue;
+                }
+
                 let ev = StreamEvent::Error { content: format!("API error {}: {}", status, err_text) };
                 emit(&app, &session_key, ev);
                 return;
             };
 
             // Process SSE stream and collect result
+            let mut storm_correction_used = false;
             let (stop_reason, assistant_text, assistant_thinking, tool_uses, tool_results, actual_tokens) = process_sse_stream(
                 response.bytes_stream(),
                 app.clone(),
@@ -799,10 +826,43 @@ impl AgentService {
                 pending_asks.clone(),
                 &mut api_messages,
                 cancel_rx.clone(),
+                &mut storm_correction_used,
             ).await;
 
             eprintln!("[stream_chat] Model: {}, stop_reason: {:?}, thinking: {} chars, text: {} chars, tool_uses: {}", self.model,
                 stop_reason, assistant_thinking.len(), assistant_text.len(), tool_uses.len());
+
+            // Storm breaker self-correction: inject stub tool results so the model
+            // sees the suppressed calls and can adapt its approach.
+            if storm_correction_used {
+                // Save assistant message (with tool_use blocks but no text) to DB
+                let mut db_content = Vec::new();
+                if !assistant_text.is_empty() {
+                    db_content.push(json!({"type": "text", "text": assistant_text}));
+                }
+                for (tool_id, tool_name, tool_input) in &tool_uses {
+                    let input_json: serde_json::Value = serde_json::from_str(tool_input).unwrap_or(json!({}));
+                    db_content.push(json!({
+                        "type": "tool_use",
+                        "id": tool_id,
+                        "name": tool_name,
+                        "input": input_json
+                    }));
+                }
+                let db_msg = json!({"role": "assistant", "content": if db_content.is_empty() { json!(assistant_text) } else { json!(db_content) }});
+                save_api_message(&self.db, session_id, &db_msg);
+
+                // Inject stub tool results as a user message so model sees the rejection
+                let result_blocks: Vec<serde_json::Value> = tool_uses.iter().map(|(tool_id, tool_name, _input)| {
+                    json!({"type": "tool_result", "tool_use_id": tool_id, "content": format!("Tool '{}' was suppressed by storm breaker (repeated identical call). Please use a different approach or different arguments.", tool_name)})
+                }).collect();
+                let stub_msg = json!({"role": "user", "content": result_blocks});
+                save_api_message(&self.db, session_id, &stub_msg);
+                api_messages.push(stub_msg);
+
+                eprintln!("[storm_breaker] Injected {} stub results for self-correction", tool_uses.len());
+                continue;
+            }
 
             // Store API-reported cumulative token count and emit fresh usage
             // so the context bar always reflects the latest API-reported value.
@@ -972,6 +1032,7 @@ async fn process_sse_stream(
     pending_asks: PendingAsks,
     _api_messages: &mut Vec<serde_json::Value>,
     mut cancel_rx: watch::Receiver<bool>,
+    storm_correction_used: &mut bool,
 ) -> (Option<String>, String, String, Vec<(String, String, String)>, Vec<(String, String, String)>, Option<u64>) {
     eprintln!("[process_sse_stream] Starting with session_key: {}", session_key);
     let mut current_tool_id: Option<String> = None;
@@ -1031,6 +1092,13 @@ async fn process_sse_stream(
                 }
                 continue;
             }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(3600)) => {
+                eprintln!("[process_sse_stream] Global timeout (1h) for session {}", session_id);
+                emit(&app, &session_key, StreamEvent::Error {
+                    content: "Session timed out after 1 hour".to_string(),
+                });
+                return (None, assistant_text, assistant_thinking, Vec::new(), Vec::new(), actual_input_tokens);
+            }
             item = stream.next() => { item }
         };
 
@@ -1087,10 +1155,9 @@ async fn process_sse_stream(
                                 // Emit if interval passed or this is a non-text event
                                 let is_non_text = event["type"] != "content_block_delta";
                                 let elapsed = last_emit.elapsed();
-                                if (is_non_text && (!pending_text.is_empty() || !pending_thinking.is_empty()))
-                                    || elapsed >= emit_interval
-                                {
-                                    if !pending_text.is_empty() || !pending_thinking.is_empty() {
+                                if ((is_non_text && (!pending_text.is_empty() || !pending_thinking.is_empty()))
+                                    || elapsed >= emit_interval)
+                                    && (!pending_text.is_empty() || !pending_thinking.is_empty()) {
                                         let ev = StreamEvent::ContentBlockDelta {
                                             content: std::mem::take(&mut pending_text),
                                             thinking: std::mem::take(&mut pending_thinking),
@@ -1098,7 +1165,6 @@ async fn process_sse_stream(
                                         emit(&app, &session_key, ev);
                                         last_emit = std::time::Instant::now();
                                     }
-                                }
                             }
                         }
                     }
@@ -1143,15 +1209,20 @@ async fn process_sse_stream(
         );
     }
 
-    // Build tool_uses list from collected tool_inputs
+    // Build tool_uses list from collected tool_inputs.
+    // Apply JSON repair to fix model truncation issues (unbalanced braces, etc.)
     let tool_uses: Vec<(String, String, String)> = tool_inputs
         .into_iter()
-        .map(|(tool_id, (tool_name, input))| (tool_id, tool_name, input))
+        .map(|(tool_id, (tool_name, input))| {
+            let repaired = repair_truncated_json(&input);
+            (tool_id, tool_name, repaired)
+        })
         .collect();
 
     // Storm breaker: sliding window of recent (tool, input) pairs.
     // If the same call appears 3+ times in the window, suppress it.
-    // If ALL calls are suppressed, give one self-correction chance.
+    // If ALL calls are suppressed, give one self-correction chance
+    // (inject stub tool results so the model sees the failure and adapts).
     let storm_window: usize = std::env::var("MINIMAX_STORM_WINDOW")
         .ok().and_then(|v| v.parse().ok()).unwrap_or(6);
     let storm_threshold: usize = std::env::var("MINIMAX_STORM_THRESHOLD")
@@ -1168,9 +1239,18 @@ async fn process_sse_stream(
         }).cloned().collect();
         let blocked = tool_uses.len() - storm_passed.len();
         if storm_passed.is_empty() && !tool_uses.is_empty() {
-            eprintln!("[storm_breaker] All {} calls suppressed — allowing through", tool_uses.len());
-            storm_history.clear();
-            tool_uses.clone()
+            if !*storm_correction_used {
+                *storm_correction_used = true;
+                eprintln!("[storm_breaker] All {} calls suppressed — self-correction", tool_uses.len());
+                // Return original tool_uses so stream_chat knows what to inject stubs for.
+                // Set stop_reason to signal self-correction mode.
+                stop_reason = Some("storm_self_correction".into());
+                tool_uses.clone()
+            } else {
+                eprintln!("[storm_breaker] Still stuck after self-correction — allowing through");
+                storm_history.clear();
+                tool_uses.clone()
+            }
         } else {
             if blocked > 0 { eprintln!("[storm_breaker] Blocked {} repeated tool calls", blocked); }
             storm_passed
@@ -1256,21 +1336,27 @@ async fn process_sse_stream(
             let results = join_all(futs).await;
 
             // Emit tool_end in declared order
-            for r in results {
+            for (idx, r) in results.into_iter().enumerate() {
+                let &tool_idx = &chunk[idx];
+                let (ref tool_id, ref tool_name, _) = &tool_uses[tool_idx];
                 match r {
-                    Ok((i, tool_name, result)) => {
-                        let tool_id = tool_uses[i].0.clone();
+                    Ok((_i, _tname, result)) => {
+                        let truncated = truncate_tool_result(result);
                         emit(&app, &session_key, StreamEvent::ToolEnd {
                             tool: tool_name.clone(),
                             tool_id: tool_id.clone(),
-                            result: result.clone(),
+                            result: truncated.clone(),
                         });
-                        tool_results.push((tool_name, tool_id, result));
+                        tool_results.push((tool_name.clone(), tool_id.clone(), truncated));
                     }
                     Err(e) => {
-                        emit(&app, &session_key, StreamEvent::Error {
-                            content: format!("Tool join error: {}", e),
+                        let err_msg = format!("Tool '{}' internal error: {}", tool_name, e);
+                        emit(&app, &session_key, StreamEvent::ToolEnd {
+                            tool: tool_name.clone(),
+                            tool_id: tool_id.clone(),
+                            result: err_msg.clone(),
                         });
+                        tool_results.push((tool_name.clone(), tool_id.clone(), err_msg));
                     }
                 }
             }
@@ -1343,13 +1429,7 @@ fn handle_sse_event(
             None
         }
         "message_delta" => {
-            if let Some(stop_reason) = event["delta"]["stop_reason"].as_str() {
-                // Don't execute tools here - collect all tool_inputs and execute after stream ends
-                // This ensures all tools are properly accumulated
-                Some(stop_reason.to_string())
-            } else {
-                None
-            }
+            event["delta"]["stop_reason"].as_str().map(|stop_reason| stop_reason.to_string())
         }
         "message_stop" => {
             // Don't emit Done here - Done is emitted by stream_chat
@@ -1390,13 +1470,28 @@ async fn execute_tool(
         let reason = tool_reason(tool_name, file_path, command);
 
         let verdict = {
-            permission_service.lock().unwrap().evaluate(tool_name, file_path, command)
+            match permission_service.lock() {
+                Ok(ps) => ps.evaluate(tool_name, file_path, command),
+                Err(e) => {
+                    return format!("Permission service error: {}", e);
+                }
+            }
         };
         match verdict {
             None => {
                 // Need confirmation — emit event and wait
                 let (perm_id, rx) = {
-                    permission_service.lock().unwrap().register_pending()
+                    match permission_service.lock() {
+                        Ok(ps) => match ps.register_pending() {
+                            Ok(v) => v,
+                            Err(e) => {
+                                return format!("Permission service error: {}", e);
+                            }
+                        },
+                        Err(e) => {
+                            return format!("Permission service error: {}", e);
+                        }
+                    }
                 };
                 let req = PermissionRequest {
                     id: perm_id.clone(),
@@ -1428,7 +1523,7 @@ async fn execute_tool(
     // Extract file path for auto-touch BEFORE params is potentially moved in the match
     let auto_touch_path: Option<String> = match tool_name {
         "write_file" | "delete_file" | "copy_file" | "move_file" | "edit_file" | "create_directory" =>
-            params["path"].as_str().map(|s| normalize_file_path(s)),
+            params["path"].as_str().map(normalize_file_path),
         _ => None,
     };
 

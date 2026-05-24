@@ -1,78 +1,78 @@
 ---
 name: api-connector-builder
-description: Build a new API connector or provider by matching the target repo's existing integration pattern exactly. Use when adding one more integration without inventing a second architecture.
+description: 通过精确匹配目标仓库的现有集成模式来构建新的 API 连接器或提供者。用于在不使用第二套架构的情况下添加一个集成。
 origin: ECC direct-port adaptation
 version: "1.0.0"
 ---
 
-# API Connector Builder
+# API 连接器构建器
 
-Use this when the job is to add a repo-native integration surface, not just a generic HTTP client.
+当工作是为仓库添加本机集成表面，而非仅仅一个通用 HTTP 客户端时使用。
 
-The point is to match the host repository's pattern:
+重点是匹配主机仓库的模式：
 
-- connector layout
-- config schema
-- auth model
-- error handling
-- test style
-- registration/discovery wiring
+- 连接器布局
+- 配置 schema
+- 认证模型
+- 错误处理
+- 测试风格
+- 注册/发现接线
 
-## When to Use
+## 使用场景
 
-- "Build a Jira connector for this project"
-- "Add a Slack provider following the existing pattern"
-- "Create a new integration for this API"
-- "Build a plugin that matches the repo's connector style"
+- "为此项目构建一个 Jira 连接器"
+- "按照现有模式添加一个 Slack 提供者"
+- "为此 API 创建一个新集成"
+- "构建一个匹配仓库连接器风格的插件"
 
-## Guardrails
+## 护栏
 
-- do not invent a new integration architecture when the repo already has one
-- do not start from vendor docs alone; start from existing in-repo connectors first
-- do not stop at transport code if the repo expects registry wiring, tests, and docs
-- do not cargo-cult old connectors if the repo has a newer current pattern
+- 当仓库已有集成架构时，不要发明新的集成架构
+- 不要仅从供应商文档开始；先从仓库中现有的连接器开始
+- 如果仓库期望注册接线、测试和文档，不要止步于传输代码
+- 如果仓库有更新的当前模式，不要照搬旧的连接器
 
-## Workflow
+## 工作流
 
-### 1. Learn the house style
+### 1. 学习内部风格
 
-Inspect at least 2 existing connectors/providers and map:
+检查至少 2 个现有连接器/提供者并映射：
 
-- file layout
-- abstraction boundaries
-- config model
-- retry / pagination conventions
-- registry hooks
-- test fixtures and naming
+- 文件布局
+- 抽象边界
+- 配置模型
+- 重试/分页约定
+- 注册钩子
+- 测试固件和命名
 
-### 2. Narrow the target integration
+### 2. 缩小目标集成
 
-Define only the surface the repo actually needs:
+仅定义仓库实际需要的表面：
 
-- auth flow
-- key entities
-- core read/write operations
-- pagination and rate limits
-- webhook or polling model
+- 认证流程
+- 关键实体
+- 核心读写操作
+- 分页和速率限制
+- Webhook 或轮询模型
 
-### 3. Build in repo-native layers
+### 3. 按仓库原生层构建
 
-Typical slices:
+典型切片：
 
 - config/schema
 - client/transport
-- mapping layer
-- connector/provider entrypoint
-- registration
-- tests
+- 映射层
+- connector/provider 入口点
+- 注册
+- 测试
 
-### 4. Validate against the source pattern
+### 4. 对照源模式验证
 
-The new connector should look obvious in the codebase, not imported from a different ecosystem.
+新连接器在代码库中应该看起来很明显，不是从不同生态系统导入的。
 
-## Reference Shapes
+## 参考形状
 
-### Provider-style
+### 提供者风格
 
 ```text
 providers/
@@ -82,7 +82,7 @@ providers/
     config.py
 ```
 
-### Connector-style
+### 连接器风格
 
 ```text
 integrations/
@@ -92,7 +92,7 @@ integrations/
     connector.py
 ```
 
-### TypeScript plugin-style
+### TypeScript 插件风格
 
 ```text
 src/integrations/
@@ -103,19 +103,18 @@ src/integrations/
     test.ts
 ```
 
-## Quality Checklist
+## 质量检查清单
 
-- [ ] matches an existing in-repo integration pattern
-- [ ] config validation exists
-- [ ] auth and error handling are explicit
-- [ ] pagination/retry behavior follows repo norms
-- [ ] registry/discovery wiring is complete
-- [ ] tests mirror the host repo's style
-- [ ] docs/examples are updated if expected by the repo
+- [ ] 匹配仓库中现有的集成模式
+- [ ] 配置验证存在
+- [ ] 认证和错误处理是明确的
+- [ ] 分页/重试行为遵循仓库规范
+- [ ] 注册/发现接线完整
+- [ ] 测试镜像仓库的风格
+- [ ] 如果仓库期望，更新了文档/示例
 
-## Related Skills
+## 相关技能
 
 - `backend-patterns`
 - `mcp-server-patterns`
 - `github-ops`
-

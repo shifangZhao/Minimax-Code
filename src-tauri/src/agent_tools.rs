@@ -75,7 +75,10 @@ pub(crate) async fn tool_send_to_agent(
 
     // Look up caller's agent type first
     let caller_agent: String = {
-        let conn = db.lock().unwrap();
+        let conn = match db.lock() {
+            Ok(c) => c,
+            Err(e) => return json!({"error": format!("Database error: {}", e)}).to_string(),
+        };
         conn.query_row(
             "SELECT agent_type FROM agent_session WHERE id = ?1",
             [caller_session_id],
@@ -89,7 +92,10 @@ pub(crate) async fn tool_send_to_agent(
     let target_agent_owned = target_agent.to_string();
 
     let db_result = tokio::task::spawn_blocking(move || -> Result<(i64, i64, Vec<Message>), String> {
-        let conn = db_clone.lock().unwrap();
+        let conn = match db_clone.lock() {
+            Ok(c) => c,
+            Err(e) => return Err(format!("Database error (lock poisoned): {}", e)),
+        };
         let group_chat_id: i64 = conn
             .query_row(
                 "SELECT group_chat_id FROM agent_session WHERE id = ?1",
@@ -172,7 +178,10 @@ pub(crate) async fn tool_send_to_agent(
 
             // Read workspace + credentials (check per-agent config first)
             let (workspace, api_url, messages_path, model, context_window, provider) = {
-                let conn = db.lock().unwrap();
+                let conn = match db.lock() {
+                    Ok(c) => c,
+                    Err(e) => return json!({"error": format!("Database error: {}", e)}).to_string(),
+                };
                 let ws: Option<String> = conn.query_row("SELECT workspace FROM app_config", [], |row| row.get(0)).ok();
 
                 // Check per-agent config
@@ -320,7 +329,7 @@ pub(crate) fn is_binary_file(path: &str) -> bool {
     if let Ok(mut f) = std::fs::File::open(path) {
         let mut buf = [0u8; 8192];
         if let Ok(n) = f.read(&mut buf) {
-            buf[..n].iter().any(|&b| b == 0)
+            buf[..n].contains(&0)
         } else {
             false
         }
@@ -601,7 +610,7 @@ pub(crate) async fn tool_analyze_project_structure(params: &serde_json::Value) -
 
 pub(crate) async fn tool_run_command(params: &serde_json::Value) -> String {
     let command = params["command"].as_str().unwrap_or("").to_string();
-    let cwd = params["path"].as_str().map(|s| normalize_file_path(s));
+    let cwd = params["path"].as_str().map(normalize_file_path);
     let timeout_secs = params["timeout"].as_u64().unwrap_or(300);
     tokio::task::spawn_blocking(move || {
         let mut cmd = if cfg!(windows) {
@@ -850,7 +859,7 @@ pub(crate) fn glob_recursive(dir: &str, pattern: &str, skip_dirs: &dyn Fn(&str) 
             glob_recursive(&path_str, pattern, skip_dirs, results, limit);
         } else {
             let matches = if pattern.contains('*') || pattern.contains('?') {
-                let re = glob_to_regex(&pattern);
+                let re = glob_to_regex(pattern);
                 regex::Regex::new(&re).map(|r| r.is_match(&name)).unwrap_or(false)
             } else {
                 name.to_lowercase().contains(&pattern.to_lowercase())
@@ -1077,7 +1086,7 @@ pub(crate) async fn tool_edit_lines(params: &serde_json::Value) -> String {
                 }
             }
             (None, None) => {
-                format!("Error: either end_line or content must be provided")
+                "Error: either end_line or content must be provided".to_string()
             }
         }
     })
@@ -1343,12 +1352,13 @@ pub(crate) async fn tool_run_background(params: &serde_json::Value) -> String {
                 std::thread::spawn(move || {
                     use std::io::{BufRead, BufReader, Write};
                     let reader = BufReader::new(stdout);
-                    let mut file = std::fs::File::create(&out_path).unwrap();
-                    for line in reader.lines() {
-                        if let Ok(line) = line {
+                    if let Ok(mut file) = std::fs::File::create(&out_path) {
+                        for line in reader.lines().map_while(|l| l.ok()) {
                             let _ = writeln!(file, "{}", line);
                             let _ = file.flush();
                         }
+                    } else {
+                        eprintln!("[agent_tools] Failed to create stdout file: {}", out_path.display());
                     }
                 });
             }
@@ -1357,12 +1367,13 @@ pub(crate) async fn tool_run_background(params: &serde_json::Value) -> String {
                 std::thread::spawn(move || {
                     use std::io::{BufRead, BufReader, Write};
                     let reader = BufReader::new(stderr);
-                    let mut file = std::fs::File::create(&err_path).unwrap();
-                    for line in reader.lines() {
-                        if let Ok(line) = line {
+                    if let Ok(mut file) = std::fs::File::create(&err_path) {
+                        for line in reader.lines().map_while(|l| l.ok()) {
                             let _ = writeln!(file, "{}", line);
                             let _ = file.flush();
                         }
+                    } else {
+                        eprintln!("[agent_tools] Failed to create stderr file: {}", err_path.display());
                     }
                 });
             }
@@ -1408,7 +1419,7 @@ pub(crate) async fn tool_job_output(params: &serde_json::Value) -> String {
         };
         let lines: Vec<&str> = content.lines().collect();
         let total = lines.len();
-        let tail_start = if total > tail { total - tail } else { 0 };
+        let tail_start = total.saturating_sub(tail);
         let tail_text: String = lines[tail_start..].iter()
             .map(|l| l.to_string())
             .collect::<Vec<_>>()
@@ -2030,11 +2041,10 @@ pub(crate) fn find_replace_recursive(path: &str, find: &str, replace: &str, use_
                 } else {
                     content.replace(find, replace)
                 };
-                if new_content != content {
-                    if std::fs::write(&file_path, &new_content).is_ok() {
+                if new_content != content
+                    && std::fs::write(&file_path, &new_content).is_ok() {
                         *count += 1;
                     }
-                }
             }
         }
     }
@@ -2189,8 +2199,8 @@ pub(crate) fn normalize_file_path(raw: &str) -> String {
         // Convert Unix-style /X/path to X:/path (e.g. /e/foo → E:/foo)
         let normalized = if expanded.len() >= 2
             && expanded.starts_with('/')
-            && expanded.as_bytes().get(1).map_or(false, |b| b.is_ascii_alphabetic())
-            && expanded.as_bytes().get(2).map_or(true, |b| *b == b'/' || *b == b'\\')
+            && expanded.as_bytes().get(1).is_some_and(|b| b.is_ascii_alphabetic())
+            && expanded.as_bytes().get(2).is_none_or(|b| *b == b'/' || *b == b'\\')
         {
             let drive = (expanded.as_bytes()[1] as char).to_ascii_uppercase();
             format!("{}:/{}", drive, &expanded[3..])
@@ -2285,7 +2295,68 @@ pub(crate) fn is_parallel_safe(tool_name: &str) -> bool {
         | "get_env_info"
         // Background spawn (returns immediately)
         | "run_background" | "spawn_process"
-    )
+        // LSP inspection
+        | "read_lints"
+    ) || is_mcp_tool(tool_name)
+}
+
+/// MCP tools are assumed parallel-safe (they're typically read-only API calls).
+fn is_mcp_tool(tool_name: &str) -> bool {
+    tool_name.starts_with("mcp__") || tool_name.starts_with("mcp_")
+}
+
+/// Attempt to repair truncated JSON from the model by balancing braces,
+/// closing open strings, and removing trailing commas.
+pub(crate) fn repair_truncated_json(json_str: &str) -> String {
+    let mut s = json_str.trim().to_string();
+
+    // Count unclosed structures
+    let mut brace_depth: i32 = 0;
+    let mut bracket_depth: i32 = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for c in s.chars() {
+        if escaped { escaped = false; continue; }
+        match c {
+            '\\' => escaped = true,
+            '"' => in_string = !in_string,
+            '{' if !in_string => brace_depth += 1,
+            '}' if !in_string => brace_depth -= 1,
+            '[' if !in_string => bracket_depth += 1,
+            ']' if !in_string => bracket_depth -= 1,
+            _ => {}
+        }
+    }
+
+    // Close any unclosed string
+    if in_string {
+        s.push('"');
+    }
+
+    // Remove trailing commas
+    while s.ends_with(',') || s.ends_with(",\n") {
+        s.pop();
+        s = s.trim_end().to_string();
+    }
+
+    // Close unclosed brackets and braces
+    for _ in 0..bracket_depth.max(0) {
+        s.push(']');
+    }
+    for _ in 0..brace_depth.max(0) {
+        s.push('}');
+    }
+
+    // If still not valid JSON, try to wrap in {}
+    if serde_json::from_str::<serde_json::Value>(&s).is_err() {
+        // Last resort: wrap as object
+        if !s.starts_with('{') {
+            s = format!("{{{}}}", s);
+        }
+    }
+
+    s
 }
 
 pub(crate) fn make_tool(name: &str, desc: &str, schema: serde_json::Value) -> serde_json::Value {
@@ -2305,7 +2376,7 @@ pub(crate) async fn tool_read_lints(
     lsp_manager: Arc<StdMutex<Option<LspManager>>>,
     db: Arc<StdMutex<Connection>>,
 ) -> String {
-    let path: Option<String> = params["path"].as_str().map(|s| normalize_file_path(s));
+    let path: Option<String> = params["path"].as_str().map(normalize_file_path);
 
     tokio::task::spawn_blocking(move || {
         let workspace = {
@@ -2426,4 +2497,204 @@ pub(crate) fn format_lints_result(diags: &[crate::lsp_types::FileDiagnostics]) -
     }
 
     json!({"success": true, "diagnostics": output}).to_string()
+}
+
+// ========== Tests ==========
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- compute_diff ---
+
+    #[test]
+    fn diff_single_line_change() {
+        let old = "line1\nline2\nline3";
+        let new = "line1\nline2_changed\nline3";
+        let diff = compute_diff(old, new);
+        assert!(diff.contains("@@"), "diff should have @@ header");
+        assert!(diff.contains("-line2"), "diff should show removed line");
+        assert!(diff.contains("+line2_changed"), "diff should show added line");
+    }
+
+    #[test]
+    fn diff_no_change() {
+        let old = "line1\nline2";
+        let new = "line1\nline2";
+        let diff = compute_diff(old, new);
+        // When there's no actual change, diff should be minimal
+        assert!(diff.contains("@@"));
+    }
+
+    #[test]
+    fn diff_empty_to_content() {
+        let old = "";
+        let new = "hello world";
+        let diff = compute_diff(old, new);
+        assert!(diff.contains("+hello world"));
+    }
+
+    #[test]
+    fn diff_content_to_empty() {
+        let old = "hello world";
+        let new = "";
+        let diff = compute_diff(old, new);
+        assert!(diff.contains("-hello world"));
+    }
+
+    #[test]
+    fn diff_multiple_lines() {
+        let old = "a\nb\nc\nd\ne";
+        let new = "a\nx\ny\nd\ne";
+        let diff = compute_diff(old, new);
+        assert!(diff.contains("-b"));
+        assert!(diff.contains("-c"));
+        assert!(diff.contains("+x"));
+        assert!(diff.contains("+y"));
+        // a, d, e should not appear in diff (unchanged context)
+        // They might appear as context lines though, so we don't assert absence
+    }
+
+    // --- count_chars ---
+
+    #[test]
+    fn chars_growth() {
+        let s = count_chars("abc", "abcdef");
+        assert!(s.contains("+3"), "expected +3, got: {}", s);
+    }
+
+    #[test]
+    fn chars_shrink() {
+        let s = count_chars("abcdef", "abc");
+        assert!(s.contains("-3"), "expected -3, got: {}", s);
+    }
+
+    #[test]
+    fn chars_same_length() {
+        let s = count_chars("abc", "xyz");
+        assert!(s.contains("3->3"), "unexpected: {}", s);
+    }
+
+    // --- truncate_str ---
+
+    #[test]
+    fn truncate_short_string() {
+        assert_eq!(truncate_str("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_long_string() {
+        assert_eq!(truncate_str("hello world", 5), "hello...");
+    }
+
+    #[test]
+    fn truncate_exact_length() {
+        assert_eq!(truncate_str("hello", 5), "hello");
+    }
+
+    // --- normalize_file_path ---
+
+    #[test]
+    fn normalize_removes_quotes() {
+        let result = normalize_file_path("\"C:/test/path\"");
+        assert!(!result.contains('"'));
+    }
+
+    #[test]
+    fn normalize_preserves_valid_path() {
+        let result = normalize_file_path("/tmp/test");
+        assert!(!result.is_empty());
+    }
+
+    // --- glob_to_regex ---
+
+    #[test]
+    fn glob_wildcard_to_dot_star() {
+        let re = glob_to_regex("*.rs");
+        assert_eq!(re, "^.*\\.rs$");
+    }
+
+    #[test]
+    fn glob_files_with_path() {
+        let re = glob_to_regex("src/**/*.ts");
+        assert!(re.contains(".*"));
+        assert!(re.starts_with("^"));
+        assert!(re.ends_with("$"));
+    }
+
+    #[test]
+    fn glob_special_chars_escaped() {
+        let re = glob_to_regex("test.+");
+        assert!(re.contains("\\."));  // dot should be escaped
+        assert!(re.contains("\\+"));  // plus should be escaped
+    }
+
+    // --- base64 ---
+
+    #[test]
+    fn base64_roundtrip_ascii() {
+        let input = b"Hello World";
+        let encoded = base64_encode(input);
+        assert!(!encoded.is_empty());
+        // Standard base64: SGVsbG8gV29ybGQ=
+        assert_eq!(encoded, "SGVsbG8gV29ybGQ=");
+    }
+
+    #[test]
+    fn base64_empty_input() {
+        assert_eq!(base64_encode(b""), "");
+    }
+
+    #[test]
+    fn base64_single_byte() {
+        let encoded = base64_encode(b"A");
+        assert_eq!(encoded, "QQ==");
+    }
+
+    #[test]
+    fn base64_two_bytes() {
+        let encoded = base64_encode(b"AB");
+        assert_eq!(encoded, "QUI=");
+    }
+
+    // --- binary detection ---
+
+    #[test]
+    fn detect_binary_null_byte() {
+        // Create a temp file with a null byte
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_binary.bin");
+        std::fs::write(&path, b"hello\0world").unwrap();
+        assert!(is_binary_file(&path.to_string_lossy()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn text_file_not_binary() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_text.txt");
+        std::fs::write(&path, b"hello world").unwrap();
+        assert!(!is_binary_file(&path.to_string_lossy()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // --- line counting ---
+
+    #[test]
+    fn count_lines_empty_file() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_empty.txt");
+        std::fs::write(&path, "").unwrap();
+        assert_eq!(count_lines(&path.to_string_lossy()), 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn count_lines_multiline() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_lines.txt");
+        std::fs::write(&path, "line1\nline2\nline3").unwrap();
+        assert_eq!(count_lines(&path.to_string_lossy()), 3);
+        let _ = std::fs::remove_file(&path);
+    }
 }

@@ -26,6 +26,9 @@
           title="清空对话"
           @click="showClearConfirm = true"
         >🗑</button>
+        <span v-if="cacheUsage.ratio > 0" class="cache-badge" :title="`缓存命中: ${cacheUsage.hit} tokens / 未命中: ${cacheUsage.miss} tokens`">
+          ⚡{{ cacheUsage.hit }}/{{ cacheUsage.hit + cacheUsage.miss }} {{ cacheUsage.ratio }}%
+        </span>
       </div>
     </div>
     <BookmarkPanel
@@ -33,48 +36,54 @@
       :items="bookmarks"
       :showInput="showSaveInput"
       @save="(name: string) => { bookmarkName = name; sessionId && saveBookmark(sessionId, workspace); }"
-      @restore="(bm: any) => { showRestoreConfirmBm = bm }"
+      @restore="(bm) => { showRestoreConfirmBm = bm }"
       @delete="(id: number) => { sessionId && deleteBookmark(id, sessionId) }"
       @toggleInput="showSaveInput = !showSaveInput"
     />
-    <div v-if="showRestoreConfirmBm" class="confirm-overlay">
-      <div class="confirm-card">
-        <p>恢复快照 "{{ showRestoreConfirmBm.name }}"？这将覆盖所有已跟踪的文件。</p>
-        <div class="confirm-actions">
-          <button class="confirm-cancel" @click="showRestoreConfirmBm = null">取消</button>
-          <button class="confirm-danger" @click="handleRestoreBookmark()">恢复</button>
-        </div>
-      </div>
-    </div>
-    <div v-if="showClearConfirm" class="confirm-overlay">
-      <div class="confirm-card">
-        <p>清空此对话的所有消息？</p>
-        <div class="confirm-actions">
-          <button class="confirm-cancel" @click="showClearConfirm = false">取消</button>
-          <button class="confirm-danger" @click="clearConversation()">清空</button>
-        </div>
-      </div>
-    </div>
+    <ConfirmDialog
+      :visible="showRestoreConfirmBm !== null"
+      title="恢复快照"
+      :message="'恢复快照 ' + (showRestoreConfirmBm?.name || '') + '？这将覆盖所有已跟踪的文件。'"
+      confirmText="恢复"
+      @confirm="handleRestoreBookmark()"
+      @cancel="showRestoreConfirmBm = null"
+    />
+    <ConfirmDialog
+      :visible="showClearConfirm"
+      title="清空对话"
+      message="清空此对话的所有消息？"
+      confirmText="清空"
+      @confirm="clearConversation()"
+      @cancel="showClearConfirm = false"
+    />
     <div v-if="messages.length > 0 || loading" class="context-usage">
       <div class="context-bar">
         <div class="context-fill" :class="usageColor" :style="{ width: Math.min(tokenUsage.usage_pct, 100) + '%' }"></div>
       </div>
       <span class="context-label">{{ formatTokens(tokenUsage.estimated_tokens) }} / {{ formatTokens(tokenUsage.context_window) }}</span>
     </div>
-    <div class="messages" ref="messagesEl">
+    <div class="messages" ref="messagesEl" @scroll="onMessagesScroll">
+      <div v-if="hasMoreOlder" class="load-earlier-wrap">
+        <button class="load-earlier-btn" :disabled="loadingMore" @click="loadMoreMessages()">
+          {{ loadingMore ? '加载中...' : '▲ 加载更早消息' }}
+        </button>
+      </div>
+      <!-- Virtual scroll: spacer for messages before visible window -->
+      <div :style="{ height: (offsets[visibleRange.start] || 0) + 'px', flexShrink: '0' }"></div>
       <div
-        v-for="(msg, i) in displayMessages"
-        :key="i"
+        v-for="(msg, vi) in visibleMessages"
+        :key="`msg-${(msg.id || 0)}-${visibleRange.start + vi}`"
+        :ref="(el) => measureMsg(visibleRange.start + vi, el as HTMLElement | null)"
         :class="['message', msg.role]"
       >
         <div v-if="msg.role !== 'tool' && msg.role !== 'system'" class="avatar">{{ msg.role === 'user' ? 'U' : 'A' }}</div>
         <div class="content">
           <div v-if="msg.thinking && msg.role === 'assistant'" class="thinking-block">
-            <div class="thinking-toggle" :class="{ collapsed: !isThinkingExpanded(i) }" @click="toggleThinking(i)">
+            <div class="thinking-toggle" :class="{ collapsed: !isThinkingExpanded(visibleRange.start + vi) }" @click="toggleThinking(visibleRange.start + vi)">
               思考过程
               <span class="toggle-arrow"></span>
             </div>
-            <div v-if="isThinkingExpanded(i)" class="thinking-text" v-html="formatContent(msg.thinking)"></div>
+            <div v-if="isThinkingExpanded(visibleRange.start + vi)" class="thinking-text" v-html="formatContent(msg.thinking)"></div>
           </div>
           <div v-if="msg.role === 'user'" class="user-msg">
             <div v-if="parsedAttachments(msg)" class="user-attachments">
@@ -102,13 +111,17 @@
             <template v-if="msg.loading">
               <span class="cmd-spinner"></span> {{ msg.content }}
             </template>
+            <template v-else-if="msg.cmdResult">
+              <div class="cmd-line">{{ msg.content }}</div>
+              <div class="cmd-result">{{ msg.cmdResult }}</div>
+            </template>
             <template v-else>{{ msg.content }}</template>
           </div>
           <div v-else class="text" v-html="formatContent(msg.content)"></div>
           <div class="time" v-if="msg.created_at">{{ formatTime(msg.created_at) }}</div>
         </div>
         <div v-if="msg.role === 'user'" class="msg-hover-actions">
-          <button class="hover-btn" title="重新生成" @click="retryMessage(i)">⟳</button>
+          <button class="hover-btn" title="重新生成" @click="retryMessage(visibleRange.start + vi)">⟳</button>
           <button class="hover-btn" title="回退到此" @click="rewindToMessage(msg.id, msg.content)">↩</button>
         </div>
       </div>
@@ -120,83 +133,79 @@
           </div>
         </div>
       </div>
-      <div v-if="(currentStreaming.text || currentStreaming.thinking) && !currentStreaming.done" class="message assistant">
-        <div class="avatar">A</div>
-        <div class="content">
-          <div class="thinking-text" v-if="currentStreaming.thinking">{{ currentStreaming.thinking }}</div>
-          <pre class="streaming-text" v-if="currentStreaming.text && !currentStreaming.done">{{ currentStreaming.text }}</pre>
+      <!-- Virtual scroll: spacer for messages after visible window -->
+      <div :style="{ height: (totalHeight - (offsets[Math.min(visibleRange.end, offsets.length - 1)] || 0)) + 'px', flexShrink: '0' }"></div>
+      <template v-if="!currentStreaming.done">
+        <div
+          v-for="(seg, si) in streamingSegments"
+          :key="si"
+          :class="['message', seg.kind === 'tool' ? 'tool' : 'assistant']"
+        >
+          <template v-if="seg.kind === 'text'">
+            <div class="avatar">A</div>
+            <div class="content">
+              <div class="thinking-text" v-if="si === 0 && currentStreaming.thinking">{{ currentStreaming.thinking }}</div>
+              <pre class="streaming-text" v-if="seg.text">{{ seg.text }}</pre>
+            </div>
+          </template>
+          <template v-else>
+            <div class="content">
+              <div class="tool-msg">
+                <ToolCard :toolInfo="{ name: seg.name || '', args: seg.args, result: seg.result }" />
+              </div>
+            </div>
+          </template>
         </div>
-      </div>
-      <div
-        v-for="card in streamingToolCards"
-        :key="card.tool_id"
-        class="message tool"
-      >
-        <div class="content">
-          <div class="tool-msg">
-            <ToolCard :toolInfo="{ name: card.name, args: card.args, result: card.result }" />
+        <div v-if="streamingSegments.length === 0 && (currentStreaming.text || currentStreaming.thinking)" class="message assistant">
+          <div class="avatar">A</div>
+          <div class="content">
+            <div class="thinking-text" v-if="currentStreaming.thinking">{{ currentStreaming.thinking }}</div>
+            <pre class="streaming-text" v-if="currentStreaming.text">{{ currentStreaming.text }}</pre>
           </div>
         </div>
-      </div>
+      </template>
     </div>
-    <div v-if="showRewindConfirm" class="confirm-overlay">
-      <div class="confirm-card">
-        <p>回退至此消息发送前的状态，该消息及之后的所有内容将被删除。</p>
-        <div class="confirm-actions">
-          <button class="confirm-cancel" @click="cancelRewind()">取消</button>
-          <button class="confirm-danger" @click="handleRewindConfirm()">确认回退</button>
-        </div>
-      </div>
-    </div>
+    <ConfirmDialog
+      :visible="showRewindConfirm !== null"
+      title="回退消息"
+      message="回退至此消息发送前的状态，该消息及之后的所有内容将被删除。"
+      confirmText="确认回退"
+      @confirm="handleRewindConfirm()"
+      @cancel="cancelRewind()"
+    />
     <ToastBar
       :visible="showUndoToast"
       :message="lastUndone ? `已撤销: ${lastUndone}` : ''"
       @close="showUndoToast = false"
     />
     <AskDialog
-      v-if="pendingAsk"
-      :questions="pendingAsk.questions"
+      v-if="pendingAsk?.questions"
+      :questions="(pendingAsk.questions as any)"
       @submit="handleAskSubmit"
       @cancel="handleAskCancel"
     />
     <div v-if="permRequests.length > 0" class="perm-panels">
-      <div class="perm-card" v-for="req in permRequests" :key="req.id">
-        <div class="perm-header">权限确认 — {{ req.tool }}</div>
-        <div class="perm-body">
-          <p class="perm-reason" v-if="req.reason">{{ req.reason }}</p>
-          <p class="perm-file" v-if="req.file">文件: {{ req.file }}</p>
-          <p class="perm-cmd" v-if="req.command">$ {{ req.command }}</p>
-        </div>
-        <div class="perm-actions">
-          <button class="perm-allow" @click="respondPerm(req, 'allow', true)">总是允许</button>
-          <button class="perm-once" @click="respondPerm(req, 'allow', false)">允许一次</button>
-          <button class="perm-deny" @click="respondPerm(req, 'deny', false)">拒绝</button>
-        </div>
-      </div>
+      <PermissionCard
+        v-for="req in permRequests" :key="req.id"
+        :request="req"
+        @allow="respondPerm(req, 'allow', false)"
+        @deny="respondPerm(req, 'deny', false)"
+        @allowAlways="respondPerm(req, 'allow', true)"
+      />
     </div>
-    <div v-if="attachedFiles.length > 0" class="attach-preview">
-      <div v-for="(f, idx) in attachedFiles" :key="idx" class="attach-item">
-        <span class="preview-file-icon">{{ f.kind === 'image' ? '🖼' : '📄' }}</span>
-        <span class="preview-name">{{ f.name }}</span>
-        <button class="preview-remove" @click="removeAttachment(idx)" title="移除">✕</button>
-      </div>
-    </div>
-    <div v-if="showCommands && (agentType === 'front' || agentType === 'ace')" class="cmd-popup">
-      <div class="cmd-header">
-        <span class="cmd-title">命令</span>
-        <button class="cmd-close" @click="showCommands = false">×</button>
-      </div>
-      <div
-        v-for="cmd in filteredCommands"
-        :key="cmd.name"
-        class="cmd-item"
-        @click="insertCommand(cmd.name)"
-      >
-        <span class="cmd-name">{{ cmd.name }}</span>
-        <span class="cmd-desc">{{ cmd.desc }}</span>
-      </div>
-      <div v-if="filteredCommands.length === 0" class="cmd-empty">无匹配命令</div>
-    </div>
+    <AttachmentPreview
+      :files="attachedFiles"
+      @remove="removeAttachment"
+    />
+    <CommandPopup
+      v-if="agentType === 'front' || agentType === 'ace'"
+      :visible="showCommands"
+      :query="cmdQuery"
+      :commands="commands"
+      :selectedIndex="0"
+      @select="insertCommand"
+      @close="showCommands = false"
+    />
     <div class="input-area" v-if="agentType === 'front' || agentType === 'ace'">
       <textarea
         ref="inputEl"
@@ -232,7 +241,7 @@
 import { ref, computed, watch, onMounted, onActivated, onDeactivated, nextTick } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
-import { db } from '../services/db'
+import { db, type UIMessage } from '../services/db'
 import { useAgentConversation } from '../composables/useAgentConversation'
 import { useGlobalStreaming } from '../composables/useGlobalStreaming'
 import { usePermissions } from '../composables/usePermissions'
@@ -241,6 +250,10 @@ import AskDialog from '../components/AskDialog.vue'
 import ToastBar from '../components/ToastBar.vue'
 import BookmarkPanel from '../components/BookmarkPanel.vue'
 import ToolCard from '../components/ToolCard.vue'
+import ConfirmDialog from '../components/ConfirmDialog.vue'
+import AttachmentPreview from '../components/AttachmentPreview.vue'
+import CommandPopup from '../components/CommandPopup.vue'
+import PermissionCard from '../components/PermissionCard.vue'
 import { useUndoHistory } from '../composables/useUndoHistory'
 import { useBookmarks } from '../composables/useBookmarks'
 
@@ -271,8 +284,12 @@ const {
   showClearConfirm,
   clearConversation,
   tokenUsage,
+  cacheUsage,
   loadMessages,
   displayMessages,
+  loadMoreMessages,
+  hasMoreOlder,
+  loadingMore,
 } = useAgentConversation(props.agentType)
 
 const { sessions } = useGlobalStreaming()
@@ -298,12 +315,6 @@ const cmdQuery = computed(() => {
   return ''
 })
 
-const filteredCommands = computed(() => {
-  if (!cmdQuery.value) return commands
-  const q = cmdQuery.value.toLowerCase()
-  return commands.filter(c => c.name.toLowerCase().includes(q) || c.desc.toLowerCase().includes(q))
-})
-
 // Show popup when typing / as first char, or when button toggled
 watch(inputText, (val) => {
   if (manualCommands.value) return  // manual toggle, don't interfere
@@ -325,6 +336,94 @@ const thinkingExpanded = ref<Record<number, boolean>>({})
 // Per-agent scroll position cache (survives KeepAlive tab switches)
 const scrollCache = new Map<string, number>()
 const agentScrollKey = computed(() => `scroll_${props.agentType}`)
+
+// ── Virtual scrolling ─────────────────────────────────────────────────────
+const EST_MSG_HEIGHT = 180     // px, initial estimate for unmeasured messages
+const OVERSCAN = 3             // extra items above/below viewport
+const measuredHeights = ref<Map<number, number>>(new Map())
+const containerHeight = ref(600)
+
+function getMsgHeight(idx: number): number {
+  return measuredHeights.value.get(idx) ?? EST_MSG_HEIGHT
+}
+
+// Cumulative heights: offset[i] = sum of heights for messages [0..i-1]
+const offsets = computed(() => {
+  const off = [0]
+  const msgs = displayMessages.value
+  for (let i = 0; i < msgs.length; i++) {
+    off.push(off[i] + getMsgHeight(i))
+  }
+  return off
+})
+
+const totalHeight = computed(() => offsets.value[offsets.value.length - 1] || 0)
+
+const visibleRange = computed(() => {
+  const scrollPos = scrollCache.get(agentScrollKey.value) ?? 0
+  const ch = containerHeight.value
+  const off = offsets.value
+  const total = displayMessages.value.length
+
+  // Binary search for first visible message
+  let lo = 0, hi = total
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1
+    if (off[mid + 1] <= scrollPos - EST_MSG_HEIGHT * OVERSCAN) {
+      lo = mid + 1
+    } else {
+      hi = mid
+    }
+  }
+  const start = Math.max(0, lo)
+
+  // Find last visible message
+  const bottom = scrollPos + ch + EST_MSG_HEIGHT * OVERSCAN
+  lo = start; hi = total
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1
+    if (off[mid] <= bottom) {
+      lo = mid + 1
+    } else {
+      hi = mid
+    }
+  }
+  const end = Math.min(total, lo)
+
+  return { start, end }
+})
+
+const visibleMessages = computed(() => {
+  const { start, end } = visibleRange.value
+  return displayMessages.value.slice(start, end)
+})
+
+function measureMsg(idx: number, el: HTMLElement | null) {
+  if (!el) return
+  const h = el.getBoundingClientRect().height
+  if (h > 0 && h !== getMsgHeight(idx)) {
+    measuredHeights.value.set(idx, h)
+  }
+}
+
+// Track scroll position from the messages container
+function onMessagesScroll(e: Event) {
+  const el = e.target as HTMLElement
+  if (el) {
+    const key = agentScrollKey.value
+    scrollCache.set(key, el.scrollTop)
+  }
+}
+// Also observe container resize to update visible range
+let resizeObs: ResizeObserver | null = null
+function setupResizeObserver(el: HTMLElement | null) {
+  if (resizeObs) { resizeObs.disconnect(); resizeObs = null }
+  if (!el) return
+  resizeObs = new ResizeObserver(([entry]) => {
+    if (entry) containerHeight.value = entry.contentRect.height
+  })
+  resizeObs.observe(el)
+}
 
 function isThinkingExpanded(idx: number): boolean {
   // Default to expanded; only collapse if explicitly set to false
@@ -356,13 +455,26 @@ const inputPlaceholder = computed(() => {
 
 const currentStreaming = computed(() => {
   const entry = sessions.value.get(streamKey.value)
-  if (!entry?.state) return { text: '', thinking: '', done: true, toolCallCount: 0, toolEvents: [] as any[] }
+  if (!entry?.state) return { text: '', thinking: '', done: true, toolCallCount: 0, toolEvents: [] }
   return entry.state
 })
 
-const streamingToolCards = computed(() => {
+interface StreamSegment {
+  kind: 'text' | 'tool'
+  text?: string
+  tool_id?: string
+  name?: string
+  args?: string
+  result?: string
+}
+
+const streamingSegments = computed(() => {
   const events = currentStreaming.value.toolEvents || []
-  const cards = new Map<string, { tool_id: string; name: string; args?: string; result?: string; state: string }>()
+  const fullText = currentStreaming.value.text || ''
+
+  // Build merged tool cards (start + end paired by tool_id)
+  type Card = { tool_id: string; name: string; args?: string; result?: string; state: string; textBefore: string }
+  const cards = new Map<string, Card>()
   for (const ev of events) {
     const existing = cards.get(ev.tool_id)
     if (ev.type === 'tool_start') {
@@ -372,6 +484,7 @@ const streamingToolCards = computed(() => {
         args: ev.input ? JSON.stringify(ev.input) : undefined,
         result: existing?.result,
         state: 'running',
+        textBefore: ev.textBefore || '',
       })
     } else if (ev.type === 'tool_end') {
       cards.set(ev.tool_id, {
@@ -380,10 +493,38 @@ const streamingToolCards = computed(() => {
         args: existing?.args,
         result: ev.result,
         state: 'done',
+        textBefore: existing?.textBefore || '',
       })
     }
   }
-  return [...cards.values()]
+  const cardList = [...cards.values()].sort((a, b) => a.textBefore.length - b.textBefore.length)
+
+  // Build interleaved segments
+  const segments: StreamSegment[] = []
+  let prevEnd = ''
+
+  for (const card of cardList) {
+    const textBetween = fullText.slice(prevEnd.length, card.textBefore.length)
+    if (textBetween.trim()) {
+      segments.push({ kind: 'text', text: textBetween })
+    }
+    segments.push({
+      kind: 'tool',
+      tool_id: card.tool_id,
+      name: card.name,
+      args: card.args,
+      result: card.result,
+    })
+    prevEnd = card.textBefore
+  }
+
+  // Remaining text after last tool
+  const remaining = fullText.slice(prevEnd.length)
+  if (remaining.trim()) {
+    segments.push({ kind: 'text', text: remaining })
+  }
+
+  return segments
 })
 
 
@@ -418,7 +559,7 @@ const usageColor = computed(() => {
 
 interface AttInfo { name: string; path: string; kind: string }
 
-function parsedAttachments(msg: any): AttInfo[] | null {
+function parsedAttachments(msg: { attachments?: string }): AttInfo[] | null {
   if (!msg.attachments) return null
   try {
     const arr = typeof msg.attachments === 'string' ? JSON.parse(msg.attachments) : msg.attachments
@@ -427,17 +568,22 @@ function parsedAttachments(msg: any): AttInfo[] | null {
   } catch { return null }
 }
 
-const imageDataUrls = ref<Record<string, string>>({})
+const MAX_CACHED_IMAGES = 50
+const imageDataUrls = ref<Map<string, string>>(new Map())
 const imgLoading = new Set<string>()
 
 function getImageSrc(p: string): string {
-  if (imageDataUrls.value[p]) return imageDataUrls.value[p]
+  if (imageDataUrls.value.has(p)) return imageDataUrls.value.get(p)!
   if (!imgLoading.has(p)) {
     imgLoading.add(p)
     invoke<string>('read_file_base64', { path: p }).then(dataUrl => {
-      imageDataUrls.value = { ...imageDataUrls.value, [p]: dataUrl }
+      if (imageDataUrls.value.size >= MAX_CACHED_IMAGES) {
+        const firstKey = imageDataUrls.value.keys().next().value
+        if (firstKey !== undefined) imageDataUrls.value.delete(firstKey)
+      }
+      imageDataUrls.value.set(p, dataUrl)
     }).catch(() => {
-      imageDataUrls.value = { ...imageDataUrls.value, [p]: '' }
+      imageDataUrls.value.set(p, '')
     })
   }
   return ''
@@ -455,7 +601,7 @@ function formatTime(ts: string): string {
 
 interface ToolCardInfo { name: string; args?: string; result?: string }
 
-function getToolCardInfo(msg: any): ToolCardInfo | null {
+function getToolCardInfo(msg: { role: string; content?: string; tool_calls?: string }): ToolCardInfo | null {
   if (!msg.tool_calls) return null
   try {
     const calls = JSON.parse(msg.tool_calls)
@@ -475,38 +621,11 @@ function isAtBottom(): boolean {
   return el.scrollHeight - el.scrollTop - el.clientHeight < 80
 }
 
-function saveScrollPos() {
-  if (messagesEl.value) {
-    scrollCache.set(agentScrollKey.value, messagesEl.value.scrollTop)
-  }
-}
-
-function restoreScrollPos() {
-  // nextTick waits for Vue DOM updates, then double-RAF waits for browser layout + paint.
-  // Without this, KeepAlive-reactivated DOM won't have its scrollHeight computed yet
-  // and setting scrollTop silently fails.
-  nextTick(() => {
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        if (messagesEl.value) {
-          const pos = scrollCache.get(agentScrollKey.value)
-          if (pos !== undefined) {
-            messagesEl.value.scrollTop = pos
-          } else {
-            messagesEl.value.scrollTop = messagesEl.value.scrollHeight
-          }
-        }
-      })
-    })
-  })
-}
-
 function scrollToBottom(force = false) {
-  // Use RAF to wait for browser layout after Vue renders new messages
   requestAnimationFrame(() => {
     if (messagesEl.value && (force || isAtBottom())) {
       messagesEl.value.scrollTop = messagesEl.value.scrollHeight
-      saveScrollPos()
+      scrollCache.set(agentScrollKey.value, messagesEl.value.scrollTop)
     }
   })
 }
@@ -625,35 +744,19 @@ async function onSend() {
   // Slash commands — show as system messages, not sent to API
   if ((text === '/mcp reload' || text === '/compact') && sessionId.value) {
     inputText.value = ''
-    const now = new Date().toISOString()
     const cmdId = Date.now()
-    // Push command message to UI and DB (system role — excluded from API context)
+    // Push one card: command text + loading spinner inline
     const cmdMsg = {
       id: cmdId,
       session_id: sessionId.value,
       role: 'system' as const,
       content: `$ ${text}`,
-      created_at: now,
-    } as any
+      loading: true,
+      created_at: new Date().toISOString(),
+    } as UIMessage
     messages.value.push(cmdMsg)
     await db.addMessage(sessionId.value, 'system', `$ ${text}`)
-
-    // Push a loading spinner placeholder
-    const loadingId = cmdId + 1
-    const loadingMsg = {
-      id: loadingId,
-      session_id: sessionId.value,
-      role: 'system' as const,
-      content: '⏳',
-      loading: true,
-      created_at: now,
-    } as any
-    messages.value.push(loadingMsg)
     scrollToBottom(true)
-
-    const removeLoading = () => {
-      messages.value = messages.value.filter(m => (m as any).id !== loadingId)
-    }
 
     try {
       let resultContent: string
@@ -665,40 +768,26 @@ async function onSend() {
         const afterK = formatTokens(result.after)
         const pct = result.before > 0 ? Math.round((freed / result.before) * 100) : 0
         resultContent = `✅ 压缩完成: ${beforeK} → ${afterK} tokens, 释放 ${freedKb}K (${pct}%)`
-        removeLoading()
-        messages.value.push({
-          id: Date.now(),
-          session_id: sessionId.value,
-          role: 'system' as const,
-          content: resultContent,
-          created_at: new Date().toISOString(),
-        } as any)
-        await db.addMessage(sessionId.value, 'system', resultContent)
-        await loadMessages()
       } else {
         const mcpResult = await invoke<string>('mcp_reload')
         resultContent = `✅ MCP 重载 — ${mcpResult}`
-        removeLoading()
-        messages.value.push({
-          id: Date.now(),
-          session_id: sessionId.value,
-          role: 'system' as const,
-          content: resultContent,
-          created_at: new Date().toISOString(),
-        } as any)
-        await db.addMessage(sessionId.value, 'system', resultContent)
       }
-    } catch (e: any) {
-      removeLoading()
-      const err = typeof e === 'string' ? e : (e?.message || '未知错误')
-      messages.value.push({
-        id: Date.now(),
-        session_id: sessionId.value,
-        role: 'system' as const,
-        content: `❌ 命令失败: ${err}`,
-        created_at: new Date().toISOString(),
-      } as any)
-      await db.addMessage(sessionId.value, 'system', `❌ 命令失败: ${err}`)
+      // Replace the loading card with the result in-place
+      messages.value = messages.value.map(m =>
+        m.id === cmdId
+          ? { ...m, loading: false, cmdResult: resultContent }
+          : m
+      )
+      await db.addMessage(sessionId.value, 'system', `${text}\n${resultContent}`)
+      await loadMessages()
+    } catch (e) {
+      const err = e instanceof Error ? e.message : String(e)
+      messages.value = messages.value.map(m =>
+        m.id === cmdId
+          ? { ...m, loading: false, cmdResult: `❌ 命令失败: ${err}` }
+          : m
+      )
+      await db.addMessage(sessionId.value, 'system', `${text}\n❌ 命令失败: ${err}`)
       console.error(`[${text}] failed:`, e)
     }
     scrollToBottom(true)
@@ -731,7 +820,7 @@ async function onSend() {
       content: displayContent,
       attachments: att,
       created_at: new Date().toISOString(),
-    } as any)
+    } as UIMessage)
     // Show fake assistant message while analyzing
     messages.value.push({
       id: fakeAsstId,
@@ -739,7 +828,7 @@ async function onSend() {
       role: 'assistant' as const,
       content: `🖼 正在分析图片，请稍候...`,
       created_at: new Date().toISOString(),
-    } as any)
+    } as UIMessage)
     scrollToBottom(true)
 
     // Now analyze images (may take 5-30s)
@@ -751,8 +840,8 @@ async function onSend() {
           prompt: text || '请详细描述这张图片的内容',
         })
         visionResults.push(`[视觉预分析: ${img.name}]\n${desc}`)
-      } catch (e: any) {
-        const err = typeof e === 'string' ? e : (e?.message || '未知错误')
+      } catch (e) {
+        const err = e instanceof Error ? e.message : String(e)
         visionResults.push(`[视觉预分析失败: ${img.name}] ${err}`)
       }
     }
@@ -768,7 +857,7 @@ async function onSend() {
 
     // Remove the fake UI placeholders; sendMessage will save + push real messages
     messages.value = messages.value.filter(m => {
-      const id = (m as any).id
+      const id = m.id
       return id !== fakeUserId && id !== fakeAsstId
     })
     await sendMessage(contextParts.join('\n\n'), att, displayContent)
@@ -882,17 +971,34 @@ watch(inputText, () => {
 })
 
 onMounted(() => {
-  messagesEl.value?.addEventListener('scroll', saveScrollPos, { passive: true })
+  nextTick(() => {
+    setupResizeObserver(messagesEl.value ?? null)
+    if (messagesEl.value) {
+      const pos = scrollCache.get(agentScrollKey.value)
+      messagesEl.value.scrollTop = pos ?? messagesEl.value.scrollHeight
+    }
+  })
 })
 
 onActivated(() => {
-  restoreScrollPos()
-  messagesEl.value?.addEventListener('scroll', saveScrollPos, { passive: true })
+  nextTick(() => {
+    setupResizeObserver(messagesEl.value ?? null)
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (messagesEl.value) {
+          const pos = scrollCache.get(agentScrollKey.value)
+          messagesEl.value.scrollTop = pos ?? messagesEl.value.scrollHeight
+        }
+      })
+    })
+  })
 })
 
 onDeactivated(() => {
-  saveScrollPos()
-  messagesEl.value?.removeEventListener('scroll', saveScrollPos)
+  if (messagesEl.value) {
+    scrollCache.set(agentScrollKey.value, messagesEl.value.scrollTop)
+  }
+  if (resizeObs) { resizeObs.disconnect(); resizeObs = null }
 })
 </script>
 
@@ -918,6 +1024,17 @@ onDeactivated(() => {
   font-size: 14px;
   font-weight: 500;
   color: var(--text-primary);
+}
+
+.cache-badge {
+  font-size: 11px;
+  color: var(--accent-ok);
+  background: rgba(34, 197, 94, 0.1);
+  border: 1px solid rgba(34, 197, 94, 0.25);
+  border-radius: 10px;
+  padding: 2px 10px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .context-usage {
@@ -1114,16 +1231,6 @@ onDeactivated(() => {
   margin: 0;
   font-family: inherit;
   user-select: text;
-}
-
-.tool-counter {
-  font-size: 12px;
-  color: var(--accent-warn);
-  margin-bottom: 6px;
-  padding: 4px 8px;
-  background: var(--bg-tertiary);
-  border-radius: 4px;
-  display: inline-block;
 }
 
 /* Markdown rendered content */
@@ -1716,75 +1823,6 @@ onDeactivated(() => {
   opacity: 0.85;
 }
 
-.rename-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(0, 0, 0, 0.5);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
-}
-
-.rename-dialog {
-  background: var(--bg-secondary);
-  border-radius: 12px;
-  padding: 20px 24px;
-  width: 360px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-}
-
-.rename-title {
-  font-size: 16px;
-  font-weight: 500;
-  color: var(--text-primary);
-  margin-bottom: 16px;
-}
-
-.rename-dialog input {
-  width: 100%;
-  height: 40px;
-  padding: 0 12px;
-  background: var(--bg-input);
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  color: var(--text-primary);
-  font-size: 14px;
-  outline: none;
-  margin-bottom: 16px;
-}
-
-.rename-dialog input:focus {
-  border-color: var(--accent);
-}
-
-.rename-btns {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-}
-
-.cancel-btn, .confirm-btn {
-  padding: 8px 16px;
-  border: none;
-  border-radius: 6px;
-  font-size: 14px;
-  cursor: pointer;
-}
-
-.cancel-btn {
-  background: var(--bg-tertiary);
-  color: var(--text-primary);
-}
-
-.confirm-btn {
-  background: var(--btn-run);
-  color: white;
-}
-
 /* Permission panels — inline layers above input */
 .perm-panels {
   display: flex;
@@ -2014,5 +2052,46 @@ onDeactivated(() => {
   animation: cmd-spin 0.7s linear infinite;
   vertical-align: middle;
   margin-right: 4px;
+}
+
+.cmd-line {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  margin-bottom: 4px;
+}
+
+.cmd-result {
+  color: var(--accent);
+  font-size: 13px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border-color);
+}
+
+.load-earlier-wrap {
+  display: flex;
+  justify-content: center;
+  padding: 4px 0;
+}
+
+.load-earlier-btn {
+  padding: 4px 16px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.load-earlier-btn:hover:not(:disabled) {
+  background: var(--bg-input);
+  color: var(--text-primary);
+}
+
+.load-earlier-btn:disabled {
+  opacity: 0.5;
+  cursor: wait;
 }
 </style>

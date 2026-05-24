@@ -1,53 +1,53 @@
 ---
 name: laravel-patterns
-description: Laravel architecture patterns, routing/controllers, Eloquent ORM, service layers, queues, events, caching, and API resources for production apps.
+description: Laravel 架构模式、路由/控制器、Eloquent ORM、服务层、队列、事件、缓存和 API 资源，用于生产应用。
 origin: ECC
 ---
 
-# Laravel Development Patterns
+# Laravel 开发模式
 
-Production-grade Laravel architecture patterns for scalable, maintainable applications.
+用于可扩展、可维护应用的生产级 Laravel 架构模式。
 
-## When to Use
+## 何时使用
 
-- Building Laravel web applications or APIs
-- Structuring controllers, services, and domain logic
-- Working with Eloquent models and relationships
-- Designing APIs with resources and pagination
-- Adding queues, events, caching, and background jobs
+- 构建 Laravel Web 应用或 API
+- 构建控制器、服务和领域逻辑的清晰边界
+- 使用 Eloquent 模型和关系
+- 使用资源和分页设计 API
+- 添加队列、事件、缓存和后台作业
 
-## How It Works
+## 工作原理
 
-- Structure the app around clear boundaries (controllers -> services/actions -> models).
-- Use explicit bindings and scoped bindings to keep routing predictable; still enforce authorization for access control.
-- Favor typed models, casts, and scopes to keep domain logic consistent.
-- Keep IO-heavy work in queues and cache expensive reads.
-- Centralize config in `config/*` and keep environments explicit.
+- 在清晰边界周围构建应用（控制器 -> 服务/动作 -> 模型）。
+- 使用显式绑定和作用域绑定保持路由可预测；仍然强制执行授权进行访问控制。
+- 优先使用类型化模型、casts 和 scopes 保持领域逻辑一致。
+- 将 IO 重度工作保持在队列和缓存昂贵读取中。
+- 在 `config/*` 中集中配置并保持环境显式。
 
-## Examples
+## 示例
 
-### Project Structure
+### 项目结构
 
-Use a conventional Laravel layout with clear layer boundaries (HTTP, services/actions, models).
+使用清晰的层边界（HTTP、服务/动作、模型）的常规 Laravel 布局。
 
-### Recommended Layout
+### 推荐布局
 
 ```
 app/
-├── Actions/            # Single-purpose use cases
+├── Actions/            # 单一用途用例
 ├── Console/
 ├── Events/
 ├── Exceptions/
 ├── Http/
 │   ├── Controllers/
 │   ├── Middleware/
-│   ├── Requests/       # Form request validation
-│   └── Resources/      # API resources
+│   ├── Requests/       # 表单请求验证
+│   └── Resources/      # API 资源
 ├── Jobs/
 ├── Models/
 ├── Policies/
 ├── Providers/
-├── Services/           # Coordinating domain services
+├── Services/           # 协调领域服务
 └── Support/
 config/
 database/
@@ -63,9 +63,9 @@ routes/
 └── console.php
 ```
 
-### Controllers -> Services -> Actions
+### 控制器 -> 服务 -> 动作
 
-Keep controllers thin. Put orchestration in services and single-purpose logic in actions.
+保持控制器薄。将编排放在服务中，单一用途逻辑放在动作中。
 
 ```php
 final class CreateOrderAction
@@ -96,9 +96,9 @@ final class OrdersController extends Controller
 }
 ```
 
-### Routing and Controllers
+### 路由和控制器
 
-Prefer route-model binding and resource controllers for clarity.
+优先路由模型绑定和资源控制器以保持清晰。
 
 ```php
 use Illuminate\Support\Facades\Route;
@@ -108,9 +108,9 @@ Route::middleware('auth:sanctum')->group(function () {
 });
 ```
 
-### Route Model Binding (Scoped)
+### 路由模型绑定（作用域）
 
-Use scoped bindings to prevent cross-tenant access.
+使用作用域绑定防止跨租户访问。
 
 ```php
 Route::scopeBindings()->group(function () {
@@ -118,11 +118,11 @@ Route::scopeBindings()->group(function () {
 });
 ```
 
-### Nested Routes and Binding Names
+### 嵌套路由和绑定名称
 
-- Keep prefixes and paths consistent to avoid double nesting (e.g., `conversation` vs `conversations`).
-- Use a single parameter name that matches the bound model (e.g., `{conversation}` for `Conversation`).
-- Prefer scoped bindings when nesting to enforce parent-child relationships.
+- 保持前缀和路径一致以避免双重嵌套（如 `conversation` vs `conversations`）。
+- 使用匹配绑定模型的单个参数名（如 `{conversation}` 对应 `Conversation`）。
+- 嵌套时优先作用域绑定以强制父子关系。
 
 ```php
 use App\Http\Controllers\Api\ConversationController;
@@ -145,7 +145,7 @@ Route::middleware('auth:sanctum')->prefix('conversations')->group(function () {
 });
 ```
 
-If you want a parameter to resolve to a different model class, define explicit binding. For custom binding logic, use `Route::bind()` or implement `resolveRouteBinding()` on the model.
+如果希望参数解析为不同的模型类，定义显式绑定。对于自定义绑定逻辑，使用 `Route::bind()` 或在模型上实现 `resolveRouteBinding()`。
 
 ```php
 use App\Models\AiConversation;
@@ -154,9 +154,9 @@ use Illuminate\Support\Facades\Route;
 Route::model('conversation', AiConversation::class);
 ```
 
-### Service Container Bindings
+### 服务容器绑定
 
-Bind interfaces to implementations in a service provider for clear dependency wiring.
+在服务提供者中绑定接口到实现以进行清晰的依赖接线。
 
 ```php
 use App\Repositories\EloquentOrderRepository;
@@ -172,9 +172,9 @@ final class AppServiceProvider extends ServiceProvider
 }
 ```
 
-### Eloquent Model Patterns
+### Eloquent 模型模式
 
-### Model Configuration
+#### 模型配置
 
 ```php
 final class Project extends Model
@@ -200,9 +200,9 @@ final class Project extends Model
 }
 ```
 
-### Custom Casts and Value Objects
+#### 自定义 Casts 和值对象
 
-Use enums or value objects for strict typing.
+使用枚举或值对象进行严格类型。
 
 ```php
 use Illuminate\Database\Eloquent\Casts\Attribute;
@@ -222,7 +222,7 @@ protected function budgetCents(): Attribute
 }
 ```
 
-### Eager Loading to Avoid N+1
+#### 预加载避免 N+1
 
 ```php
 $orders = Order::query()
@@ -231,7 +231,7 @@ $orders = Order::query()
     ->paginate(25);
 ```
 
-### Query Objects for Complex Filters
+#### 查询对象用于复杂过滤器
 
 ```php
 final class ProjectQuery
@@ -259,10 +259,10 @@ final class ProjectQuery
 }
 ```
 
-### Global Scopes and Soft Deletes
+#### 全局作用域和软删除
 
-Use global scopes for default filtering and `SoftDeletes` for recoverable records.
-Use either a global scope or a named scope for the same filter, not both, unless you intend layered behavior.
+对默认过滤使用全局作用域，`SoftDeletes` 用于可恢复记录。
+仅在打算分层行为时才同时使用全局作用域和命名作用域。
 
 ```php
 use Illuminate\Database\Eloquent\SoftDeletes;
@@ -281,7 +281,7 @@ final class Project extends Model
 }
 ```
 
-### Query Scopes for Reusable Filters
+#### 查询作用域用于可重用过滤器
 
 ```php
 use Illuminate\Database\Eloquent\Builder;
@@ -294,11 +294,11 @@ final class Project extends Model
     }
 }
 
-// In service, repository etc.
+// 在服务、仓库等中
 $projects = Project::ownedBy($user->id)->get();
 ```
 
-### Transactions for Multi-Step Updates
+#### 多步更新的事务
 
 ```php
 use Illuminate\Support\Facades\DB;
@@ -309,15 +309,15 @@ DB::transaction(function (): void {
 });
 ```
 
-### Migrations
+### 迁移
 
-### Naming Convention
+#### 命名约定
 
-- File names use timestamps: `YYYY_MM_DD_HHMMSS_create_users_table.php`
-- Migrations use anonymous classes (no named class); the filename communicates intent
-- Table names are `snake_case` and plural by default
+- 文件名使用时间戳：`YYYY_MM_DD_HHMMSS_create_users_table.php`
+- 迁移使用匿名类（无命名类）；文件名传达意图
+- 表名为 `snake_case` 默认复数
 
-### Example Migration
+#### 迁移示例
 
 ```php
 use Illuminate\Database\Migrations\Migration;
@@ -344,9 +344,9 @@ return new class extends Migration
 };
 ```
 
-### Form Requests and Validation
+### 表单请求和验证
 
-Keep validation in form requests and transform inputs to DTOs.
+将验证保持在表单请求中并将输入转换为 DTO。
 
 ```php
 use App\Models\Order;
@@ -378,9 +378,9 @@ final class StoreOrderRequest extends FormRequest
 }
 ```
 
-### API Resources
+### API 资源
 
-Keep API responses consistent with resources and pagination.
+使用资源和分页保持 API 响应一致。
 
 ```php
 $projects = Project::query()->active()->paginate(25);
@@ -397,72 +397,71 @@ return response()->json([
 ]);
 ```
 
-### Events, Jobs, and Queues
+### 事件、作业和队列
 
-- Emit domain events for side effects (emails, analytics)
-- Use queued jobs for slow work (reports, exports, webhooks)
-- Prefer idempotent handlers with retries and backoff
+- 为副作用（电子邮件、分析）发出领域事件
+- 使用队列作业进行慢速工作（报告、导出、webhooks）
+- 优先使用带重试和退避的幂等处理程序
 
-### Caching
+### 缓存
 
-- Cache read-heavy endpoints and expensive queries
-- Invalidate caches on model events (created/updated/deleted)
-- Use tags when caching related data for easy invalidation
+- 缓存读取重度的端点和昂贵查询
+- 在模型事件（创建/更新/删除）时使缓存失效
+- 缓存相关数据时使用标签以便轻松失效
 
-### Configuration and Environments
+### 配置和环境
 
-- Keep secrets in `.env` and config in `config/*.php`
-- Use per-environment config overrides and `config:cache` in production
-
+- secrets 保持在 `.env` 中，配置在 `config/*.php` 中
+- 使用按环境配置覆盖和在生产中 `config:cache`
 
 ---
 
 ---
 name: laravel-security
-description: Laravel security best practices for authn/authz, validation, CSRF, mass assignment, file uploads, secrets, rate limiting, and secure deployment.
+description: Laravel 安全最佳实践，用于认证/授权、验证、CSRF、大量赋值、文件上传、secrets、速率限制和安全部署。
 origin: ECC
 ---
 
-# Laravel Security Best Practices
+# Laravel 安全最佳实践
 
-Comprehensive security guidance for Laravel applications to protect against common vulnerabilities.
+保护 Laravel 应用免受常见漏洞的综合安全指南。
 
-## When to Activate
+## 何时使用
 
-- Adding authentication or authorization
-- Handling user input and file uploads
-- Building new API endpoints
-- Managing secrets and environment settings
-- Hardening production deployments
+- 添加认证或授权
+- 处理用户输入和文件上传
+- 构建新的 API 端点
+- 管理 secrets 和环境设置
+- 加固生产部署
 
-## How It Works
+## 工作原理
 
-- Middleware provides baseline protections (CSRF via `VerifyCsrfToken`, security headers via `SecurityHeaders`).
-- Guards and policies enforce access control (`auth:sanctum`, `$this->authorize`, policy middleware).
-- Form Requests validate and shape input (`UploadInvoiceRequest`) before it reaches services.
-- Rate limiting adds abuse protection (`RateLimiter::for('login')`) alongside auth controls.
-- Data safety comes from encrypted casts, mass-assignment guards, and signed routes (`URL::temporarySignedRoute` + `signed` middleware).
+- 中间件提供基线保护（通过 `VerifyCsrfToken` 的 CSRF、通过 `SecurityHeaders` 的安全头）。
+- 守卫和策略强制访问控制（`auth:sanctum`、`$this->authorize`、策略中间件）。
+- 表单请求在到达服务之前验证和塑造输入（`UploadInvoiceRequest`）。
+- 速率限制在认证控制之上添加滥用保护（`RateLimiter::for('login')`）。
+- 数据安全来自加密 casts、大量赋值守卫和签名路由（`URL::temporarySignedRoute` + `signed` 中间件）。
 
-## Core Security Settings
+## 核心安全设置
 
-- `APP_DEBUG=false` in production
-- `APP_KEY` must be set and rotated on compromise
-- Set `SESSION_SECURE_COOKIE=true` and `SESSION_SAME_SITE=lax` (or `strict` for sensitive apps)
-- Configure trusted proxies for correct HTTPS detection
+- `APP_DEBUG=false` 在生产中
+- `APP_KEY` 必须设置并在泄露时轮换
+- 设置 `SESSION_SECURE_COOKIE=true` 和 `SESSION_SAME_SITE=lax`（或对敏感应用使用 `strict`）
+- 配置可信代理以正确检测 HTTPS
 
-## Session and Cookie Hardening
+## 会话和 Cookie 加固
 
-- Set `SESSION_HTTP_ONLY=true` to prevent JavaScript access
-- Use `SESSION_SAME_SITE=strict` for high-risk flows
-- Regenerate sessions on login and privilege changes
+- 设置 `SESSION_HTTP_ONLY=true` 防止 JavaScript 访问
+- 对高风险流程使用 `SESSION_SAME_SITE=strict`
+- 在登录和权限更改时重新生成会话
 
-## Authentication and Tokens
+## 认证和令牌
 
-- Use Laravel Sanctum or Passport for API auth
-- Prefer short-lived tokens with refresh flows for sensitive data
-- Revoke tokens on logout and compromised accounts
+- 使用 Laravel Sanctum 或 Passport 进行 API 认证
+- 对敏感数据优先使用短寿命令牌和刷新流
+- 在注销和泄露账户时撤销令牌
 
-Example route protection:
+示例路由保护：
 
 ```php
 use Illuminate\Http\Request;
@@ -473,10 +472,10 @@ Route::middleware('auth:sanctum')->get('/me', function (Request $request) {
 });
 ```
 
-## Password Security
+## 密码安全
 
-- Hash passwords with `Hash::make()` and never store plaintext
-- Use Laravel's password broker for reset flows
+- 使用 `Hash::make()` 哈希密码绝不存储明文
+- 使用 Laravel 的密码 broker 进行重置流
 
 ```php
 use Illuminate\Support\Facades\Hash;
@@ -489,16 +488,16 @@ $validated = $request->validate([
 $user->update(['password' => Hash::make($validated['password'])]);
 ```
 
-## Authorization: Policies and Gates
+## 授权：策略和门
 
-- Use policies for model-level authorization
-- Enforce authorization in controllers and services
+- 对模型级授权使用策略
+- 在控制器和服务中强制授权
 
 ```php
 $this->authorize('update', $project);
 ```
 
-Use policy middleware for route-level enforcement:
+使用策略中间件进行路由级强制：
 
 ```php
 use Illuminate\Support\Facades\Route;
@@ -507,49 +506,49 @@ Route::put('/projects/{project}', [ProjectController::class, 'update'])
     ->middleware(['auth:sanctum', 'can:update,project']);
 ```
 
-## Validation and Data Sanitization
+## 验证和数据清理
 
-- Always validate inputs with Form Requests
-- Use strict validation rules and type checks
-- Never trust request payloads for derived fields
+- 始终使用表单请求验证输入
+- 使用严格验证规则和类型检查
+- 绝不信任请求有效载荷用于派生字段
 
-## Mass Assignment Protection
+## 大量赋值保护
 
-- Use `$fillable` or `$guarded` and avoid `Model::unguard()`
-- Prefer DTOs or explicit attribute mapping
+- 使用 `$fillable` 或 `$guarded` 并避免 `Model::unguard()`
+- 优先使用 DTO 或显式属性映射
 
-## SQL Injection Prevention
+## SQL 注入预防
 
-- Use Eloquent or query builder parameter binding
-- Avoid raw SQL unless strictly necessary
+- 使用 Eloquent 或查询构建器参数绑定
+- 除非严格必要否则避免原始 SQL
 
 ```php
 DB::select('select * from users where email = ?', [$email]);
 ```
 
-## XSS Prevention
+## XSS 预防
 
-- Blade escapes output by default (`{{ }}`)
-- Use `{!! !!}` only for trusted, sanitized HTML
-- Sanitize rich text with a dedicated library
+- Blade 默认转义输出（`{{ }}`）
+- 仅对可信、清理的 HTML 使用 `{!! !!}`
+- 使用专用库清理富文本
 
-## CSRF Protection
+## CSRF 保护
 
-- Keep `VerifyCsrfToken` middleware enabled
-- Include `@csrf` in forms and send XSRF tokens for SPA requests
+- 保持 `VerifyCsrfToken` 中间件启用
+- 在表单中包含 `@csrf` 并为 SPA 请求发送 XSRF 令牌
 
-For SPA authentication with Sanctum, ensure stateful requests are configured:
+对于使用 Sanctum 的 SPA 认证，确保配置有状态请求：
 
 ```php
 // config/sanctum.php
 'stateful' => explode(',', env('SANCTUM_STATEFUL_DOMAINS', 'localhost')),
 ```
 
-## File Upload Safety
+## 文件上传安全
 
-- Validate file size, MIME type, and extension
-- Store uploads outside the public path when possible
-- Scan files for malware if required
+- 验证文件大小、MIME 类型和扩展名
+- 尽可能将上传存储在公共路径之外
+- 需要时扫描文件中的恶意软件
 
 ```php
 final class UploadInvoiceRequest extends FormRequest
@@ -571,14 +570,14 @@ final class UploadInvoiceRequest extends FormRequest
 ```php
 $path = $request->file('invoice')->store(
     'invoices',
-    config('filesystems.private_disk', 'local') // set this to a non-public disk
+    config('filesystems.private_disk', 'local') // 设置为非公共磁盘
 );
 ```
 
-## Rate Limiting
+## 速率限制
 
-- Apply `throttle` middleware on auth and write endpoints
-- Use stricter limits for login, password reset, and OTP
+- 在认证和写端点上应用 `throttle` 中间件
+- 对登录、密码重置和 OTP 使用更严格的限制
 
 ```php
 use Illuminate\Cache\RateLimiting\Limit;
@@ -593,15 +592,15 @@ RateLimiter::for('login', function (Request $request) {
 });
 ```
 
-## Secrets and Credentials
+## Secrets 和凭证
 
-- Never commit secrets to source control
-- Use environment variables and secret managers
-- Rotate keys after exposure and invalidate sessions
+- 绝不提交 secrets 到源代码控制
+- 使用环境变量和 secrets 管理器
+- 泄露后轮换密钥并使会话失效
 
-## Encrypted Attributes
+## 加密属性
 
-Use encrypted casts for sensitive columns at rest.
+对静态敏感列使用加密 casts。
 
 ```php
 protected $casts = [
@@ -609,12 +608,12 @@ protected $casts = [
 ];
 ```
 
-## Security Headers
+## 安全头
 
-- Add CSP, HSTS, and frame protection where appropriate
-- Use trusted proxy configuration to enforce HTTPS redirects
+- 在适当时添加 CSP、HSTS 和帧保护
+- 使用可信代理配置强制 HTTPS 重定向
 
-Example middleware to set headers:
+设置头的示例中间件：
 
 ```php
 use Illuminate\Http\Request;
@@ -628,7 +627,7 @@ final class SecurityHeaders
 
         $response->headers->add([
             'Content-Security-Policy' => "default-src 'self'",
-            'Strict-Transport-Security' => 'max-age=31536000', // add includeSubDomains/preload only when all subdomains are HTTPS
+            'Strict-Transport-Security' => 'max-age=31536000', // 仅在所有子域都是 HTTPS 时添加 includeSubDomains/preload
             'X-Frame-Options' => 'DENY',
             'X-Content-Type-Options' => 'nosniff',
             'Referrer-Policy' => 'no-referrer',
@@ -639,10 +638,10 @@ final class SecurityHeaders
 }
 ```
 
-## CORS and API Exposure
+## CORS 和 API 暴露
 
-- Restrict origins in `config/cors.php`
-- Avoid wildcard origins for authenticated routes
+- 在 `config/cors.php` 中限制来源
+- 对认证路由避免通配符来源
 
 ```php
 // config/cors.php
@@ -661,10 +660,10 @@ return [
 ];
 ```
 
-## Logging and PII
+## 日志和 PII
 
-- Never log passwords, tokens, or full card data
-- Redact sensitive fields in structured logs
+- 绝不记录密码、token 或完整卡数据
+- 在结构化日志中删除敏感字段
 
 ```php
 use Illuminate\Support\Facades\Log;
@@ -676,14 +675,14 @@ Log::info('User updated profile', [
 ]);
 ```
 
-## Dependency Security
+## 依赖安全
 
-- Run `composer audit` regularly
-- Pin dependencies with care and update promptly on CVEs
+- 定期运行 `composer audit`
+- 谨慎固定依赖并在 CVE 时及时更新
 
-## Signed URLs
+## 签名 URL
 
-Use signed routes for temporary, tamper-proof links.
+对临时、防篡改链接使用签名路由。
 
 ```php
 use Illuminate\Support\Facades\URL;
@@ -703,62 +702,61 @@ Route::get('/invoices/{invoice}/download', [InvoiceController::class, 'download'
     ->middleware('signed');
 ```
 
-
 ---
 
 ---
 name: laravel-tdd
-description: Test-driven development for Laravel with PHPUnit and Pest, factories, database testing, fakes, and coverage targets.
+description: 使用 PHPUnit 和 Pest 进行 Laravel 测试驱动开发，包括工厂、数据库测试、fakes 和覆盖目标。
 origin: ECC
 ---
 
-# Laravel TDD Workflow
+# Laravel TDD 工作流
 
-Test-driven development for Laravel applications using PHPUnit and Pest with 80%+ coverage (unit + feature).
+使用 PHPUnit 和 Pest 进行 Laravel 应用测试驱动开发，目标覆盖 80%+（单元 + 功能）。
 
-## When to Use
+## 何时使用
 
-- New features or endpoints in Laravel
-- Bug fixes or refactors
-- Testing Eloquent models, policies, jobs, and notifications
-- Prefer Pest for new tests unless the project already standardizes on PHPUnit
+- Laravel 中的新功能或端点
+- Bug 修复或重构
+- 测试 Eloquent 模型、策略、作业和通知
+- 除非项目已标准化于 PHPUnit，否则优先使用 Pest
 
-## How It Works
+## 工作原理
 
-### Red-Green-Refactor Cycle
+### 红-绿-重构循环
 
-1) Write a failing test
-2) Implement the minimal change to pass
-3) Refactor while keeping tests green
+1) 写一个失败的测试
+2) 实现最小更改通过
+3) 在保持测试绿色时重构
 
-### Test Layers
+### 测试层级
 
-- **Unit**: pure PHP classes, value objects, services
-- **Feature**: HTTP endpoints, auth, validation, policies
-- **Integration**: database + queue + external boundaries
+- **单元**：纯 PHP 类、值对象、服务
+- **功能**：HTTP 端点、认证、验证、策略
+- **集成**：数据库 + 队列 + 外部边界
 
-Choose layers based on scope:
+根据范围选择层级：
 
-- Use **Unit** tests for pure business logic and services.
-- Use **Feature** tests for HTTP, auth, validation, and response shape.
-- Use **Integration** tests when validating DB/queues/external services together.
+- 对纯业务逻辑和服务使用 **单元** 测试。
+- 对 HTTP、认证、验证和响应形状使用 **功能** 测试。
+- 当一起验证 DB/队列/外部服务时使用 **集成** 测试。
 
-### Database Strategy
+### 数据库策略
 
-- `RefreshDatabase` for most feature/integration tests (runs migrations once per test run, then wraps each test in a transaction when supported; in-memory databases may re-migrate per test)
-- `DatabaseTransactions` when the schema is already migrated and you only need per-test rollback
-- `DatabaseMigrations` when you need a full migrate/fresh for every test and can afford the cost
+- `RefreshDatabase` 用于大多数功能/集成测试（支持事务时每个测试运行运行一次迁移，然后每个测试包装在事务中；`:memory:` SQLite 或无事务连接可能在每个测试前重新迁移）
+- `DatabaseTransactions` 当 schema 已经迁移且只需要每个测试回滚时
+- `DatabaseMigrations` 当需要每个测试完全迁移/新鲜且可以承受成本时
 
-Use `RefreshDatabase` as the default for tests that touch the database: for databases with transaction support, it runs migrations once per test run (via a static flag) and wraps each test in a transaction; for `:memory:` SQLite or connections without transactions, it migrates before each test. Use `DatabaseTransactions` when the schema is already migrated and you only need per-test rollbacks.
+将 `RefreshDatabase` 作为触碰数据库的测试的默认选项：对于支持事务的数据库，它运行一次迁移每个测试运行（通过静态标志）并包装每个测试在事务中；对于 `:memory:` SQLite 或无事务连接，它在每个测试前迁移。使用 `DatabaseTransactions` 当 schema 已经迁移且你只需要每个测试回滚。
 
-### Testing Framework Choice
+### 测试框架选择
 
-- Default to **Pest** for new tests when available.
-- Use **PHPUnit** only if the project already standardizes on it or requires PHPUnit-specific tooling.
+- 有可用时默认使用 **Pest** 用于新测试。
+- 仅在项目已标准化于 PHPUnit 或需要 PHPUnit 特定工具时才使用 **PHPUnit**。
 
-## Examples
+## 示例
 
-### PHPUnit Example
+### PHPUnit 示例
 
 ```php
 use App\Models\User;
@@ -783,7 +781,7 @@ final class ProjectControllerTest extends TestCase
 }
 ```
 
-### Feature Test Example (HTTP Layer)
+### 功能测试示例（HTTP 层）
 
 ```php
 use App\Models\Project;
@@ -808,7 +806,7 @@ final class ProjectIndexTest extends TestCase
 }
 ```
 
-### Pest Example
+### Pest 示例
 
 ```php
 use App\Models\User;
@@ -831,7 +829,7 @@ test('owner can create project', function () {
 });
 ```
 
-### Feature Test Pest Example (HTTP Layer)
+### 功能测试 Pest 示例（HTTP 层）
 
 ```php
 use App\Models\Project;
@@ -853,22 +851,22 @@ test('projects index returns paginated results', function () {
 });
 ```
 
-### Factories and States
+### 工厂和状态
 
-- Use factories for test data
-- Define states for edge cases (archived, admin, trial)
+- 使用工厂进行测试数据
+- 为边界情况定义状态（archived、admin、trial）
 
 ```php
 $user = User::factory()->state(['role' => 'admin'])->create();
 ```
 
-### Database Testing
+### 数据库测试
 
-- Use `RefreshDatabase` for clean state
-- Keep tests isolated and deterministic
-- Prefer `assertDatabaseHas` over manual queries
+- 使用 `RefreshDatabase` 保持干净状态
+- 保持测试隔离和确定性
+- 优先 `assertDatabaseHas` 而非手动查询
 
-### Persistence Test Example
+### 持久化测试示例
 
 ```php
 use App\Models\Project;
@@ -890,12 +888,12 @@ final class ProjectRepositoryTest extends TestCase
 }
 ```
 
-### Fakes for Side Effects
+### Fakes 用于副作用
 
-- `Bus::fake()` for jobs
-- `Queue::fake()` for queued work
-- `Mail::fake()` and `Notification::fake()` for notifications
-- `Event::fake()` for domain events
+- `Bus::fake()` 用于作业
+- `Queue::fake()` 用于队列工作
+- `Mail::fake()` 和 `Notification::fake()` 用于通知
+- `Event::fake()` 用于领域事件
 
 ```php
 use Illuminate\Support\Facades\Queue;
@@ -917,7 +915,7 @@ $user->notify(new InvoiceReady($invoice));
 Notification::assertSentTo($user, InvoiceReady::class);
 ```
 
-### Auth Testing (Sanctum)
+### Auth 测试（Sanctum）
 
 ```php
 use Laravel\Sanctum\Sanctum;
@@ -928,28 +926,28 @@ $response = $this->getJson('/api/projects');
 $response->assertOk();
 ```
 
-### HTTP and External Services
+### HTTP 和外部服务
 
-- Use `Http::fake()` to isolate external APIs
-- Assert outbound payloads with `Http::assertSent()`
+- 使用 `Http::fake()` 隔离外部 API
+- 使用 `Http::assertSent()` 断言出站有效载荷
 
-### Coverage Targets
+### 覆盖目标
 
-- Enforce 80%+ coverage for unit + feature tests
-- Use `pcov` or `XDEBUG_MODE=coverage` in CI
+- 对单元 + 功能测试强制 80%+ 覆盖
+- 在 CI 中使用 `pcov` 或 `XDEBUG_MODE=coverage`
 
-### Test Commands
+### 测试命令
 
 - `php artisan test`
 - `vendor/bin/phpunit`
 - `vendor/bin/pest`
 
-### Test Configuration
+### 测试配置
 
-- Use `phpunit.xml` to set `DB_CONNECTION=sqlite` and `DB_DATABASE=:memory:` for fast tests
-- Keep separate env for tests to avoid touching dev/prod data
+- 使用 `phpunit.xml` 设置 `DB_CONNECTION=sqlite` 和 `DB_DATABASE=:memory:` 用于快速测试
+- 保持单独的测试环境以避免触碰开发/生产数据
 
-### Authorization Tests
+### 授权测试
 
 ```php
 use Illuminate\Support\Facades\Gate;
@@ -958,9 +956,9 @@ $this->assertTrue(Gate::forUser($user)->allows('update', $project));
 $this->assertFalse(Gate::forUser($otherUser)->allows('update', $project));
 ```
 
-### Inertia Feature Tests
+### Inertia 功能测试
 
-When using Inertia.js, assert on the component name and props with the Inertia testing helpers.
+使用 Inertia.js 时，使用 Inertia 测试助手断言组件名称和 props。
 
 ```php
 use App\Models\User;
@@ -988,420 +986,87 @@ final class DashboardInertiaTest extends TestCase
 }
 ```
 
-Prefer `assertInertia` over raw JSON assertions to keep tests aligned with Inertia responses.
-
+优先 `assertInertia` 而非原始 JSON 断言以保持测试与 Inertia 响应一致。
 
 ---
 
 ---
 name: laravel-verification
-description: "Verification loop for Laravel projects: env checks, linting, static analysis, tests with coverage, security scans, and deployment readiness."
+description: Laravel 项目验证循环：环境检查、linting、静态分析、带覆盖的测试、安全扫描和部署就绪。
 origin: ECC
 ---
 
-# Laravel Verification Loop
+# Laravel 验证循环
 
-Run before PRs, after major changes, and pre-deploy.
+Laravel 项目的验证检查清单：环境检查、linting、静态分析、带覆盖的测试、安全扫描和部署就绪。
 
-## When to Use
+## 何时使用
 
-- Before opening a pull request for a Laravel project
-- After major refactors or dependency upgrades
-- Pre-deployment verification for staging or production
-- Running full lint -> test -> security -> deploy readiness pipeline
+- 准备部署到生产环境
+- 验证代码质量和平稳性
+- 在拉取请求中运行质量门
+- 持续集成中的自动检查
 
-## How It Works
+## 验证阶段
 
-- Run phases sequentially from environment checks through deployment readiness so each layer builds on the last.
-- Environment and Composer checks gate everything else; stop immediately if they fail.
-- Linting/static analysis should be clean before running full tests and coverage.
-- Security and migration reviews happen after tests so you verify behavior before data or release steps.
-- Build/deploy readiness and queue/scheduler checks are final gates; any failure blocks release.
-
-## Phase 1: Environment Checks
+### 阶段 1：本地环境检查
 
 ```bash
-php -v
-composer --version
-php artisan --version
-```
-
-- Verify `.env` is present and required keys exist
-- Confirm `APP_DEBUG=false` for production environments
-- Confirm `APP_ENV` matches the target deployment (`production`, `staging`)
-
-If using Laravel Sail locally:
-
-```bash
-./vendor/bin/sail php -v
-./vendor/bin/sail artisan --version
-```
-
-## Phase 1.5: Composer and Autoload
-
-```bash
-composer validate
-composer dump-autoload -o
-```
-
-## Phase 2: Linting and Static Analysis
-
-```bash
-vendor/bin/pint --test
-vendor/bin/phpstan analyse
-```
-
-If your project uses Psalm instead of PHPStan:
-
-```bash
-vendor/bin/psalm
-```
-
-## Phase 3: Tests and Coverage
-
-```bash
-php artisan test
-```
-
-Coverage (CI):
-
-```bash
-XDEBUG_MODE=coverage php artisan test --coverage
-```
-
-CI example (format -> static analysis -> tests):
-
-```bash
-vendor/bin/pint --test
-vendor/bin/phpstan analyse
-XDEBUG_MODE=coverage php artisan test --coverage
-```
-
-## Phase 4: Security and Dependency Checks
-
-```bash
-composer audit
-```
-
-## Phase 5: Database and Migrations
-
-```bash
-php artisan migrate --pretend
-php artisan migrate:status
-```
-
-- Review destructive migrations carefully
-- Ensure migration filenames follow `Y_m_d_His_*` (e.g., `2025_03_14_154210_create_orders_table.php`) and describe the change clearly
-- Ensure rollbacks are possible
-- Verify `down()` methods and avoid irreversible data loss without explicit backups
-
-## Phase 6: Build and Deployment Readiness
-
-```bash
-php artisan optimize:clear
+# 确认 .env 配置正确
 php artisan config:cache
 php artisan route:cache
-php artisan view:cache
+
+# 验证没有敏感数据泄露
+grep -r "APP_KEY" .env || echo "APP_KEY set"
+grep -r "DEBUG=true" .env || echo "DEBUG=false"
 ```
 
-- Ensure cache warmups succeed in production configuration
-- Verify queue workers and scheduler are configured
-- Confirm `storage/` and `bootstrap/cache/` are writable in the target environment
-
-## Phase 7: Queue and Scheduler Checks
+### 阶段 2：代码质量
 
 ```bash
-php artisan schedule:list
-php artisan queue:failed
+# PHPStan 静态分析
+./vendor/bin/phpstan analyse app --memory-limit=512M
+
+# Pint 代码风格
+./vendor/bin/pint --test
+
+# PHP CS Fixer 检查（如使用）
+./vendor/bin/php-cs-fixer fix --dry-run --diff
 ```
 
-If Horizon is used:
+### 阶段 3：测试
 
 ```bash
-php artisan horizon:status
+# 运行完整测试套件
+php artisan test --coverage
+
+# 或使用 Pest
+./vendor/bin/pest --coverage
+
+# 验证覆盖门槛
+php artisan test --coverage-min=80
 ```
 
-If `queue:monitor` is available, use it to check backlog without processing jobs:
+### 阶段 4：安全扫描
 
 ```bash
-php artisan queue:monitor default --max=100
-```
-
-Active verification (staging only): dispatch a no-op job to a dedicated queue and run a single worker to process it (ensure a non-`sync` queue connection is configured).
-
-```bash
-php artisan tinker --execute="dispatch((new App\\Jobs\\QueueHealthcheck())->onQueue('healthcheck'))"
-php artisan queue:work --once --queue=healthcheck
-```
-
-Verify the job produced the expected side effect (log entry, healthcheck table row, or metric).
-
-Only run this on non-production environments where processing a test job is safe.
-
-## Examples
-
-Minimal flow:
-
-```bash
-php -v
-composer --version
-php artisan --version
-composer validate
-vendor/bin/pint --test
-vendor/bin/phpstan analyse
-php artisan test
+# 依赖审核
 composer audit
-php artisan migrate --pretend
-php artisan config:cache
-php artisan queue:failed
+
+# Laravel 安全最佳实践检查
+# - APP_DEBUG=false
+# - CSRF 启用
+# - 速率限制配置
+# - 加密 cast 在敏感字段上
 ```
 
-CI-style pipeline:
-
-```bash
-composer validate
-composer dump-autoload -o
-vendor/bin/pint --test
-vendor/bin/phpstan analyse
-XDEBUG_MODE=coverage php artisan test --coverage
-composer audit
-php artisan migrate --pretend
-php artisan optimize:clear
-php artisan config:cache
-php artisan route:cache
-php artisan view:cache
-php artisan schedule:list
-```
-
-
----
-
----
-name: laravel-plugin-discovery
-description: Discover and evaluate Laravel packages via LaraPlugins.io MCP. Use when the user wants to find plugins, check package health, or assess Laravel/PHP compatibility.
-origin: ECC
----
-
-# Laravel Plugin Discovery
-
-Find, evaluate, and choose healthy Laravel packages using the LaraPlugins.io MCP server.
-
-## When to Use
-
-- User wants to find Laravel packages for a specific feature (e.g. "auth", "permissions", "admin panel")
-- User asks "what package should I use for..." or "is there a Laravel package for..."
-- User wants to check if a package is actively maintained
-- User needs to verify Laravel version compatibility
-- User wants to assess package health before adding to a project
-
-## MCP Requirement
-
-LaraPlugins MCP server must be configured. Add to your `~/.claude.json` mcpServers:
-
-```json
-"laraplugins": {
-  "type": "http",
-  "url": "https://laraplugins.io/mcp/plugins"
-}
-```
-
-No API key required — the server is free for the Laravel community.
-
-## MCP Tools
-
-The LaraPlugins MCP provides two primary tools:
-
-### SearchPluginTool
-
-Search packages by keyword, health score, vendor, and version compatibility.
-
-**Parameters:**
-- `text_search` (string, optional): Keyword to search (e.g. "permission", "admin", "api")
-- `health_score` (string, optional): Filter by health band — `Healthy`, `Medium`, `Unhealthy`, or `Unrated`
-- `laravel_compatibility` (string, optional): Filter by Laravel version — `"5"`, `"6"`, `"7"`, `"8"`, `"9"`, `"10"`, `"11"`, `"12"`, `"13"`
-- `php_compatibility` (string, optional): Filter by PHP version — `"7.4"`, `"8.0"`, `"8.1"`, `"8.2"`, `"8.3"`, `"8.4"`, `"8.5"`
-- `vendor_filter` (string, optional): Filter by vendor name (e.g. "spatie", "laravel")
-- `page` (number, optional): Page number for pagination
-
-### GetPluginDetailsTool
-
-Fetch detailed metrics, readme content, and version history for a specific package.
-
-**Parameters:**
-- `package` (string, required): Full Composer package name (e.g. "spatie/laravel-permission")
-- `include_versions` (boolean, optional): Include version history in response
-
----
-
-## How It Works
-
-### Finding Packages
-
-When the user wants to discover packages for a feature:
-
-1. Use `SearchPluginTool` with relevant keywords
-2. Apply filters for health score, Laravel version, or PHP version
-3. Review the results with package names, descriptions, and health indicators
-
-### Evaluating Packages
-
-When the user wants to assess a specific package:
-
-1. Use `GetPluginDetailsTool` with the package name
-2. Review health score, last updated date, Laravel version support
-3. Check vendor reputation and risk indicators
-
-### Checking Compatibility
-
-When the user needs Laravel or PHP version compatibility:
-
-1. Search with `laravel_compatibility` filter set to their version
-2. Or get details on a specific package to see its supported versions
-
----
-
-## Examples
-
-### Example: Find Authentication Packages
-
-```
-SearchPluginTool({
-  text_search: "authentication",
-  health_score: "Healthy"
-})
-```
-
-Returns packages matching "authentication" with healthy status:
-- spatie/laravel-permission
-- laravel/breeze
-- laravel/passport
-- etc.
-
-### Example: Find Laravel 12 Compatible Packages
-
-```
-SearchPluginTool({
-  text_search: "admin panel",
-  laravel_compatibility: "12"
-})
-```
-
-Returns packages compatible with Laravel 12.
-
-### Example: Get Package Details
-
-```
-GetPluginDetailsTool({
-  package: "spatie/laravel-permission",
-  include_versions: true
-})
-```
-
-Returns:
-- Health score and last activity
-- Laravel/PHP version support
-- Vendor reputation (risk score)
-- Version history
-- Brief description
-
-### Example: Find Packages by Vendor
-
-```
-SearchPluginTool({
-  vendor_filter: "spatie",
-  health_score: "Healthy"
-})
-```
-
-Returns all healthy packages from vendor "spatie".
-
----
-
-## Filtering Best Practices
-
-### By Health Score
-
-| Health Band | Meaning |
-|-------------|---------|
-| `Healthy` | Active maintenance, recent updates |
-| `Medium` | Occasional updates, may need attention |
-| `Unhealthy` | Abandoned or infrequently maintained |
-| `Unrated` | Not yet assessed |
-
-**Recommendation**: Prefer `Healthy` packages for production applications.
-
-### By Laravel Version
-
-| Version | Notes |
-|---------|-------|
-| `13` | Latest Laravel |
-| `12` | Current stable |
-| `11` | Still widely used |
-| `10` | Legacy but common |
-| `5`-`9` | Deprecated |
-
-**Recommendation**: Match the target project's Laravel version.
-
-### Combining Filters
-
-```typescript
-// Find healthy, Laravel 12 compatible packages for permissions
-SearchPluginTool({
-  text_search: "permission",
-  health_score: "Healthy",
-  laravel_compatibility: "12"
-})
-```
-
----
-
-## Response Interpretation
-
-### Search Results
-
-Each result includes:
-- Package name (e.g. `spatie/laravel-permission`)
-- Brief description
-- Health status indicator
-- Laravel version support badges
-
-### Package Details
-
-The detailed response includes:
-- **Health Score**: Numeric or band indicator
-- **Last Activity**: When the package was last updated
-- **Laravel Support**: Version compatibility matrix
-- **PHP Support**: PHP version compatibility
-- **Risk Score**: Vendor trust indicators
-- **Version History**: Recent release timeline
-
----
-
-## Common Use Cases
-
-| Scenario | Recommended Approach |
-|----------|---------------------|
-| "What package for auth?" | Search "auth" with healthy filter |
-| "Is spatie/package still maintained?" | Get details, check health score |
-| "Need Laravel 12 packages" | Search with laravel_compatibility: "12" |
-| "Find admin panel packages" | Search "admin panel", review results |
-| "Check vendor reputation" | Search by vendor, check details |
-
----
-
-## Best Practices
-
-1. **Always filter by health** — Use `health_score: "Healthy"` for production projects
-2. **Match Laravel version** — Always check `laravel_compatibility` matches the target project
-3. **Check vendor reputation** — Prefer packages from known vendors (spatie, laravel, etc.)
-4. **Review before recommending** — Use GetPluginDetailsTool for a comprehensive assessment
-5. **No API key needed** — The MCP is free, no authentication required
-
----
-
-## Related Skills
-
-- `laravel-patterns` — Laravel architecture and patterns
-- `laravel-tdd` — Test-driven development for Laravel
-- `laravel-security` — Laravel security best practices
-- `documentation-lookup` — General library documentation lookup (Context7)
+### 阶段 5：部署检查
+
+- [ ] `.env` 配置正确（生产值）
+- [ ] `APP_KEY` 已设置
+- [ ] `APP_DEBUG=false`
+- [ ] 数据库迁移已运行
+- [ ] 队列 worker 在运行
+- [ ] 调度器已配置
+- [ ] 日志正确路由
+- [ ] 监控已设置

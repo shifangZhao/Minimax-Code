@@ -1,28 +1,28 @@
 ---
 name: golang-patterns
-description: Idiomatic Go patterns, best practices, and conventions for building robust, efficient, and maintainable Go applications.
+description: 惯用 Go 模式、最佳实践和约定，用于构建健壮、高效和可维护的 Go 应用程序。
 origin: ECC
 ---
 
-# Go Development Patterns
+# Go 开发模式
 
-Idiomatic Go patterns and best practices for building robust, efficient, and maintainable applications.
+用于构建健壮、高效和可维护应用程序的惯用 Go 模式和最佳实践。
 
-## When to Activate
+## 激活时机
 
-- Writing new Go code
-- Reviewing Go code
-- Refactoring existing Go code
-- Designing Go packages/modules
+- 编写新的 Go 代码
+- 审查 Go 代码
+- 重构现有 Go 代码
+- 设计 Go 包/模块
 
-## Core Principles
+## 核心原则
 
-### 1. Simplicity and Clarity
+### 1. 简单性和清晰性
 
-Go favors simplicity over cleverness. Code should be obvious and easy to read.
+Go 偏向简单性而非巧妙。代码应该明显且易读。
 
 ```go
-// Good: Clear and direct
+// 好：清晰直接
 func GetUser(id string) (*User, error) {
     user, err := db.FindUser(id)
     if err != nil {
@@ -31,7 +31,7 @@ func GetUser(id string) (*User, error) {
     return user, nil
 }
 
-// Bad: Overly clever
+// 坏：过于巧妙
 func GetUser(id string) (*User, error) {
     return func() (*User, error) {
         if u, e := db.FindUser(id); e == nil {
@@ -43,15 +43,15 @@ func GetUser(id string) (*User, error) {
 }
 ```
 
-### 2. Make the Zero Value Useful
+### 2. 让零值有用
 
-Design types so their zero value is immediately usable without initialization.
+设计类型使其零值无需初始化即可直接使用。
 
 ```go
-// Good: Zero value is useful
+// 好：零值有用
 type Counter struct {
     mu    sync.Mutex
-    count int // zero value is 0, ready to use
+    count int // 零值是 0，可直接使用
 }
 
 func (c *Counter) Inc() {
@@ -60,22 +60,22 @@ func (c *Counter) Inc() {
     c.mu.Unlock()
 }
 
-// Good: bytes.Buffer works with zero value
+// 好：bytes.Buffer 零值可用
 var buf bytes.Buffer
 buf.WriteString("hello")
 
-// Bad: Requires initialization
+// 坏：需要初始化
 type BadCounter struct {
-    counts map[string]int // nil map will panic
+    counts map[string]int // nil map 会 panic
 }
 ```
 
-### 3. Accept Interfaces, Return Structs
+### 3. 接受接口，返回结构体
 
-Functions should accept interface parameters and return concrete types.
+函数应接受接口参数并返回具体类型。
 
 ```go
-// Good: Accepts interface, returns concrete type
+// 好：接受接口，返回具体类型
 func ProcessData(r io.Reader) (*Result, error) {
     data, err := io.ReadAll(r)
     if err != nil {
@@ -84,18 +84,18 @@ func ProcessData(r io.Reader) (*Result, error) {
     return &Result{Data: data}, nil
 }
 
-// Bad: Returns interface (hides implementation details unnecessarily)
+// 坏：返回接口（不必要地隐藏实现细节）
 func ProcessData(r io.Reader) (io.Reader, error) {
     // ...
 }
 ```
 
-## Error Handling Patterns
+## 错误处理模式
 
-### Error Wrapping with Context
+### 带上下文的错误包装
 
 ```go
-// Good: Wrap errors with context
+// 好：用上下文包装错误
 func LoadConfig(path string) (*Config, error) {
     data, err := os.ReadFile(path)
     if err != nil {
@@ -111,10 +111,10 @@ func LoadConfig(path string) (*Config, error) {
 }
 ```
 
-### Custom Error Types
+### 自定义错误类型
 
 ```go
-// Define domain-specific errors
+// 定义领域特定错误
 type ValidationError struct {
     Field   string
     Message string
@@ -124,7 +124,7 @@ func (e *ValidationError) Error() string {
     return fmt.Sprintf("validation failed on %s: %s", e.Field, e.Message)
 }
 
-// Sentinel errors for common cases
+// 哨兵错误用于常见情况
 var (
     ErrNotFound     = errors.New("resource not found")
     ErrUnauthorized = errors.New("unauthorized")
@@ -132,17 +132,17 @@ var (
 )
 ```
 
-### Error Checking with errors.Is and errors.As
+### 使用 errors.Is 和 errors.As 进行错误检查
 
 ```go
 func HandleError(err error) {
-    // Check for specific error
+    // 检查特定错误
     if errors.Is(err, sql.ErrNoRows) {
         log.Println("No records found")
         return
     }
 
-    // Check for error type
+    // 检查错误类型
     var validationErr *ValidationError
     if errors.As(err, &validationErr) {
         log.Printf("Validation error on field %s: %s",
@@ -150,28 +150,28 @@ func HandleError(err error) {
         return
     }
 
-    // Unknown error
+    // 未知错误
     log.Printf("Unexpected error: %v", err)
 }
 ```
 
-### Never Ignore Errors
+### 绝不忽略错误
 
 ```go
-// Bad: Ignoring error with blank identifier
+// 坏：用空白标识符忽略错误
 result, _ := doSomething()
 
-// Good: Handle or explicitly document why it's safe to ignore
+// 好：处理或明确说明为什么可以安全忽略
 result, err := doSomething()
 if err != nil {
     return err
 }
 
-// Acceptable: When error truly doesn't matter (rare)
-_ = writer.Close() // Best-effort cleanup, error logged elsewhere
+// 可接受：当错误真的不重要时（很少）
+_ = writer.Close() // 尽力清理，错误在其他地方记录
 ```
 
-## Concurrency Patterns
+## 并发模式
 
 ### Worker Pool
 
@@ -194,7 +194,7 @@ func WorkerPool(jobs <-chan Job, results chan<- Result, numWorkers int) {
 }
 ```
 
-### Context for Cancellation and Timeouts
+### Context 用于取消和超时
 
 ```go
 func FetchWithTimeout(ctx context.Context, url string) ([]byte, error) {
@@ -216,7 +216,7 @@ func FetchWithTimeout(ctx context.Context, url string) ([]byte, error) {
 }
 ```
 
-### Graceful Shutdown
+### 优雅关闭
 
 ```go
 func GracefulShutdown(server *http.Server) {
@@ -237,7 +237,7 @@ func GracefulShutdown(server *http.Server) {
 }
 ```
 
-### errgroup for Coordinated Goroutines
+### errgroup 用于协调整 goroutine
 
 ```go
 import "golang.org/x/sync/errgroup"
@@ -247,7 +247,7 @@ func FetchAll(ctx context.Context, urls []string) ([][]byte, error) {
     results := make([][]byte, len(urls))
 
     for i, url := range urls {
-        i, url := i, url // Capture loop variables
+        i, url := i, url // 捕获循环变量
         g.Go(func() error {
             data, err := FetchWithTimeout(ctx, url)
             if err != nil {
@@ -265,22 +265,22 @@ func FetchAll(ctx context.Context, urls []string) ([][]byte, error) {
 }
 ```
 
-### Avoiding Goroutine Leaks
+### 避免 Goroutine 泄漏
 
 ```go
-// Bad: Goroutine leak if context is cancelled
+// 坏：如果 context 被取消则 goroutine 泄漏
 func leakyFetch(ctx context.Context, url string) <-chan []byte {
     ch := make(chan []byte)
     go func() {
         data, _ := fetch(url)
-        ch <- data // Blocks forever if no receiver
+        ch <- data // 如果没有接收者会永远阻塞
     }()
     return ch
 }
 
-// Good: Properly handles cancellation
+// 好：正确处理取消
 func safeFetch(ctx context.Context, url string) <-chan []byte {
-    ch := make(chan []byte, 1) // Buffered channel
+    ch := make(chan []byte, 1) // 有缓冲通道
     go func() {
         data, err := fetch(url)
         if err != nil {
@@ -295,12 +295,12 @@ func safeFetch(ctx context.Context, url string) <-chan []byte {
 }
 ```
 
-## Interface Design
+## 接口设计
 
-### Small, Focused Interfaces
+### 小而专注的接口
 
 ```go
-// Good: Single-method interfaces
+// 好：单方法接口
 type Reader interface {
     Read(p []byte) (n int, err error)
 }
@@ -313,7 +313,7 @@ type Closer interface {
     Close() error
 }
 
-// Compose interfaces as needed
+// 根据需要组合接口
 type ReadWriteCloser interface {
     Reader
     Writer
@@ -321,13 +321,13 @@ type ReadWriteCloser interface {
 }
 ```
 
-### Define Interfaces Where They're Used
+### 在使用处定义接口
 
 ```go
-// In the consumer package, not the provider
+// 在消费者包中，而非提供者
 package service
 
-// UserStore defines what this service needs
+// UserStore 定义此服务需要的内容
 type UserStore interface {
     GetUser(id string) (*User, error)
     SaveUser(user *User) error
@@ -337,11 +337,11 @@ type Service struct {
     store UserStore
 }
 
-// Concrete implementation can be in another package
-// It doesn't need to know about this interface
+// 具体实现可以在另一个包中
+// 它不需要知道这个接口
 ```
 
-### Optional Behavior with Type Assertions
+### 使用类型断言的可选行为
 
 ```go
 type Flusher interface {
@@ -353,7 +353,7 @@ func WriteAndFlush(w io.Writer, data []byte) error {
         return err
     }
 
-    // Flush if supported
+    // 如果支持则 Flush
     if f, ok := w.(Flusher); ok {
         return f.Flush()
     }
@@ -361,55 +361,55 @@ func WriteAndFlush(w io.Writer, data []byte) error {
 }
 ```
 
-## Package Organization
+## 包组织
 
-### Standard Project Layout
+### 标准项目布局
 
 ```text
 myproject/
 ├── cmd/
 │   └── myapp/
-│       └── main.go           # Entry point
+│       └── main.go           # 入口点
 ├── internal/
-│   ├── handler/              # HTTP handlers
-│   ├── service/              # Business logic
-│   ├── repository/           # Data access
-│   └── config/               # Configuration
+│   ├── handler/              # HTTP 处理器
+│   ├── service/              # 业务逻辑
+│   ├── repository/           # 数据访问
+│   └── config/               # 配置
 ├── pkg/
-│   └── client/               # Public API client
+│   └── client/               # 公共 API 客户端
 ├── api/
-│   └── v1/                   # API definitions (proto, OpenAPI)
-├── testdata/                 # Test fixtures
+│   └── v1/                   # API 定义（proto、OpenAPI）
+├── testdata/                 # 测试fixtures
 ├── go.mod
 ├── go.sum
 └── Makefile
 ```
 
-### Package Naming
+### 包命名
 
 ```go
-// Good: Short, lowercase, no underscores
+// 好：短、小写、无下划线
 package http
 package json
 package user
 
-// Bad: Verbose, mixed case, or redundant
+// 坏：冗长、混合大小写或多余
 package httpHandler
 package json_parser
-package userService // Redundant 'Service' suffix
+package userService // 多余的 'Service' 后缀
 ```
 
-### Avoid Package-Level State
+### 避免包级状态
 
 ```go
-// Bad: Global mutable state
+// 坏：全局可变状态
 var db *sql.DB
 
 func init() {
     db, _ = sql.Open("postgres", os.Getenv("DATABASE_URL"))
 }
 
-// Good: Dependency injection
+// 好：依赖注入
 type Server struct {
     db *sql.DB
 }
@@ -419,9 +419,9 @@ func NewServer(db *sql.DB) *Server {
 }
 ```
 
-## Struct Design
+## 结构体设计
 
-### Functional Options Pattern
+### 函数式选项模式
 
 ```go
 type Server struct {
@@ -447,8 +447,8 @@ func WithLogger(l *log.Logger) Option {
 func NewServer(addr string, opts ...Option) *Server {
     s := &Server{
         addr:    addr,
-        timeout: 30 * time.Second, // default
-        logger:  log.Default(),    // default
+        timeout: 30 * time.Second, // 默认
+        logger:  log.Default(),    // 默认
     }
     for _, opt := range opts {
         opt(s)
@@ -456,14 +456,14 @@ func NewServer(addr string, opts ...Option) *Server {
     return s
 }
 
-// Usage
+// 使用
 server := NewServer(":8080",
     WithTimeout(60*time.Second),
     WithLogger(customLogger),
 )
 ```
 
-### Embedding for Composition
+### 通过嵌入组合
 
 ```go
 type Logger struct {
@@ -475,7 +475,7 @@ func (l *Logger) Log(msg string) {
 }
 
 type Server struct {
-    *Logger // Embedding - Server gets Log method
+    *Logger // 嵌入 - Server 获得 Log 方法
     addr    string
 }
 
@@ -486,913 +486,133 @@ func NewServer(addr string) *Server {
     }
 }
 
-// Usage
+// 使用
 s := NewServer(":8080")
-s.Log("Starting...") // Calls embedded Logger.Log
+s.Log("Starting...") // 调用嵌入的 Logger.Log
 ```
 
-## Memory and Performance
+## 内存和性能
 
-### Preallocate Slices When Size is Known
+### 已知大小时预分配切片
 
 ```go
-// Bad: Grows slice multiple times
+// 坏：多次增长切片
 func processItems(items []Item) []Result {
     var results []Result
     for _, item := range items {
-        results = append(results, process(item))
+        results = append(results, transform(item))
     }
     return results
 }
 
-// Good: Single allocation
+// 好：预先分配
 func processItems(items []Item) []Result {
-    results := make([]Result, 0, len(items))
-    for _, item := range items {
-        results = append(results, process(item))
+    results := make([]Result, len(items))
+    for i, item := range items {
+        results[i] = transform(item)
     }
     return results
 }
 ```
 
-### Use sync.Pool for Frequent Allocations
+### 字符串连接
 
 ```go
-var bufferPool = sync.Pool{
-    New: func() interface{} {
-        return new(bytes.Buffer)
-    },
+// 坏：循环中多次分配
+var s string
+for _, item := range items {
+    s += item.Name + ","
 }
 
-func ProcessRequest(data []byte) []byte {
-    buf := bufferPool.Get().(*bytes.Buffer)
-    defer func() {
-        buf.Reset()
-        bufferPool.Put(buf)
-    }()
-
-    buf.Write(data)
-    // Process...
-    return buf.Bytes()
+// 好：使用 strings.Builder
+var b strings.Builder
+for _, item := range items {
+    b.WriteString(item.Name)
+    b.WriteString(",")
 }
+result := b.String()
 ```
 
-### Avoid String Concatenation in Loops
+## 测试模式
+
+### 表驱动测试
 
 ```go
-// Bad: Creates many string allocations
-func join(parts []string) string {
-    var result string
-    for _, p := range parts {
-        result += p + ","
-    }
-    return result
-}
-
-// Good: Single allocation with strings.Builder
-func join(parts []string) string {
-    var sb strings.Builder
-    for i, p := range parts {
-        if i > 0 {
-            sb.WriteString(",")
-        }
-        sb.WriteString(p)
-    }
-    return sb.String()
-}
-
-// Best: Use standard library
-func join(parts []string) string {
-    return strings.Join(parts, ",")
-}
-```
-
-## Go Tooling Integration
-
-### Essential Commands
-
-```bash
-# Build and run
-go build ./...
-go run ./cmd/myapp
-
-# Testing
-go test ./...
-go test -race ./...
-go test -cover ./...
-
-# Static analysis
-go vet ./...
-staticcheck ./...
-golangci-lint run
-
-# Module management
-go mod tidy
-go mod verify
-
-# Formatting
-gofmt -w .
-goimports -w .
-```
-
-### Recommended Linter Configuration (.golangci.yml)
-
-```yaml
-linters:
-  enable:
-    - errcheck
-    - gosimple
-    - govet
-    - ineffassign
-    - staticcheck
-    - unused
-    - gofmt
-    - goimports
-    - misspell
-    - unconvert
-    - unparam
-
-linters-settings:
-  errcheck:
-    check-type-assertions: true
-  govet:
-    check-shadowing: true
-
-issues:
-  exclude-use-default: false
-```
-
-## Quick Reference: Go Idioms
-
-| Idiom | Description |
-|-------|-------------|
-| Accept interfaces, return structs | Functions accept interface params, return concrete types |
-| Errors are values | Treat errors as first-class values, not exceptions |
-| Don't communicate by sharing memory | Use channels for coordination between goroutines |
-| Make the zero value useful | Types should work without explicit initialization |
-| A little copying is better than a little dependency | Avoid unnecessary external dependencies |
-| Clear is better than clever | Prioritize readability over cleverness |
-| gofmt is no one's favorite but everyone's friend | Always format with gofmt/goimports |
-| Return early | Handle errors first, keep happy path unindented |
-
-## Anti-Patterns to Avoid
-
-```go
-// Bad: Naked returns in long functions
-func process() (result int, err error) {
-    // ... 50 lines ...
-    return // What is being returned?
-}
-
-// Bad: Using panic for control flow
-func GetUser(id string) *User {
-    user, err := db.Find(id)
-    if err != nil {
-        panic(err) // Don't do this
-    }
-    return user
-}
-
-// Bad: Passing context in struct
-type Request struct {
-    ctx context.Context // Context should be first param
-    ID  string
-}
-
-// Good: Context as first parameter
-func ProcessRequest(ctx context.Context, id string) error {
-    // ...
-}
-
-// Bad: Mixing value and pointer receivers
-type Counter struct{ n int }
-func (c Counter) Value() int { return c.n }    // Value receiver
-func (c *Counter) Increment() { c.n++ }        // Pointer receiver
-// Pick one style and be consistent
-```
-
-**Remember**: Go code should be boring in the best way - predictable, consistent, and easy to understand. When in doubt, keep it simple.
-
-
----
-
----
-name: golang-testing
-description: Go testing patterns including table-driven tests, subtests, benchmarks, fuzzing, and test coverage. Follows TDD methodology with idiomatic Go practices.
-origin: ECC
----
-
-# Go Testing Patterns
-
-Comprehensive Go testing patterns for writing reliable, maintainable tests following TDD methodology.
-
-## When to Activate
-
-- Writing new Go functions or methods
-- Adding test coverage to existing code
-- Creating benchmarks for performance-critical code
-- Implementing fuzz tests for input validation
-- Following TDD workflow in Go projects
-
-## TDD Workflow for Go
-
-### The RED-GREEN-REFACTOR Cycle
-
-```
-RED     → Write a failing test first
-GREEN   → Write minimal code to pass the test
-REFACTOR → Improve code while keeping tests green
-REPEAT  → Continue with next requirement
-```
-
-### Step-by-Step TDD in Go
-
-```go
-// Step 1: Define the interface/signature
-// calculator.go
-package calculator
-
-func Add(a, b int) int {
-    panic("not implemented") // Placeholder
-}
-
-// Step 2: Write failing test (RED)
-// calculator_test.go
-package calculator
-
-import "testing"
-
-func TestAdd(t *testing.T) {
-    got := Add(2, 3)
-    want := 5
-    if got != want {
-        t.Errorf("Add(2, 3) = %d; want %d", got, want)
-    }
-}
-
-// Step 3: Run test - verify FAIL
-// $ go test
-// --- FAIL: TestAdd (0.00s)
-// panic: not implemented
-
-// Step 4: Implement minimal code (GREEN)
-func Add(a, b int) int {
-    return a + b
-}
-
-// Step 5: Run test - verify PASS
-// $ go test
-// PASS
-
-// Step 6: Refactor if needed, verify tests still pass
-```
-
-## Table-Driven Tests
-
-The standard pattern for Go tests. Enables comprehensive coverage with minimal code.
-
-```go
-func TestAdd(t *testing.T) {
-    tests := []struct {
-        name     string
-        a, b     int
-        expected int
-    }{
-        {"positive numbers", 2, 3, 5},
-        {"negative numbers", -1, -2, -3},
-        {"zero values", 0, 0, 0},
-        {"mixed signs", -1, 1, 0},
-        {"large numbers", 1000000, 2000000, 3000000},
-    }
-
-    for _, tt := range tests {
-        t.Run(tt.name, func(t *testing.T) {
-            got := Add(tt.a, tt.b)
-            if got != tt.expected {
-                t.Errorf("Add(%d, %d) = %d; want %d",
-                    tt.a, tt.b, got, tt.expected)
-            }
-        })
-    }
-}
-```
-
-### Table-Driven Tests with Error Cases
-
-```go
-func TestParseConfig(t *testing.T) {
-    tests := []struct {
-        name    string
-        input   string
-        want    *Config
-        wantErr bool
-    }{
-        {
-            name:  "valid config",
-            input: `{"host": "localhost", "port": 8080}`,
-            want:  &Config{Host: "localhost", Port: 8080},
-        },
-        {
-            name:    "invalid JSON",
-            input:   `{invalid}`,
-            wantErr: true,
-        },
-        {
-            name:    "empty input",
-            input:   "",
-            wantErr: true,
-        },
-        {
-            name:  "minimal config",
-            input: `{}`,
-            want:  &Config{}, // Zero value config
-        },
-    }
-
-    for _, tt := range tests {
-        t.Run(tt.name, func(t *testing.T) {
-            got, err := ParseConfig(tt.input)
-
-            if tt.wantErr {
-                if err == nil {
-                    t.Error("expected error, got nil")
-                }
-                return
-            }
-
-            if err != nil {
-                t.Fatalf("unexpected error: %v", err)
-            }
-
-            if !reflect.DeepEqual(got, tt.want) {
-                t.Errorf("got %+v; want %+v", got, tt.want)
-            }
-        })
-    }
-}
-```
-
-## Subtests and Sub-benchmarks
-
-### Organizing Related Tests
-
-```go
-func TestUser(t *testing.T) {
-    // Setup shared by all subtests
-    db := setupTestDB(t)
-
-    t.Run("Create", func(t *testing.T) {
-        user := &User{Name: "Alice"}
-        err := db.CreateUser(user)
-        if err != nil {
-            t.Fatalf("CreateUser failed: %v", err)
-        }
-        if user.ID == "" {
-            t.Error("expected user ID to be set")
-        }
-    })
-
-    t.Run("Get", func(t *testing.T) {
-        user, err := db.GetUser("alice-id")
-        if err != nil {
-            t.Fatalf("GetUser failed: %v", err)
-        }
-        if user.Name != "Alice" {
-            t.Errorf("got name %q; want %q", user.Name, "Alice")
-        }
-    })
-
-    t.Run("Update", func(t *testing.T) {
-        // ...
-    })
-
-    t.Run("Delete", func(t *testing.T) {
-        // ...
-    })
-}
-```
-
-### Parallel Subtests
-
-```go
-func TestParallel(t *testing.T) {
+func TestFactorial(t *testing.T) {
     tests := []struct {
         name  string
-        input string
+        input int
+        want  int
     }{
-        {"case1", "input1"},
-        {"case2", "input2"},
-        {"case3", "input3"},
-    }
-
-    for _, tt := range tests {
-        tt := tt // Capture range variable
-        t.Run(tt.name, func(t *testing.T) {
-            t.Parallel() // Run subtests in parallel
-            result := Process(tt.input)
-            // assertions...
-            _ = result
-        })
-    }
-}
-```
-
-## Test Helpers
-
-### Helper Functions
-
-```go
-func setupTestDB(t *testing.T) *sql.DB {
-    t.Helper() // Marks this as a helper function
-
-    db, err := sql.Open("sqlite3", ":memory:")
-    if err != nil {
-        t.Fatalf("failed to open database: %v", err)
-    }
-
-    // Cleanup when test finishes
-    t.Cleanup(func() {
-        db.Close()
-    })
-
-    // Run migrations
-    if _, err := db.Exec(schema); err != nil {
-        t.Fatalf("failed to create schema: %v", err)
-    }
-
-    return db
-}
-
-func assertNoError(t *testing.T, err error) {
-    t.Helper()
-    if err != nil {
-        t.Fatalf("unexpected error: %v", err)
-    }
-}
-
-func assertEqual[T comparable](t *testing.T, got, want T) {
-    t.Helper()
-    if got != want {
-        t.Errorf("got %v; want %v", got, want)
-    }
-}
-```
-
-### Temporary Files and Directories
-
-```go
-func TestFileProcessing(t *testing.T) {
-    // Create temp directory - automatically cleaned up
-    tmpDir := t.TempDir()
-
-    // Create test file
-    testFile := filepath.Join(tmpDir, "test.txt")
-    err := os.WriteFile(testFile, []byte("test content"), 0644)
-    if err != nil {
-        t.Fatalf("failed to create test file: %v", err)
-    }
-
-    // Run test
-    result, err := ProcessFile(testFile)
-    if err != nil {
-        t.Fatalf("ProcessFile failed: %v", err)
-    }
-
-    // Assert...
-    _ = result
-}
-```
-
-## Golden Files
-
-Testing against expected output files stored in `testdata/`.
-
-```go
-var update = flag.Bool("update", false, "update golden files")
-
-func TestRender(t *testing.T) {
-    tests := []struct {
-        name  string
-        input Template
-    }{
-        {"simple", Template{Name: "test"}},
-        {"complex", Template{Name: "test", Items: []string{"a", "b"}}},
+        {"zero", 0, 1},
+        {"one", 1, 1},
+        {"five", 5, 120},
+        {"negative", -1, 0},
     }
 
     for _, tt := range tests {
         t.Run(tt.name, func(t *testing.T) {
-            got := Render(tt.input)
-
-            golden := filepath.Join("testdata", tt.name+".golden")
-
-            if *update {
-                // Update golden file: go test -update
-                err := os.WriteFile(golden, got, 0644)
-                if err != nil {
-                    t.Fatalf("failed to update golden file: %v", err)
-                }
-            }
-
-            want, err := os.ReadFile(golden)
-            if err != nil {
-                t.Fatalf("failed to read golden file: %v", err)
-            }
-
-            if !bytes.Equal(got, want) {
-                t.Errorf("output mismatch:\ngot:\n%s\nwant:\n%s", got, want)
+            got := Factorial(tt.input)
+            if got != tt.want {
+                t.Errorf("Factorial(%d) = %d; want %d", tt.input, got, tt.want)
             }
         })
     }
 }
 ```
 
-## Mocking with Interfaces
-
-### Interface-Based Mocking
+### 使用 httptest 测试 HTTP 处理程序
 
 ```go
-// Define interface for dependencies
-type UserRepository interface {
-    GetUser(id string) (*User, error)
-    SaveUser(user *User) error
-}
-
-// Production implementation
-type PostgresUserRepository struct {
-    db *sql.DB
-}
-
-func (r *PostgresUserRepository) GetUser(id string) (*User, error) {
-    // Real database query
-}
-
-// Mock implementation for tests
-type MockUserRepository struct {
-    GetUserFunc  func(id string) (*User, error)
-    SaveUserFunc func(user *User) error
-}
-
-func (m *MockUserRepository) GetUser(id string) (*User, error) {
-    return m.GetUserFunc(id)
-}
-
-func (m *MockUserRepository) SaveUser(user *User) error {
-    return m.SaveUserFunc(user)
-}
-
-// Test using mock
-func TestUserService(t *testing.T) {
-    mock := &MockUserRepository{
-        GetUserFunc: func(id string) (*User, error) {
-            if id == "123" {
-                return &User{ID: "123", Name: "Alice"}, nil
-            }
-            return nil, ErrNotFound
-        },
-    }
-
-    service := NewUserService(mock)
-
-    user, err := service.GetUserProfile("123")
-    if err != nil {
-        t.Fatalf("unexpected error: %v", err)
-    }
-    if user.Name != "Alice" {
-        t.Errorf("got name %q; want %q", user.Name, "Alice")
-    }
-}
-```
-
-## Benchmarks
-
-### Basic Benchmarks
-
-```go
-func BenchmarkProcess(b *testing.B) {
-    data := generateTestData(1000)
-    b.ResetTimer() // Don't count setup time
-
-    for i := 0; i < b.N; i++ {
-        Process(data)
-    }
-}
-
-// Run: go test -bench=BenchmarkProcess -benchmem
-// Output: BenchmarkProcess-8   10000   105234 ns/op   4096 B/op   10 allocs/op
-```
-
-### Benchmark with Different Sizes
-
-```go
-func BenchmarkSort(b *testing.B) {
-    sizes := []int{100, 1000, 10000, 100000}
-
-    for _, size := range sizes {
-        b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
-            data := generateRandomSlice(size)
-            b.ResetTimer()
-
-            for i := 0; i < b.N; i++ {
-                // Make a copy to avoid sorting already sorted data
-                tmp := make([]int, len(data))
-                copy(tmp, data)
-                sort.Ints(tmp)
-            }
-        })
-    }
-}
-```
-
-### Memory Allocation Benchmarks
-
-```go
-func BenchmarkStringConcat(b *testing.B) {
-    parts := []string{"hello", "world", "foo", "bar", "baz"}
-
-    b.Run("plus", func(b *testing.B) {
-        for i := 0; i < b.N; i++ {
-            var s string
-            for _, p := range parts {
-                s += p
-            }
-            _ = s
-        }
+func TestHealthEndpoint(t *testing.T) {
+    handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.WriteHeader(http.StatusOK)
+        json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
     })
 
-    b.Run("builder", func(b *testing.B) {
-        for i := 0; i < b.N; i++ {
-            var sb strings.Builder
-            for _, p := range parts {
-                sb.WriteString(p)
-            }
-            _ = sb.String()
-        }
-    })
+    req := httptest.NewRequest("GET", "/health", nil)
+    rr := httptest.NewRecorder()
+    handler.ServeHTTP(rr, req)
 
-    b.Run("join", func(b *testing.B) {
-        for i := 0; i < b.N; i++ {
-            _ = strings.Join(parts, "")
-        }
-    })
-}
-```
-
-## Fuzzing (Go 1.18+)
-
-### Basic Fuzz Test
-
-```go
-func FuzzParseJSON(f *testing.F) {
-    // Add seed corpus
-    f.Add(`{"name": "test"}`)
-    f.Add(`{"count": 123}`)
-    f.Add(`[]`)
-    f.Add(`""`)
-
-    f.Fuzz(func(t *testing.T, input string) {
-        var result map[string]interface{}
-        err := json.Unmarshal([]byte(input), &result)
-
-        if err != nil {
-            // Invalid JSON is expected for random input
-            return
-        }
-
-        // If parsing succeeded, re-encoding should work
-        _, err = json.Marshal(result)
-        if err != nil {
-            t.Errorf("Marshal failed after successful Unmarshal: %v", err)
-        }
-    })
-}
-
-// Run: go test -fuzz=FuzzParseJSON -fuzztime=30s
-```
-
-### Fuzz Test with Multiple Inputs
-
-```go
-func FuzzCompare(f *testing.F) {
-    f.Add("hello", "world")
-    f.Add("", "")
-    f.Add("abc", "abc")
-
-    f.Fuzz(func(t *testing.T, a, b string) {
-        result := Compare(a, b)
-
-        // Property: Compare(a, a) should always equal 0
-        if a == b && result != 0 {
-            t.Errorf("Compare(%q, %q) = %d; want 0", a, b, result)
-        }
-
-        // Property: Compare(a, b) and Compare(b, a) should have opposite signs
-        reverse := Compare(b, a)
-        if (result > 0 && reverse >= 0) || (result < 0 && reverse <= 0) {
-            if result != 0 || reverse != 0 {
-                t.Errorf("Compare(%q, %q) = %d, Compare(%q, %q) = %d; inconsistent",
-                    a, b, result, b, a, reverse)
-            }
-        }
-    })
-}
-```
-
-## Test Coverage
-
-### Running Coverage
-
-```bash
-# Basic coverage
-go test -cover ./...
-
-# Generate coverage profile
-go test -coverprofile=coverage.out ./...
-
-# View coverage in browser
-go tool cover -html=coverage.out
-
-# View coverage by function
-go tool cover -func=coverage.out
-
-# Coverage with race detection
-go test -race -coverprofile=coverage.out ./...
-```
-
-### Coverage Targets
-
-| Code Type | Target |
-|-----------|--------|
-| Critical business logic | 100% |
-| Public APIs | 90%+ |
-| General code | 80%+ |
-| Generated code | Exclude |
-
-### Excluding Generated Code from Coverage
-
-```go
-//go:generate mockgen -source=interface.go -destination=mock_interface.go
-
-// In coverage profile, exclude with build tags:
-// go test -cover -tags=!generate ./...
-```
-
-## HTTP Handler Testing
-
-```go
-func TestHealthHandler(t *testing.T) {
-    // Create request
-    req := httptest.NewRequest(http.MethodGet, "/health", nil)
-    w := httptest.NewRecorder()
-
-    // Call handler
-    HealthHandler(w, req)
-
-    // Check response
-    resp := w.Result()
-    defer resp.Body.Close()
-
-    if resp.StatusCode != http.StatusOK {
-        t.Errorf("got status %d; want %d", resp.StatusCode, http.StatusOK)
-    }
-
-    body, _ := io.ReadAll(resp.Body)
-    if string(body) != "OK" {
-        t.Errorf("got body %q; want %q", body, "OK")
-    }
-}
-
-func TestAPIHandler(t *testing.T) {
-    tests := []struct {
-        name       string
-        method     string
-        path       string
-        body       string
-        wantStatus int
-        wantBody   string
-    }{
-        {
-            name:       "get user",
-            method:     http.MethodGet,
-            path:       "/users/123",
-            wantStatus: http.StatusOK,
-            wantBody:   `{"id":"123","name":"Alice"}`,
-        },
-        {
-            name:       "not found",
-            method:     http.MethodGet,
-            path:       "/users/999",
-            wantStatus: http.StatusNotFound,
-        },
-        {
-            name:       "create user",
-            method:     http.MethodPost,
-            path:       "/users",
-            body:       `{"name":"Bob"}`,
-            wantStatus: http.StatusCreated,
-        },
-    }
-
-    handler := NewAPIHandler()
-
-    for _, tt := range tests {
-        t.Run(tt.name, func(t *testing.T) {
-            var body io.Reader
-            if tt.body != "" {
-                body = strings.NewReader(tt.body)
-            }
-
-            req := httptest.NewRequest(tt.method, tt.path, body)
-            req.Header.Set("Content-Type", "application/json")
-            w := httptest.NewRecorder()
-
-            handler.ServeHTTP(w, req)
-
-            if w.Code != tt.wantStatus {
-                t.Errorf("got status %d; want %d", w.Code, tt.wantStatus)
-            }
-
-            if tt.wantBody != "" && w.Body.String() != tt.wantBody {
-                t.Errorf("got body %q; want %q", w.Body.String(), tt.wantBody)
-            }
-        })
+    if rr.Code != http.StatusOK {
+        t.Errorf("expected status 200, got %d", rr.Code)
     }
 }
 ```
 
-## Testing Commands
+### 模拟接口
 
-```bash
-# Run all tests
-go test ./...
+```go
+type MockUserStore struct {
+    users map[string]*User
+}
 
-# Run tests with verbose output
-go test -v ./...
+func (m *MockUserStore) GetUser(id string) (*User, error) {
+    if user, ok := m.users[id]; ok {
+        return user, nil
+    }
+    return nil, ErrNotFound
+}
 
-# Run specific test
-go test -run TestAdd ./...
+func (m *MockUserStore) SaveUser(user *User) error {
+    m.users[user.ID] = user
+    return nil
+}
 
-# Run tests matching pattern
-go test -run "TestUser/Create" ./...
-
-# Run tests with race detector
-go test -race ./...
-
-# Run tests with coverage
-go test -cover -coverprofile=coverage.out ./...
-
-# Run short tests only
-go test -short ./...
-
-# Run tests with timeout
-go test -timeout 30s ./...
-
-# Run benchmarks
-go test -bench=. -benchmem ./...
-
-# Run fuzzing
-go test -fuzz=FuzzParse -fuzztime=30s ./...
-
-# Count test runs (for flaky test detection)
-go test -count=10 ./...
+// 使用
+store := &MockUserStore{users: make(map[string]*User)}
+service := NewUserService(store)
 ```
 
-## Best Practices
+## 最佳实践总结
 
-**DO:**
-- Write tests FIRST (TDD)
-- Use table-driven tests for comprehensive coverage
-- Test behavior, not implementation
-- Use `t.Helper()` in helper functions
-- Use `t.Parallel()` for independent tests
-- Clean up resources with `t.Cleanup()`
-- Use meaningful test names that describe the scenario
-
-**DON'T:**
-- Test private functions directly (test through public API)
-- Use `time.Sleep()` in tests (use channels or conditions)
-- Ignore flaky tests (fix or remove them)
-- Mock everything (prefer integration tests when possible)
-- Skip error path testing
-
-## Integration with CI/CD
-
-```yaml
-# GitHub Actions example
-test:
-  runs-on: ubuntu-latest
-  steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-go@v5
-      with:
-        go-version: '1.22'
-
-    - name: Run tests
-      run: go test -race -coverprofile=coverage.out ./...
-
-    - name: Check coverage
-      run: |
-        go tool cover -func=coverage.out | grep total | awk '{print $3}' | \
-        awk -F'%' '{if ($1 < 80) exit 1}'
-```
-
-**Remember**: Tests are documentation. They show how your code is meant to be used. Write them clearly and keep them up to date.
+1. 简单胜于巧妙
+2. 错误处理始终要显式
+3. 优先组合而非继承
+4. 保持接口小
+5. 依赖注入而非全局状态
+6. 文档化公共 API
+7. 写表驱动测试
+8. 避免goroutine泄漏
+9. 使用 context 进行取消
+10. 优先使用标准库

@@ -1,72 +1,72 @@
 ---
 name: postgres-patterns
-description: PostgreSQL database patterns for query optimization, schema design, indexing, and security. Based on Supabase best practices.
+description: PostgreSQL 数据库模式，涵盖查询优化、schema 设计、索引和安全。基于 Supabase 最佳实践。
 origin: ECC
 ---
 
-# PostgreSQL Patterns
+# PostgreSQL 模式
 
-Quick reference for PostgreSQL best practices. For detailed guidance, use the `database-reviewer` agent.
+PostgreSQL 最佳实践快速参考。详细指导，使用 `database-reviewer` 智能体。
 
-## When to Activate
+## 激活时机
 
-- Writing SQL queries or migrations
-- Designing database schemas
-- Troubleshooting slow queries
-- Implementing Row Level Security
-- Setting up connection pooling
+- 编写 SQL 查询或迁移
+- 设计数据库 schema
+- 排查慢查询
+- 实现行级安全
+- 设置连接池
 
-## Quick Reference
+## 快速参考
 
-### Index Cheat Sheet
+### 索引速查表
 
-| Query Pattern | Index Type | Example |
+| 查询模式 | 索引类型 | 示例 |
 |--------------|------------|---------|
-| `WHERE col = value` | B-tree (default) | `CREATE INDEX idx ON t (col)` |
+| `WHERE col = value` | B-tree (默认) | `CREATE INDEX idx ON t (col)` |
 | `WHERE col > value` | B-tree | `CREATE INDEX idx ON t (col)` |
-| `WHERE a = x AND b > y` | Composite | `CREATE INDEX idx ON t (a, b)` |
+| `WHERE a = x AND b > y` | 复合索引 | `CREATE INDEX idx ON t (a, b)` |
 | `WHERE jsonb @> '{}'` | GIN | `CREATE INDEX idx ON t USING gin (col)` |
 | `WHERE tsv @@ query` | GIN | `CREATE INDEX idx ON t USING gin (col)` |
-| Time-series ranges | BRIN | `CREATE INDEX idx ON t USING brin (col)` |
+| 时间序列范围 | BRIN | `CREATE INDEX idx ON t USING brin (col)` |
 
-### Data Type Quick Reference
+### 数据类型快速参考
 
-| Use Case | Correct Type | Avoid |
+| 使用场景 | 正确类型 | 避免 |
 |----------|-------------|-------|
-| IDs | `bigint` | `int`, random UUID |
-| Strings | `text` | `varchar(255)` |
-| Timestamps | `timestamptz` | `timestamp` |
-| Money | `numeric(10,2)` | `float` |
-| Flags | `boolean` | `varchar`, `int` |
+| ID | `bigint` | `int`、随机 UUID |
+| 字符串 | `text` | `varchar(255)` |
+| 时间戳 | `timestamptz` | `timestamp` |
+| 金额 | `numeric(10,2)` | `float` |
+| 标志 | `boolean` | `varchar`、`int` |
 
-### Common Patterns
+### 常见模式
 
-**Composite Index Order:**
+**复合索引顺序：**
 ```sql
--- Equality columns first, then range columns
+-- 先等值列，再范围列
 CREATE INDEX idx ON orders (status, created_at);
--- Works for: WHERE status = 'pending' AND created_at > '2024-01-01'
+-- 适用于: WHERE status = 'pending' AND created_at > '2024-01-01'
 ```
 
-**Covering Index:**
+**覆盖索引：**
 ```sql
 CREATE INDEX idx ON users (email) INCLUDE (name, created_at);
--- Avoids table lookup for SELECT email, name, created_at
+-- 避免 SELECT email, name, created_at 的表查找
 ```
 
-**Partial Index:**
+**部分索引：**
 ```sql
 CREATE INDEX idx ON users (email) WHERE deleted_at IS NULL;
--- Smaller index, only includes active users
+-- 更小的索引，仅包含活跃用户
 ```
 
-**RLS Policy (Optimized):**
+**RLS 策略（优化）：**
 ```sql
 CREATE POLICY policy ON orders
-  USING ((SELECT auth.uid()) = user_id);  -- Wrap in SELECT!
+  USING ((SELECT auth.uid()) = user_id);  -- 用 SELECT 包装！
 ```
 
-**UPSERT:**
+**UPSERT：**
 ```sql
 INSERT INTO settings (user_id, key, value)
 VALUES (123, 'theme', 'dark')
@@ -74,13 +74,13 @@ ON CONFLICT (user_id, key)
 DO UPDATE SET value = EXCLUDED.value;
 ```
 
-**Cursor Pagination:**
+**游标分页：**
 ```sql
 SELECT * FROM products WHERE id > $last_id ORDER BY id LIMIT 20;
--- O(1) vs OFFSET which is O(n)
+-- O(1) vs OFFSET 的 O(n)
 ```
 
-**Queue Processing:**
+**队列处理：**
 ```sql
 UPDATE jobs SET status = 'processing'
 WHERE id = (
@@ -90,10 +90,10 @@ WHERE id = (
 ) RETURNING *;
 ```
 
-### Anti-Pattern Detection
+### 反模式检测
 
 ```sql
--- Find unindexed foreign keys
+-- 查找未索引的外键
 SELECT conrelid::regclass, a.attname
 FROM pg_constraint c
 JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
@@ -103,156 +103,155 @@ WHERE c.contype = 'f'
     WHERE i.indrelid = c.conrelid AND a.attnum = ANY(i.indkey)
   );
 
--- Find slow queries
+-- 查找慢查询
 SELECT query, mean_exec_time, calls
 FROM pg_stat_statements
 WHERE mean_exec_time > 100
 ORDER BY mean_exec_time DESC;
 
--- Check table bloat
+-- 检查表膨胀
 SELECT relname, n_dead_tup, last_vacuum
 FROM pg_stat_user_tables
 WHERE n_dead_tup > 1000
 ORDER BY n_dead_tup DESC;
 ```
 
-### Configuration Template
+### 配置模板
 
 ```sql
--- Connection limits (adjust for RAM)
+-- 连接限制（根据 RAM 调整）
 ALTER SYSTEM SET max_connections = 100;
 ALTER SYSTEM SET work_mem = '8MB';
 
--- Timeouts
+-- 超时
 ALTER SYSTEM SET idle_in_transaction_session_timeout = '30s';
 ALTER SYSTEM SET statement_timeout = '30s';
 
--- Monitoring
+-- 监控
 CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
 
--- Security defaults
+-- 安全默认值
 REVOKE ALL ON SCHEMA public FROM public;
 
 SELECT pg_reload_conf();
 ```
 
-## Related
+## 相关
 
-- Agent: `database-reviewer` - Full database review workflow
-- Skill: `clickhouse-io` - ClickHouse analytics patterns
-- Skill: `backend-patterns` - API and backend patterns
+- 智能体：`database-reviewer` — 完整数据库审查工作流
+- 技能：`clickhouse-io` — ClickHouse 分析模式
+- 技能：`backend-patterns` — API 和后端模式
 
 ---
 
-*Based on Supabase Agent Skills (credit: Supabase team) (MIT License)*
-
+*基于 Supabase Agent Skills（来源：Supabase 团队）（MIT License）*
 
 ---
 
 ---
 name: database-migrations
-description: Database migration best practices for schema changes, data migrations, rollbacks, and zero-downtime deployments across PostgreSQL, MySQL, and common ORMs (Prisma, Drizzle, Kysely, Django, TypeORM, golang-migrate).
+description: 数据库迁移最佳实践，涵盖 schema 变更、数据迁移、回滚和跨 PostgreSQL、MySQL 及常见 ORM（Prisma、Drizzle、Kysely、Django、TypeORM、golang-migrate）的零停机部署。
 origin: ECC
 ---
 
-# Database Migration Patterns
+# 数据库迁移模式
 
-Safe, reversible database schema changes for production systems.
+生产系统的安全、可逆数据库 schema 变更。
 
-## When to Activate
+## 激活时机
 
-- Creating or altering database tables
-- Adding/removing columns or indexes
-- Running data migrations (backfill, transform)
-- Planning zero-downtime schema changes
-- Setting up migration tooling for a new project
+- 创建或修改数据库表
+- 添加/删除列或索引
+- 运行数据迁移（回填、转换）
+- 规划零停机 schema 变更
+- 为新项目设置迁移工具
 
-## Core Principles
+## 核心原则
 
-1. **Every change is a migration** — never alter production databases manually
-2. **Migrations are forward-only in production** — rollbacks use new forward migrations
-3. **Schema and data migrations are separate** — never mix DDL and DML in one migration
-4. **Test migrations against production-sized data** — a migration that works on 100 rows may lock on 10M
-5. **Migrations are immutable once deployed** — never edit a migration that has run in production
+1. **每个变更都是迁移** — 绝不手动修改生产数据库
+2. **生产中迁移仅向前** — 回滚使用新的前向迁移
+3. **schema 和数据迁移分离** — 绝不混合 DDL 和 DML
+4. **根据生产规模数据测试迁移** — 在 100 行上工作的迁移在 10M 行上可能锁定
+5. **迁移一旦部署就不可变** — 绝不编辑已在生产中运行的迁移
 
-## Migration Safety Checklist
+## 迁移安全检查清单
 
-Before applying any migration:
+应用任何迁移前：
 
-- [ ] Migration has both UP and DOWN (or is explicitly marked irreversible)
-- [ ] No full table locks on large tables (use concurrent operations)
-- [ ] New columns have defaults or are nullable (never add NOT NULL without default)
-- [ ] Indexes created concurrently (not inline with CREATE TABLE for existing tables)
-- [ ] Data backfill is a separate migration from schema change
-- [ ] Tested against a copy of production data
-- [ ] Rollback plan documented
+- [ ] 迁移有 UP 和 DOWN（或明确标记为不可逆）
+- [ ] 大表上无全表锁（使用并发操作）
+- [ ] 新列有默认值或可空（绝不添加无默认值的 NOT NULL）
+- [ ] 索引并发创建（现有表的 CREATE TABLE 内联不行）
+- [ ] 数据回填与 schema 变更分离
+- [ ] 根据生产数据副本测试
+- [ ] 回滚计划已记录
 
-## PostgreSQL Patterns
+## PostgreSQL 模式
 
-### Adding a Column Safely
+### 安全添加列
 
 ```sql
--- GOOD: Nullable column, no lock
+-- 好：可空列，无锁
 ALTER TABLE users ADD COLUMN avatar_url TEXT;
 
--- GOOD: Column with default (Postgres 11+ is instant, no rewrite)
+-- 好：有默认值的列（Postgres 11+ 是即时的，无需重写）
 ALTER TABLE users ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT true;
 
--- BAD: NOT NULL without default on existing table (requires full rewrite)
+-- 坏：现有表上无默认值的 NOT NULL（需要完全重写）
 ALTER TABLE users ADD COLUMN role TEXT NOT NULL;
--- This locks the table and rewrites every row
+-- 这会锁定表并重写每一行
 ```
 
-### Adding an Index Without Downtime
+### 无停机添加索引
 
 ```sql
--- BAD: Blocks writes on large tables
+-- 坏：大表上阻塞写入
 CREATE INDEX idx_users_email ON users (email);
 
--- GOOD: Non-blocking, allows concurrent writes
+-- 好：非阻塞，允许并发写入
 CREATE INDEX CONCURRENTLY idx_users_email ON users (email);
 
--- Note: CONCURRENTLY cannot run inside a transaction block
--- Most migration tools need special handling for this
+-- 注意：CONCURRENTLY 不能在事务块内运行
+-- 大多数迁移工具需要特殊处理
 ```
 
-### Renaming a Column (Zero-Downtime)
+### 重命名列（零停机）
 
-Never rename directly in production. Use the expand-contract pattern:
+绝不直接在生产中重命名。使用扩展-收缩模式：
 
 ```sql
--- Step 1: Add new column (migration 001)
+-- 步骤 1：添加新列（迁移 001）
 ALTER TABLE users ADD COLUMN display_name TEXT;
 
--- Step 2: Backfill data (migration 002, data migration)
+-- 步骤 2：回填数据（迁移 002，数据迁移）
 UPDATE users SET display_name = username WHERE display_name IS NULL;
 
--- Step 3: Update application code to read/write both columns
--- Deploy application changes
+-- 步骤 3：更新应用程序代码读写两列
+-- 部署应用程序变更
 
--- Step 4: Stop writing to old column, drop it (migration 003)
+-- 步骤 4：停止写入旧列，删除它（迁移 003）
 ALTER TABLE users DROP COLUMN username;
 ```
 
-### Removing a Column Safely
+### 安全删除列
 
 ```sql
--- Step 1: Remove all application references to the column
--- Step 2: Deploy application without the column reference
--- Step 3: Drop column in next migration
+-- 步骤 1：移除所有对列的应用程序引用
+-- 步骤 2：部署不带列引用的应用程序
+-- 步骤 3：在下一个迁移中删除列
 ALTER TABLE orders DROP COLUMN legacy_status;
 
--- For Django: use SeparateDatabaseAndState to remove from model
--- without generating DROP COLUMN (then drop in next migration)
+-- 对于 Django：使用 SeparateDatabaseAndState 从模型中移除
+-- 而不生成 DROP COLUMN（然后在下一个迁移中删除）
 ```
 
-### Large Data Migrations
+### 大数据迁移
 
 ```sql
--- BAD: Updates all rows in one transaction (locks table)
+-- 坏：单事务更新所有行（锁定表）
 UPDATE users SET normalized_email = LOWER(email);
 
--- GOOD: Batch update with progress
+-- 好：批量更新带进度
 DO $$
 DECLARE
   batch_size INT := 10000;
@@ -275,25 +274,25 @@ BEGIN
 END $$;
 ```
 
-## Prisma (TypeScript/Node.js)
+## Prisma（TypeScript/Node.js）
 
-### Workflow
+### 工作流
 
 ```bash
-# Create migration from schema changes
+# 从 schema 变更创建迁移
 npx prisma migrate dev --name add_user_avatar
 
-# Apply pending migrations in production
+# 在生产中应用待处理迁移
 npx prisma migrate deploy
 
-# Reset database (dev only)
+# 重置数据库（仅开发）
 npx prisma migrate reset
 
-# Generate client after schema changes
+# schema 变更后生成客户端
 npx prisma generate
 ```
 
-### Schema Example
+### Schema 示例
 
 ```prisma
 model User {
@@ -310,37 +309,37 @@ model User {
 }
 ```
 
-### Custom SQL Migration
+### 自定义 SQL 迁移
 
-For operations Prisma cannot express (concurrent indexes, data backfills):
+对于 Prisma 无法表达的操作（并发索引、数据回填）：
 
 ```bash
-# Create empty migration, then edit the SQL manually
+# 创建空迁移，然后手动编辑 SQL
 npx prisma migrate dev --create-only --name add_email_index
 ```
 
 ```sql
 -- migrations/20240115_add_email_index/migration.sql
--- Prisma cannot generate CONCURRENTLY, so we write it manually
+-- Prisma 无法生成 CONCURRENTLY，所以我们手动编写
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_users_email ON users (email);
 ```
 
-## Drizzle (TypeScript/Node.js)
+## Drizzle（TypeScript/Node.js）
 
-### Workflow
+### 工作流
 
 ```bash
-# Generate migration from schema changes
+# 从 schema 变更生成迁移
 npx drizzle-kit generate
 
-# Apply migrations
+# 应用迁移
 npx drizzle-kit migrate
 
-# Push schema directly (dev only, no migration file)
+# 直接推送 schema（仅开发，无迁移文件）
 npx drizzle-kit push
 ```
 
-### Schema Example
+### Schema 示例
 
 ```typescript
 import { pgTable, text, timestamp, uuid, boolean } from "drizzle-orm/pg-core";
@@ -355,35 +354,35 @@ export const users = pgTable("users", {
 });
 ```
 
-## Kysely (TypeScript/Node.js)
+## Kysely（TypeScript/Node.js）
 
-### Workflow (kysely-ctl)
+### 工作流（kysely-ctl）
 
 ```bash
-# Initialize config file (kysely.config.ts)
+# 初始化配置文件（kysely.config.ts）
 kysely init
 
-# Create a new migration file
+# 创建新迁移文件
 kysely migrate make add_user_avatar
 
-# Apply all pending migrations
+# 应用所有待处理迁移
 kysely migrate latest
 
-# Rollback last migration
+# 回滚最后迁移
 kysely migrate down
 
-# Show migration status
+# 显示迁移状态
 kysely migrate list
 ```
 
-### Migration File
+### 迁移文件
 
 ```typescript
 // migrations/2024_01_15_001_create_user_profile.ts
 import { type Kysely, sql } from 'kysely'
 
-// IMPORTANT: Always use Kysely<any>, not your typed DB interface.
-// Migrations are frozen in time and must not depend on current schema types.
+// 重要：始终使用 Kysely<any>，而非你类型化的 DB 接口。
+// 迁移是时间冻结的，绝不能依赖当前 schema 类型。
 export async function up(db: Kysely<any>): Promise<void> {
   await db.schema
     .createTable('user_profile')
@@ -407,20 +406,20 @@ export async function down(db: Kysely<any>): Promise<void> {
 }
 ```
 
-### Programmatic Migrator
+### 程序化迁移器
 
 ```typescript
 import { Migrator, FileMigrationProvider } from 'kysely'
 import { promises as fs } from 'fs'
 import * as path from 'path'
-// ESM only — CJS can use __dirname directly
+// 仅 ESM — CJS 可直接使用 __dirname
 import { fileURLToPath } from 'url'
 const migrationFolder = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
   './migrations',
 )
 
-// `db` is your Kysely<any> database instance
+// `db` 是你的 Kysely<any> 数据库实例
 const migrator = new Migrator({
   db,
   provider: new FileMigrationProvider({
@@ -428,8 +427,8 @@ const migrator = new Migrator({
     path,
     migrationFolder,
   }),
-  // WARNING: Only enable in development. Disables timestamp-ordering
-  // validation, which can cause schema drift between environments.
+  // 警告：仅在开发中启用。禁用时间戳排序验证，
+  // 这可能导致环境之间的 schema 漂移。
   // allowUnorderedMigrations: true,
 })
 
@@ -449,25 +448,25 @@ if (error) {
 }
 ```
 
-## Django (Python)
+## Django（Python）
 
-### Workflow
+### 工作流
 
 ```bash
-# Generate migration from model changes
+# 从模型变更生成迁移
 python manage.py makemigrations
 
-# Apply migrations
+# 应用迁移
 python manage.py migrate
 
-# Show migration status
+# 显示迁移状态
 python manage.py showmigrations
 
-# Generate empty migration for custom SQL
+# 为自定义 SQL 生成空迁移
 python manage.py makemigrations --empty app_name -n description
 ```
 
-### Data Migration
+### 数据迁移
 
 ```python
 from django.db import migrations
@@ -483,7 +482,7 @@ def backfill_display_names(apps, schema_editor):
         User.objects.bulk_update(batch, ["display_name"], batch_size=batch_size)
 
 def reverse_backfill(apps, schema_editor):
-    pass  # Data migration, no reverse needed
+    pass  # 数据迁移，不需要反向
 
 class Migration(migrations.Migration):
     dependencies = [("accounts", "0015_add_display_name")]
@@ -495,86 +494,57 @@ class Migration(migrations.Migration):
 
 ### SeparateDatabaseAndState
 
-Remove a column from the Django model without dropping it from the database immediately:
+从 Django 模型中移除列而不立即从数据库删除：
 
 ```python
+# 迁移 001: 应用程序部署，使用新列名
+# 迁移 002: 数据回填完成后
+# 迁移 003: 使用 SeparateDatabaseAndState 标记列为从模型移除
+# 迁移 004: 几个月后，确认旧列不再被访问，删除它
+
+from django.db import migrations
+
 class Migration(migrations.Migration):
     operations = [
         migrations.SeparateDatabaseAndState(
             state_operations=[
-                migrations.RemoveField(model_name="user", name="legacy_field"),
+                migrations.RemoveField(model_name='order', name='legacy_status'),
             ],
-            database_operations=[],  # Don't touch the DB yet
-        ),
+            database_operations=[
+                # 数据库中实际不删除列 — 安全，因为应用程序不再使用它
+            ],
+        )
     ]
 ```
 
-## golang-migrate (Go)
+## 回滚策略
 
-### Workflow
+### 安全回滚模式
 
-```bash
-# Create migration pair
-migrate create -ext sql -dir migrations -seq add_user_avatar
+1. **新列回滚**：更新应用程序使用旧列，部署，然后删除新列
+2. **索引回滚**：`DROP INDEX CONCURRENTLY IF EXISTS`
+3. **表重命名回滚**：重命名新表回旧名（如果旧表存在）
+4. **数据回滚**：编写前向迁移以恢复数据，从不需要回滚
 
-# Apply all pending migrations
-migrate -path migrations -database "$DATABASE_URL" up
+### 永远不回滚的原因
 
-# Rollback last migration
-migrate -path migrations -database "$DATABASE_URL" down 1
+- 数据已写入新列
+- 其他服务可能依赖新 schema
+- 外键约束使删除新列复杂
 
-# Force version (fix dirty state)
-migrate -path migrations -database "$DATABASE_URL" force VERSION
-```
+## 性能考虑
 
-### Migration Files
+| 操作 | 大表风险 | 缓解 |
+|------|---------|------|
+| 添加 NOT NULL 列 | 全表重写 + 锁 | 使用默认值（Postgres 11+） |
+| 添加有默认值列 | 全表重写 | Postgres 11+ 无重写 |
+| 删除列 | 长时间锁 | 分阶段，先不写再删除 |
+| 添加索引 | 表锁（除非 CONCURRENTLY） | 始终 CONCURRENTLY |
+| 重命名列 | 全表锁 | 使用 expand-contract 模式 |
+| 大数据更新 | 事务大小 + 锁 | 批量处理 + COMMIT |
 
-```sql
--- migrations/000003_add_user_avatar.up.sql
-ALTER TABLE users ADD COLUMN avatar_url TEXT;
-CREATE INDEX CONCURRENTLY idx_users_avatar ON users (avatar_url) WHERE avatar_url IS NOT NULL;
+## 相关技能
 
--- migrations/000003_add_user_avatar.down.sql
-DROP INDEX IF EXISTS idx_users_avatar;
-ALTER TABLE users DROP COLUMN IF EXISTS avatar_url;
-```
-
-## Zero-Downtime Migration Strategy
-
-For critical production changes, follow the expand-contract pattern:
-
-```
-Phase 1: EXPAND
-  - Add new column/table (nullable or with default)
-  - Deploy: app writes to BOTH old and new
-  - Backfill existing data
-
-Phase 2: MIGRATE
-  - Deploy: app reads from NEW, writes to BOTH
-  - Verify data consistency
-
-Phase 3: CONTRACT
-  - Deploy: app only uses NEW
-  - Drop old column/table in separate migration
-```
-
-### Timeline Example
-
-```
-Day 1: Migration adds new_status column (nullable)
-Day 1: Deploy app v2 — writes to both status and new_status
-Day 2: Run backfill migration for existing rows
-Day 3: Deploy app v3 — reads from new_status only
-Day 7: Migration drops old status column
-```
-
-## Anti-Patterns
-
-| Anti-Pattern | Why It Fails | Better Approach |
-|-------------|-------------|-----------------|
-| Manual SQL in production | No audit trail, unrepeatable | Always use migration files |
-| Editing deployed migrations | Causes drift between environments | Create new migration instead |
-| NOT NULL without default | Locks table, rewrites all rows | Add nullable, backfill, then add constraint |
-| Inline index on large table | Blocks writes during build | CREATE INDEX CONCURRENTLY |
-| Schema + data in one migration | Hard to rollback, long transactions | Separate migrations |
-| Dropping column before removing code | Application errors on missing column | Remove code first, drop column next deploy |
+- `postgres-patterns` — PostgreSQL 模式快速参考
+- `database-reviewer` — 完整数据库审查智能体
+- `backend-patterns` — API 和后端模式

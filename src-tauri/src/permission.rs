@@ -10,20 +10,17 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum PermissionMode {
     #[serde(rename = "full")]
     Full,
     #[serde(rename = "normal")]
+    #[default]
     Normal,
     #[serde(rename = "guarded")]
     Guarded,
 }
 
-impl Default for PermissionMode {
-    fn default() -> Self {
-        Self::Normal
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionRequest {
@@ -151,22 +148,26 @@ impl PermissionService {
     }
 
     /// Register a pending confirmation and return a receiver to await.
-    pub fn register_pending(&self) -> (String, oneshot::Receiver<PermissionAction>) {
+    pub fn register_pending(&self) -> Result<(String, oneshot::Receiver<PermissionAction>), String> {
         let id = uuid_v4();
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().unwrap().insert(id.clone(), tx);
-        (id, rx)
+        self.pending.lock().map_err(|e| format!("mutex poisoned: {}", e))?.insert(id.clone(), tx);
+        Ok((id, rx))
     }
 
     /// Resolve a pending permission and optionally record "always allow".
     pub fn resolve_pending(&mut self, id: &str, tool: &str, action: PermissionAction, always: bool) -> bool {
         let result = {
-            let mut pending = self.pending.lock().unwrap();
-            if let Some(tx) = pending.remove(id) {
-                let _ = tx.send(action);
-                true
-            } else {
-                false
+            match self.pending.lock() {
+                Ok(mut pending) => {
+                    if let Some(tx) = pending.remove(id) {
+                        let _ = tx.send(action);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                Err(_) => false,
             }
         };
         if result && always && action == PermissionAction::Allow {
@@ -178,7 +179,9 @@ impl PermissionService {
     /// Clear all pending (on cancel/session end).
     #[allow(dead_code)]
     pub fn cancel_all_pending(&self) {
-        let _ = self.pending.lock().unwrap().drain().map(|(k, _)| k).collect::<Vec<_>>();
+        if let Ok(mut pending) = self.pending.lock() {
+            let _ = pending.drain().map(|(k, _)| k).collect::<Vec<_>>();
+        }
         // All senders dropped → receivers get Err(RecvError)
     }
 
@@ -188,6 +191,13 @@ impl PermissionService {
             .entry(tool.to_string())
             .or_default()
             .push(pattern.to_string());
+    }
+
+    /// Load persisted rules from a list of (tool, pattern) pairs.
+    pub fn load_rules_batch(&mut self, rules: &[(String, String)]) {
+        for (tool, pattern) in rules {
+            self.record_allow(tool, pattern);
+        }
     }
 
     /// Check if a tool was already always-allowed this session.

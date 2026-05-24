@@ -1,12 +1,32 @@
 import { shallowRef } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 
+export interface StreamEventPayload {
+  type: string
+  content?: string
+  thinking?: string
+  done?: boolean
+  tool?: string
+  tool_id?: string
+  input?: Record<string, unknown>
+  result?: string
+  textBefore?: string
+  toolCallCount?: number
+  cache_hit_tokens?: number
+  cache_miss_tokens?: number
+  cache_hit_ratio?: number
+  estimated_tokens?: number
+  context_window?: number
+  usage_pct?: number
+}
+
 export interface StreamToolEvent {
   type: 'tool_start' | 'tool_end'
   tool: string
   tool_id: string
-  input?: Record<string, any>
+  input?: Record<string, unknown>
   result?: string
+  textBefore?: string
 }
 
 interface StreamState {
@@ -72,12 +92,12 @@ export function useGlobalStreaming() {
   // Returns the unlisten function (also stored internally for cleanup).
   async function setupListener(
     sessionId: number,
-    handler: (event: any) => void,
+    handler: (event: { payload: StreamEventPayload }) => void,
   ): Promise<UnlistenFn> {
     const key = getStreamKey(sessionId)
     // Tear down any previous listener for this session
     await teardownListener(sessionId)
-    const unlisten = await listen<any>(`agent_stream_${sessionId}`, handler)
+    const unlisten = await listen<StreamEventPayload>(`agent_stream_${sessionId}`, handler)
     const newMap = new Map(sessions.value)
     const existing = newMap.get(key)
     newMap.set(key, {

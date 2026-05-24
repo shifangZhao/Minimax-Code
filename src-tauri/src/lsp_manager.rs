@@ -7,6 +7,7 @@
 
 use crate::lsp_client::LspClient;
 use crate::lsp_types::*;
+use crate::LockMap;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -201,10 +202,16 @@ impl LspManager {
         eprintln!("[lsp_manager] Starting {} for {} (root: {})", config.id, ext, root);
 
         let args: Vec<String> = config.args.iter().map(|s| s.to_string()).collect();
-        let client = LspClient::spawn_with_fallback(&config.id, &root, config.cmd, &args)?;
+        let client = match LspClient::spawn_with_fallback(&config.id, &root, config.cmd, &args) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[lsp_manager] {} spawn failed: {}", config.id, e);
+                return None;
+            }
+        };
         let client = Arc::new(Mutex::new(client));
 
-        if let Err(e) = client.lock().unwrap().initialize() {
+        if let Err(e) = client.lock_str().ok()?.initialize() {
             eprintln!("[lsp_manager] {} init failed: {}", config.id, e);
             return None;
         }
@@ -228,7 +235,7 @@ impl LspManager {
             None => return Ok(Vec::new()),
         };
 
-        let mut client = client_arc.lock().unwrap();
+        let mut client = client_arc.lock_str()?;
 
         // Check if process crashed and reconnect
         if !client.is_alive() {
@@ -243,7 +250,7 @@ impl LspManager {
             .map_err(|e| format!("Cannot read {}: {}", file_path, e))?;
         let language_id = ext_to_lang_id(ext);
 
-        client.touch_file(file_path, &content, language_id);
+        client.touch_file(file_path, &content, language_id)?;
         let diags = client.wait_for_diagnostics(file_path, 5000);
         Ok(diags)
     }
@@ -253,19 +260,20 @@ impl LspManager {
         if let Some(path) = file_path {
             let ext = Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("");
             if let Some(&idx) = self.ext_index.get(ext) {
-                let client = self.clients[idx].lock().unwrap();
-                let diags = client.get_diagnostics(path);
-                vec![FileDiagnostics { file: path.to_string(), diagnostics: diags }]
-            } else {
-                vec![]
+                if let Ok(client) = self.clients[idx].lock_str() {
+                    let diags = client.get_diagnostics(path);
+                    return vec![FileDiagnostics { file: path.to_string(), diagnostics: diags }];
+                }
             }
+            vec![]
         } else {
             let mut results = Vec::new();
             for client_arc in &self.clients {
-                let client = client_arc.lock().unwrap();
-                for (file, diagnostics) in client.all_diagnostics() {
-                    if !diagnostics.is_empty() {
-                        results.push(FileDiagnostics { file, diagnostics });
+                if let Ok(client) = client_arc.lock_str() {
+                    for (file, diagnostics) in client.all_diagnostics() {
+                        if !diagnostics.is_empty() {
+                            results.push(FileDiagnostics { file, diagnostics });
+                        }
                     }
                 }
             }
@@ -276,7 +284,9 @@ impl LspManager {
     /// Shut down all LSP clients.
     pub fn shutdown(&mut self) {
         for client in &self.clients {
-            client.lock().unwrap().shutdown();
+            if let Ok(mut c) = client.lock_str() {
+                c.shutdown();
+            }
         }
         self.clients.clear();
         self.ext_index.clear();
