@@ -1619,20 +1619,21 @@ async fn mcp_reload(state: State<'_, AppState>) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn compact_session(state: State<'_, AppState>, session_id: i64) -> Result<String, String> {
+async fn compact_session(state: State<'_, AppState>, session_id: i64) -> Result<String, String> {
     use crate::context_compressor::compress_context;
     use crate::context_compressor::estimate_tokens;
+    use crate::context_compressor::summarize_with_model;
 
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-
-    // Load agent type and context window
-    let (agent_type, context_window): (String, usize) = {
+    let (agent_type, context_window, api_key, api_url, model): (String, usize, String, String, String) = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
         let at: String = conn.query_row(
             "SELECT agent_type FROM agent_session WHERE id = ?1",
             rusqlite::params![session_id],
             |row| row.get(0),
         ).map_err(|e| format!("Session not found: {}", e))?;
-        // Read context window from config
+        let ak: String = conn.query_row("SELECT api_key FROM app_config", [], |row| row.get(0)).unwrap_or_default();
+        let au: String = conn.query_row("SELECT api_url FROM app_config", [], |row| row.get(0)).unwrap_or_default();
+        let md: String = conn.query_row("SELECT model FROM app_config", [], |row| row.get(0)).unwrap_or_default();
         let provider: String = conn.query_row(
             "SELECT provider FROM app_config", [], |row| row.get(0)
         ).unwrap_or_else(|_| "minimax".to_string());
@@ -1640,52 +1641,60 @@ fn compact_session(state: State<'_, AppState>, session_id: i64) -> Result<String
             "custom" => conn.query_row("SELECT custom_context_window FROM app_config", [], |row| row.get(0)).unwrap_or(200000),
             _ => conn.query_row("SELECT context_window FROM app_config", [], |row| row.get(0)).unwrap_or(204800),
         };
-        (at, cw.max(0) as usize)
+        (at, cw.max(0) as usize, ak, au, md)
     };
 
-    // Load and reconstruct messages in API format
-    let mut stmt = conn.prepare(
-        "SELECT role, content, tool_calls, thinking, raw_json FROM chat_message WHERE session_id = ?1 ORDER BY created_at ASC"
-    ).map_err(|e| e.to_string())?;
+    // Phase 1: read all messages (release DB lock before async model call)
+    let (token_before, mut api_messages) = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT role, content, tool_calls, thinking, raw_json FROM chat_message WHERE session_id = ?1 ORDER BY created_at ASC"
+        ).map_err(|e| e.to_string())?;
 
-    #[derive(Debug)]
-    struct RawMsg { role: String, content: String, _tool_calls: Option<String>, _thinking: Option<String>, raw_json: Option<String> }
+        #[derive(Debug)]
+        struct RawMsg { role: String, content: String, _tool_calls: Option<String>, _thinking: Option<String>, raw_json: Option<String> }
 
-    let rows: Vec<RawMsg> = stmt.query_map(rusqlite::params![session_id], |row| Ok(RawMsg {
-        role: row.get(0)?, content: row.get(1)?, _tool_calls: row.get(2)?, _thinking: row.get(3)?, raw_json: row.get(4)?,
-    })).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
+        let rows: Vec<RawMsg> = stmt.query_map(rusqlite::params![session_id], |row| Ok(RawMsg {
+            role: row.get(0)?, content: row.get(1)?, _tool_calls: row.get(2)?, _thinking: row.get(3)?, raw_json: row.get(4)?,
+        })).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
 
-    drop(stmt);
+        drop(stmt);
 
-    let token_before = estimate_tokens(&rows.iter().map(|m| {
-        let content_val = match m.raw_json {
-            Some(ref raw) => serde_json::from_str(raw).unwrap_or(serde_json::json!(m.content)),
-            None => serde_json::json!(m.content),
-        };
-        serde_json::json!({"role": m.role, "content": content_val})
-    }).collect::<Vec<_>>());
+        let tb = estimate_tokens(&rows.iter().map(|m| {
+            let content_val = match m.raw_json {
+                Some(ref raw) => serde_json::from_str(raw).unwrap_or(serde_json::json!(m.content)),
+                None => serde_json::json!(m.content),
+            };
+            serde_json::json!({"role": m.role, "content": content_val})
+        }).collect::<Vec<_>>());
 
-    // Reconstruct as Vec<Value> for compress_context
-    let mut api_messages: Vec<serde_json::Value> = rows.iter().map(|m| {
-        let content_val = match m.raw_json {
-            Some(ref raw) => serde_json::from_str(raw).unwrap_or(serde_json::json!(m.content)),
-            None => serde_json::json!(m.content),
-        };
-        serde_json::json!({"role": m.role, "content": content_val})
-    }).collect();
+        let msgs: Vec<serde_json::Value> = rows.iter().map(|m| {
+            let content_val = match m.raw_json {
+                Some(ref raw) => serde_json::from_str(raw).unwrap_or(serde_json::json!(m.content)),
+                None => serde_json::json!(m.content),
+            };
+            serde_json::json!({"role": m.role, "content": content_val})
+        }).collect();
 
-    compress_context(&agent_type, &mut api_messages, context_window, true);
+        (tb, msgs)
+    };
+    // conn is released here — safe to await
+
+    // Phase 2: model-driven summarization (async, no timeout)
+    let summary = summarize_with_model(&agent_type, &api_messages, &api_key, &api_url, &model).await;
+    eprintln!("[compact_session] Model summary: {} chars", summary.len());
+    compress_context(&agent_type, &mut api_messages, context_window, true, summary);
 
     let token_after = estimate_tokens(&api_messages);
 
-    // Delete old messages and re-save compressed ones
+    // Phase 3: save compressed messages (re-acquire DB lock)
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM chat_message WHERE session_id = ?1", rusqlite::params![session_id])
         .map_err(|e| e.to_string())?;
 
     for msg in &api_messages {
         let role = msg["role"].as_str().unwrap_or("user");
         let content_val = &msg["content"];
-        // Extract display text
         let display_text: String = if let Some(s) = content_val.as_str() {
             s.to_string()
         } else if let Some(arr) = content_val.as_array() {

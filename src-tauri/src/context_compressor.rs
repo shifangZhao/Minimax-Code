@@ -1,19 +1,113 @@
-// Context Compressor — per-agent compression of api_messages when approaching token limit
+// Context Compressor — per-agent compression of api_messages when approaching token limit.
 //
-// When api_messages reaches 80% of the configured context window, the middle messages
-// are compressed into a structured summary. The summary replaces the compressed
-// messages directly in the api_messages array.
+// Middle messages are replaced with a model-generated structured summary.
+// The model is asked to preserve task state, decisions, files touched, and pending work.
 
 use serde_json::Value;
 
 const COMPRESS_THRESHOLD: f64 = 0.8;
 
-// Token estimation using head+tail sampling for large content.
-// Avoids O(n) full serialization when tool outputs (read_file / grep) are large.
-const SAMPLE_BOUND: usize = 4096;       // chars to sample from head and tail each
-const FULL_SCAN_BOUND: usize = 16384;   // below this, scan everything
+const SUMMARIZE_SYSTEM: &str = r#"你是上下文压缩器。你的任务是把对话历史压缩为结构化摘要，保留后续任务需要的全部关键信息。
 
-/// Estimate tokens for a messages array only (backward compatible).
+## 必须保留
+- 用户原始需求（完整保留，不缩写）
+- 已完成的步骤和结果
+- 当前进行到哪一步
+- 修改了哪些文件、为什么改
+- 运行过哪些命令、结果摘要
+- 关键发现、决策、注意事项
+- 尚未完成的任务
+
+## 格式
+输出纯文本，使用以下结构：
+### 当前任务
+[用户需求简述]
+
+### 已完成
+- [每步做了什么，结果如何]
+
+### 涉及文件
+- path: [修改原因]
+
+### 待完成
+- [还没做的事]
+
+### 注意事项
+- [关键发现、限制条件、踩过的坑]
+
+不要加解释，直接输出摘要。"#;
+
+/// Ask the model to summarize the given messages. Returns the summary string.
+pub async fn summarize_with_model(
+    agent_type: &str,
+    messages: &[Value],
+    api_key: &str,
+    api_url: &str,
+    model: &str,
+) -> String {
+    let messages_json = serde_json::to_string(messages).unwrap_or_default();
+    let label = if agent_type == "ace" { "全栈智能体" } else { "智能体" };
+    let user_content = format!(
+        "请压缩以下 {} {} 的历史对话：\n\n{}",
+        agent_type, label, messages_json
+    );
+
+    let body = serde_json::json!({
+        "model": model,
+        "system": SUMMARIZE_SYSTEM,
+        "messages": [{"role": "user", "content": user_content}],
+        "max_tokens": 2048,
+        "temperature": 0.3,
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/v1/chat/completions", api_url.trim_end_matches('/')))
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await;
+
+    match resp {
+        Ok(r) if r.status().is_success() => {
+            match r.json::<Value>().await {
+                Ok(json) => {
+                    let summary = json["choices"][0]["message"]["content"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string();
+                    if summary.is_empty() {
+                        eprintln!("[summarize] Model returned empty summary");
+                        "## 上下文摘要\n\n压缩失败，模型返回空内容。".to_string()
+                    } else {
+                        summary
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[summarize] Failed to parse response: {}", e);
+                    format!("## 上下文摘要\n\n压缩失败: {}", e)
+                }
+            }
+        }
+        Ok(r) => {
+            let status = r.status();
+            let body = r.text().await.unwrap_or_default();
+            eprintln!("[summarize] API error {}: {}", status, body);
+            format!("## 上下文摘要\n\n压缩失败: HTTP {} {}", status, body)
+        }
+        Err(e) => {
+            eprintln!("[summarize] Request failed: {}", e);
+            format!("## 上下文摘要\n\n压缩失败: {}", e)
+        }
+    }
+}
+
+// ── Token estimation ──
+
+const SAMPLE_BOUND: usize = 4096;
+const FULL_SCAN_BOUND: usize = 16384;
+
 pub fn estimate_tokens(messages: &[Value]) -> usize {
     let mut total = 0usize;
     for m in messages {
@@ -23,9 +117,6 @@ pub fn estimate_tokens(messages: &[Value]) -> usize {
     total
 }
 
-/// Estimate total tokens for a full API request: messages + system + tools.
-/// system and tools are passed as already-serialized JSON strings.
-/// This gives a more accurate usage_pct since system/tools can be 20-40K tokens.
 pub fn estimate_request_tokens(
     messages: &[Value],
     system_json: &str,
@@ -42,7 +133,6 @@ fn estimate_one(text: &str) -> usize {
     if len <= FULL_SCAN_BOUND {
         return count_tokens_from_chars(text);
     }
-    // Sample head + tail, compute ratio, extrapolate
     let head: String = text.chars().take(SAMPLE_BOUND).collect();
     let tail: String = text.chars().rev().take(SAMPLE_BOUND).collect::<Vec<_>>().into_iter().rev().collect();
     let sample_chars = head.chars().count() + tail.chars().count();
@@ -73,17 +163,18 @@ fn count_tokens_from_chars(text: &str) -> usize {
     (cjk as f64 / 2.0) as usize + ascii_alpha / 4 + other / 3
 }
 
+// ── Compression ──
+
 /// Collapse Drain — aggressive compression when API returns context overflow.
 /// `level`: 1 = moderately aggressive, 2 = keep only the very last exchange.
-/// Returns true if compression actually reduced the message count.
-pub fn compress_context_aggressive(agent_type: &str, messages: &mut Vec<Value>, level: usize) -> bool {
+/// `summary`: model-generated summary.
+pub fn compress_context_aggressive(agent_type: &str, messages: &mut Vec<Value>, level: usize, summary: String) -> bool {
     let keep_recent = match agent_type {
         "ace" => if level >= 2 { 2 } else { 4 },
         "front" => if level >= 2 { 2 } else { 3 },
         _ => if level >= 2 { 1 } else { 2 },
     };
 
-    // Need enough messages to be worth compressing
     if messages.len() <= keep_recent + 3 {
         return false;
     }
@@ -93,29 +184,18 @@ pub fn compress_context_aggressive(agent_type: &str, messages: &mut Vec<Value>, 
     let first_msg = messages[0].clone();
     let recent: Vec<Value> = messages[split_idx..].to_vec();
 
-    let summary = build_summary(agent_type, &messages[1..split_idx]);
-
     messages.clear();
     messages.push(first_msg);
-    messages.push(serde_json::json!({
-        "role": "user",
-        "content": summary
-    }));
+    messages.push(serde_json::json!({ "role": "user", "content": summary }));
     messages.extend(recent);
 
-    eprintln!(
-        "[collapse_drain] {} level={}: {} → {} messages",
-        agent_type, level, old_len, messages.len()
-    );
+    eprintln!("[collapse_drain] {} level={}: {} → {} messages", agent_type, level, old_len, messages.len());
     true
 }
 
-/// Compress api_messages in-place when token budget exceeds 80% (or force=true).
-/// Always keeps the first message (oldest history) and the last N messages.
-/// Middle messages are replaced with a single summary user message.
-/// Note: system prompt is sent as top-level `system` field, not in messages.
-/// `context_window` is the model's max context in tokens (e.g. 204000 for MiniMax, 200000 for Claude).
-pub fn compress_context(agent_type: &str, messages: &mut Vec<Value>, context_window: usize, force: bool) {
+/// Compress api_messages in-place. `force` skips the 80% threshold check.
+/// `summary`: model-generated summary.
+pub fn compress_context(agent_type: &str, messages: &mut Vec<Value>, context_window: usize, force: bool, summary: String) {
     let tokens = estimate_tokens(messages);
     let threshold = (context_window as f64 * COMPRESS_THRESHOLD) as usize;
     if !force && tokens < threshold {
@@ -132,7 +212,6 @@ pub fn compress_context(agent_type: &str, messages: &mut Vec<Value>, context_win
         _ => 4,
     };
 
-    // Need at least keep_recent + 2 messages (system + middle) to be worth compressing
     if messages.len() <= keep_recent + 3 {
         return;
     }
@@ -141,341 +220,11 @@ pub fn compress_context(agent_type: &str, messages: &mut Vec<Value>, context_win
     let first_msg = messages[0].clone();
     let recent: Vec<Value> = messages[split_idx..].to_vec();
 
-    // Build summary from middle messages
-    let summary = build_summary(agent_type, &messages[1..split_idx]);
-
     messages.clear();
     messages.push(first_msg);
-    messages.push(serde_json::json!({
-        "role": "user",
-        "content": summary
-    }));
+    messages.push(serde_json::json!({ "role": "user", "content": summary }));
     messages.extend(recent);
 
     let new_tokens = estimate_tokens(messages);
-    eprintln!(
-        "[compress] {}: {} → {} tokens (ctx: {}, threshold: {})",
-        agent_type, tokens, new_tokens, context_window, threshold
-    );
-}
-
-fn build_summary(agent_type: &str, messages: &[Value]) -> String {
-    let mut summary = String::from("## 上下文摘要\n\n");
-    summary.push_str(&format!("已压缩 {} 条历史消息。\n\n", messages.len()));
-
-    // Collect categorized information from messages
-    let mut user_requests: Vec<String> = Vec::new();
-    let mut agent_dispatches: Vec<String> = Vec::new();
-    let mut files_touched: Vec<String> = Vec::new();
-    let mut commands_run: Vec<String> = Vec::new();
-    let mut git_actions: Vec<String> = Vec::new();
-    let mut tool_uses: Vec<String> = Vec::new();
-    let mut assistant_texts: Vec<String> = Vec::new();
-
-    for msg in messages {
-        let role = msg["role"].as_str().unwrap_or("");
-        let content = &msg["content"];
-
-        match role {
-            "user" => {
-                if let Some(text) = content.as_str() {
-                    let t = text.trim();
-                    if !t.is_empty() {
-                        user_requests.push(truncate(t, 300));
-                    }
-                } else if let Some(blocks) = content.as_array() {
-                    for block in blocks {
-                        if block["type"] == "tool_result" {
-                            let tool_id = block["tool_use_id"].as_str().unwrap_or("");
-                            let result_text = block["content"].as_str().unwrap_or("");
-                            let short_result = truncate(result_text, 200);
-                            files_touched.push(format!("tool_result[{}]: {}", tool_id, short_result));
-                        }
-                    }
-                }
-            }
-            "assistant" => {
-                if let Some(blocks) = content.as_array() {
-                    for block in blocks {
-                        match block["type"].as_str().unwrap_or("") {
-                            "text" => {
-                                let text = block["text"].as_str().unwrap_or("");
-                                if !text.is_empty() {
-                                    assistant_texts.push(truncate(text, 500));
-                                }
-                            }
-                            "tool_use" => {
-                                let name = block["name"].as_str().unwrap_or("");
-                                let input = &block["input"];
-                                tool_uses.push(name.to_string());
-
-                                match name {
-                                    "send_to_agent" => {
-                                        let target = input["target_agent"].as_str().unwrap_or("");
-                                        let message = input["message"].as_str().unwrap_or("");
-                                        agent_dispatches.push(format!(
-                                            "→ {}: {}",
-                                            target,
-                                            truncate(message, 200)
-                                        ));
-                                    }
-                                    "read_file" | "write_file" | "edit_file" | "delete_file"
-                                    | "move_file" | "copy_file" | "create_directory" => {
-                                        let path = input["file_path"].as_str()
-                                            .or_else(|| input["path"].as_str())
-                                            .unwrap_or("");
-                                        files_touched.push(format!(
-                                            "{}: {}",
-                                            name,
-                                            truncate(path, 150)
-                                        ));
-                                    }
-                                    "run_command" | "run_tests" | "run_background" => {
-                                        let cmd = input["command"].as_str().unwrap_or("");
-                                        commands_run.push(format!("{}: {}", name, truncate(cmd, 150)));
-                                    }
-                                    "git_commit" | "git_diff" | "git_status" | "git_log" => {
-                                        let desc = input["message"].as_str()
-                                            .or_else(|| input["description"].as_str())
-                                            .unwrap_or("");
-                                        git_actions.push(format!("{}: {}", name, truncate(desc, 150)));
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // Format summary based on agent type's role
-    match agent_type {
-        "front" => {
-            // Top priority: what the user is asking for right now
-            if !user_requests.is_empty() {
-                summary.push_str("### 对话记录\n");
-                for r in &user_requests {
-                    summary.push_str(&format!("- 用户：{}\n", r));
-                }
-                summary.push('\n');
-            }
-            // Who was dispatched and why
-            if !agent_dispatches.is_empty() {
-                summary.push_str("### 调度记录\n");
-                for d in &agent_dispatches {
-                    summary.push_str(&format!("- {}\n", d));
-                }
-                summary.push('\n');
-            }
-            // What was discovered about the project
-            // Key outcomes and decisions
-            if !assistant_texts.is_empty() {
-                summary.push_str("### 关键结果\n");
-                // Take the most recent significant replies (last 5)
-                for t in assistant_texts.iter().rev().take(5) {
-                    summary.push_str(&format!("- {}\n", t));
-                }
-                summary.push('\n');
-            }
-            if !files_touched.is_empty() {
-                summary.push_str("### 涉及文件\n");
-                // Deduplicate
-                let mut seen = std::collections::HashSet::new();
-                for f in &files_touched {
-                    if seen.insert(f) {
-                        summary.push_str(&format!("- {}\n", f));
-                    }
-                }
-                summary.push('\n');
-            }
-            if !git_actions.is_empty() {
-                summary.push_str("### Git\n");
-                for g in &git_actions {
-                    summary.push_str(&format!("- {}\n", g));
-                }
-                summary.push('\n');
-            }
-        }
-        "plan" => {
-            if !user_requests.is_empty() {
-                summary.push_str("### 需求\n");
-                for r in &user_requests {
-                    summary.push_str(&format!("- {}\n", r));
-                }
-                summary.push('\n');
-            }
-            if !assistant_texts.is_empty() {
-                summary.push_str("### 计划内容\n");
-                for t in assistant_texts.iter().rev().take(3) {
-                    summary.push_str(&format!("- {}\n", t));
-                }
-                summary.push('\n');
-            }
-            if !agent_dispatches.is_empty() {
-                summary.push_str("### 已调度\n");
-                for d in &agent_dispatches {
-                    summary.push_str(&format!("- {}\n", d));
-                }
-                summary.push('\n');
-            }
-        }
-        "work" => {
-            if !user_requests.is_empty() {
-                summary.push_str("### 任务\n");
-                for r in &user_requests {
-                    summary.push_str(&format!("- {}\n", r));
-                }
-                summary.push('\n');
-            }
-            if !files_touched.is_empty() {
-                summary.push_str("### 文件操作\n");
-                for f in &files_touched {
-                    summary.push_str(&format!("- {}\n", f));
-                }
-                summary.push('\n');
-            }
-            if !commands_run.is_empty() {
-                summary.push_str("### 命令执行\n");
-                for c in &commands_run {
-                    summary.push_str(&format!("- {}\n", c));
-                }
-                summary.push('\n');
-            }
-            if !git_actions.is_empty() {
-                summary.push_str("### Git 操作\n");
-                for g in &git_actions {
-                    summary.push_str(&format!("- {}\n", g));
-                }
-                summary.push('\n');
-            }
-            // Collect all tool use for work (they matter for knowing what was done)
-            if !tool_uses.is_empty() {
-                summary.push_str("### 已使用的工具\n");
-                let mut deduped: Vec<&String> = tool_uses.iter().collect();
-                deduped.sort();
-                deduped.dedup();
-                summary.push_str(&format!("- {}\n", deduped.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
-                summary.push('\n');
-            }
-        }
-        "review" => {
-            if !git_actions.is_empty() {
-                summary.push_str("### Git 操作\n");
-                for g in &git_actions {
-                    summary.push_str(&format!("- {}\n", g));
-                }
-                summary.push('\n');
-            }
-            if !files_touched.is_empty() {
-                summary.push_str("### 涉及文件\n");
-                for f in &files_touched {
-                    summary.push_str(&format!("- {}\n", f));
-                }
-                summary.push('\n');
-            }
-            if !assistant_texts.is_empty() {
-                summary.push_str("### 审查结果\n");
-                for t in assistant_texts.iter().rev().take(2) {
-                    summary.push_str(&format!("- {}\n", t));
-                }
-                summary.push('\n');
-            }
-        }
-        "explore" => {
-            if !files_touched.is_empty() {
-                summary.push_str("### 已分析文件\n");
-                for f in &files_touched {
-                    summary.push_str(&format!("- {}\n", f));
-                }
-                summary.push('\n');
-            }
-            if !assistant_texts.is_empty() {
-                summary.push_str("### 探索发现\n");
-                for t in assistant_texts.iter().rev().take(3) {
-                    summary.push_str(&format!("- {}\n", t));
-                }
-                summary.push('\n');
-            }
-        }
-        "ace" => {
-            // Ace: all-in-one — need full context across all dimensions
-            if !user_requests.is_empty() {
-                summary.push_str("### 用户请求\n");
-                for r in &user_requests {
-                    summary.push_str(&format!("- {}\n", r));
-                }
-                summary.push('\n');
-            }
-            if !assistant_texts.is_empty() {
-                summary.push_str("### 关键操作\n");
-                for t in assistant_texts.iter().rev().take(5) {
-                    summary.push_str(&format!("- {}\n", t));
-                }
-                summary.push('\n');
-            }
-            if !files_touched.is_empty() {
-                summary.push_str("### 涉及文件\n");
-                let mut seen = std::collections::HashSet::new();
-                for f in &files_touched {
-                    if seen.insert(f) { summary.push_str(&format!("- {}\n", f)); }
-                }
-                summary.push('\n');
-            }
-            if !commands_run.is_empty() {
-                summary.push_str("### 执行命令\n");
-                for c in &commands_run {
-                    summary.push_str(&format!("- {}\n", c));
-                }
-                summary.push('\n');
-            }
-            if !git_actions.is_empty() {
-                summary.push_str("### Git\n");
-                for g in &git_actions {
-                    summary.push_str(&format!("- {}\n", g));
-                }
-                summary.push('\n');
-            }
-        }
-        _ => {
-            // Generic fallback
-            if !user_requests.is_empty() {
-                summary.push_str("### 用户消息\n");
-                for r in &user_requests {
-                    summary.push_str(&format!("- {}\n", r));
-                }
-                summary.push('\n');
-            }
-            if !assistant_texts.is_empty() {
-                summary.push_str("### 回复要点\n");
-                for t in assistant_texts.iter().rev().take(3) {
-                    summary.push_str(&format!("- {}\n", t));
-                }
-                summary.push('\n');
-            }
-            if !tool_uses.is_empty() {
-                summary.push_str("### 工具使用\n");
-                let mut deduped: Vec<&String> = tool_uses.iter().collect();
-                deduped.sort();
-                deduped.dedup();
-                summary.push_str(&format!("- {}\n", deduped.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
-                summary.push('\n');
-            }
-        }
-    }
-
-    summary
-}
-
-fn truncate(s: &str, max_len: usize) -> String {
-    let s = s.trim();
-    if s.chars().count() <= max_len {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_len).collect();
-        format!("{}…", truncated)
-    }
+    eprintln!("[compress] {}: {} → {} tokens (ctx: {}, threshold: {})", agent_type, tokens, new_tokens, context_window, threshold);
 }

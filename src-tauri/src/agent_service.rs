@@ -84,7 +84,7 @@ fn output_with_timeout(cmd: &mut Command, timeout_secs: u64) -> String {
     }
 }
 
-use crate::context_compressor::{compress_context, compress_context_aggressive, estimate_request_tokens};
+use crate::context_compressor::{compress_context, compress_context_aggressive, estimate_request_tokens, summarize_with_model};
 use crate::lsp_manager::LspManager;
 use crate::lsp_types::format_diagnostics;
 use crate::mcp_service::McpService;
@@ -600,7 +600,12 @@ impl AgentService {
             }
 
             // Compress context when approaching token limit (80% of context window)
-            compress_context(agent_type, &mut api_messages, self.context_window, false);
+            let tokens = estimate_request_tokens(&api_messages, &system_json, &tools_json);
+            if tokens > (self.context_window as f64 * 0.7) as usize && api_messages.len() > 12 {
+                let summary = summarize_with_model(agent_type, &api_messages, &api_key, &self.api_url, &self.model).await;
+                eprintln!("[compress] Model summary: {} chars", summary.len());
+                compress_context(agent_type, &mut api_messages, self.context_window, false, summary);
+            }
 
             // Emit token usage for context window display (includes system + tools)
             let est = estimate_request_tokens(&api_messages, &system_json, &tools_json);
@@ -673,7 +678,8 @@ impl AgentService {
                         if is_overflow && collapse_level < 2 {
                             collapse_level += 1;
                             eprintln!("[collapse_drain] Network error hints at overflow, level {}", collapse_level);
-                            compress_context_aggressive(agent_type, &mut api_messages, collapse_level);
+                            let summary = summarize_with_model(agent_type, &api_messages, &api_key, &self.api_url, &self.model).await;
+                            compress_context_aggressive(agent_type, &mut api_messages, collapse_level, summary);
                             continue;
                         }
                         eprintln!("[stream_chat] Request failed: {}", e);
@@ -705,8 +711,8 @@ impl AgentService {
                 if is_overflow && collapse_level < 2 {
                     collapse_level += 1;
                     eprintln!("[collapse_drain] Context overflow detected, aggressive compress level {}", collapse_level);
-                    compress_context_aggressive(agent_type, &mut api_messages, collapse_level);
-                    // Rebuild request with compressed messages
+                    let summary = summarize_with_model(agent_type, &api_messages, &api_key, &self.api_url, &self.model).await;
+                    compress_context_aggressive(agent_type, &mut api_messages, collapse_level, summary);
                     continue;
                 }
 
