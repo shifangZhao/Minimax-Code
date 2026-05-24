@@ -1,332 +1,330 @@
 ---
 name: agentic-engineering
-description: Operate as an agentic engineer using eval-first execution, decomposition, and cost-aware model routing.
+description: 作为智能体工程师运作，使用评估优先执行、任务分解和成本感知模型路由。
 origin: ECC
 ---
 
-# Agentic Engineering
+# 智能体工程
 
-Use this skill for engineering workflows where AI agents perform most implementation work and humans enforce quality and risk controls.
+将此技能用于工程工作流，其中 AI 智能体执行大部分实现工作，人类负责质量和风险控制。
 
-## Operating Principles
+## 运作原则
 
-1. Define completion criteria before execution.
-2. Decompose work into agent-sized units.
-3. Route model tiers by task complexity.
-4. Measure with evals and regression checks.
+1. 执行前先定义完成标准。
+2. 将工作分解为智能体规模的单元。
+3. 根据任务复杂度路由模型层级。
+4. 通过评估和回归检查进行测量。
 
-## Eval-First Loop
+## 评估优先循环
 
-1. Define capability eval and regression eval.
-2. Run baseline and capture failure signatures.
-3. Execute implementation.
-4. Re-run evals and compare deltas.
+1. 定义能力评估和回归评估。
+2. 运行基线并捕获失败特征。
+3. 执行实现。
+4. 重新运行评估并比较差异。
 
-## Task Decomposition
+## 任务分解
 
-Apply the 15-minute unit rule:
-- each unit should be independently verifiable
-- each unit should have a single dominant risk
-- each unit should expose a clear done condition
+应用 15 分钟单元规则：
+- 每个单元应可独立验证
+- 每个单元应有一个主要风险
+- 每个单元应暴露明确的完成条件
 
-## Model Routing
+## 模型路由
 
-- Haiku: classification, boilerplate transforms, narrow edits
-- Sonnet: implementation and refactors
-- Opus: architecture, root-cause analysis, multi-file invariants
+- Haiku：分类、样板转换、窄范围编辑
+- Sonnet：实现和重构
+- Opus：架构、根本原因分析、多文件不变量
 
-## Session Strategy
+## 会话策略
 
-- Continue session for closely-coupled units.
-- Start fresh session after major phase transitions.
-- Compact after milestone completion, not during active debugging.
+- 紧密耦合的单元继续会话。
+- 主要阶段转换后开启新会话。
+- 在里程碑完成后压缩，而非在活跃调试期间。
 
-## Review Focus for AI-Generated Code
+## AI 生成代码的审查重点
 
-Prioritize:
-- invariants and edge cases
-- error boundaries
-- security and auth assumptions
-- hidden coupling and rollout risk
+优先关注：
+- 不变量和边界情况
+- 错误边界
+- 安全和认证假设
+- 隐藏耦合和发布风险
 
-Do not waste review cycles on style-only disagreements when automated format/lint already enforce style.
+当自动格式化和 lint 已强制执行样式时，不要在纯样式分歧上浪费审查周期。
 
-## Cost Discipline
+## 成本纪律
 
-Track per task:
-- model
-- token estimate
-- retries
-- wall-clock time
-- success/failure
+跟踪每任务：
+- 模型
+- token 估算
+- 重试次数
+- 墙上时钟时间
+- 成功/失败
 
-Escalate model tier only when lower tier fails with a clear reasoning gap.
-
+当下层模型因明确的推理差距失败时，才升级模型层级。
 
 ---
 
 ---
 name: agent-introspection-debugging
-description: Structured self-debugging workflow for AI agent failures using capture, diagnosis, contained recovery, and introspection reports.
+description: 针对 AI 智能体失败的结构化自我调试工作流，包含捕获、诊断、限定恢复和内省报告。
 origin: ECC
 ---
 
-# Agent Introspection Debugging
+# 智能体内省调试
 
-Use this skill when an agent run is failing repeatedly, consuming tokens without progress, looping on the same tools, or drifting away from the intended task.
+当智能体运行反复失败、消耗 token 却无进展、在同一工具上循环或偏离预期任务时，使用此技能。
 
-This is a workflow skill, not a hidden runtime. It teaches the agent to debug itself systematically before escalating to a human.
+这是一个工作流技能，不是隐藏运行时。它教导智能体在升级给人类之前系统化地调试自身。
 
-## When to Activate
+## 激活时机
 
-- Maximum tool call / loop-limit failures
-- Repeated retries with no forward progress
-- Context growth or prompt drift that starts degrading output quality
-- File-system or environment state mismatch between expectation and reality
-- Tool failures that are likely recoverable with diagnosis and a smaller corrective action
+- 达到最大工具调用/循环限制失败
+- 反复重试却无进展
+- 上下文增长或提示漂移开始降低输出质量
+- 文件系统或环境状态与预期不符
+- 可能通过诊断和更小纠正动作恢复的工具失败
 
-## Scope Boundaries
+## 范围边界
 
-Activate this skill for:
-- capturing failure state before retrying blindly
-- diagnosing common agent-specific failure patterns
-- applying contained recovery actions
-- producing a structured human-readable debug report
+为此技能激活的场景：
+- 在盲目重试前捕获失败状态
+- 诊断常见智能体特定失败模式
+- 应用限定恢复动作
+- 生成结构化的人类可读调试报告
 
-Do not use this skill as the primary source for:
-- feature verification after code changes; use `verification-loop`
-- framework-specific debugging when a narrower ECC skill already exists
-- runtime promises the current harness cannot enforce automatically
+不要将此技能作为主要来源用于：
+- 代码更改后的功能验证；使用 `verification-loop`
+- 当已有更窄的 ECC 技能存在时的框架特定调试
+- 当前工具链无法自动执行的运行时承诺
 
-## Four-Phase Loop
+## 四阶段循环
 
-### Phase 1: Failure Capture
+### 阶段 1：失败捕获
 
-Before trying to recover, record the failure precisely.
+在尝试恢复之前，精确记录失败。
 
-Capture:
-- error type, message, and stack trace when available
-- last meaningful tool call sequence
-- what the agent was trying to do
-- current context pressure: repeated prompts, oversized pasted logs, duplicated plans, or runaway notes
-- current environment assumptions: cwd, branch, relevant service state, expected files
+捕获：
+- 错误类型、消息和堆栈跟踪（当可用时）
+- 最后有意义的工具调用序列
+- 智能体当时尝试做什么
+- 当前上下文压力：重复提示、超大粘贴日志、重复计划或失控笔记
+- 当前环境假设：cwd、分支、相关服务状态、预期文件
 
-Minimum capture template:
+最小捕获模板：
 
 ```markdown
-## Failure Capture
-- Session / task:
-- Goal in progress:
-- Error:
-- Last successful step:
-- Last failed tool / command:
-- Repeated pattern seen:
-- Environment assumptions to verify:
+## 失败捕获
+- 会话/任务：
+- 进行中的目标：
+- 错误：
+- 最后成功步骤：
+- 最后失败工具/命令：
+- 发现的重复模式：
+- 待验证的环境假设：
 ```
 
-### Phase 2: Root-Cause Diagnosis
+### 阶段 2：根本原因诊断
 
-Match the failure to a known pattern before changing anything.
+在更改任何内容之前，将失败匹配到已知模式。
 
-| Pattern | Likely Cause | Check |
+| 模式 | 可能原因 | 检查 |
 | --- | --- | --- |
-| Maximum tool calls / repeated same command | loop or no-exit observer path | inspect the last N tool calls for repetition |
-| Context overflow / degraded reasoning | unbounded notes, repeated plans, oversized logs | inspect recent context for duplication and low-signal bulk |
-| `ECONNREFUSED` / timeout | service unavailable or wrong port | verify service health, URL, and port assumptions |
-| `429` / quota exhaustion | retry storm or missing backoff | count repeated calls and inspect retry spacing |
-| file missing after write / stale diff | race, wrong cwd, or branch drift | re-check path, cwd, git status, and actual file existence |
-| tests still failing after “fix” | wrong hypothesis | isolate the exact failing test and re-derive the bug |
+| 最大工具调用/重复相同命令 | 循环或无出口观察者路径 | 检查最近 N 次工具调用的重复 |
+| 上下文溢出/推理降级 | 无界笔记、重复计划、超大日志 | 检查近期上下文中的重复和低信号批量 |
+| `ECONNREFUSED` / 超时 | 服务不可用或端口错误 | 验证服务健康、URL 和端口假设 |
+| `429` / 配额耗尽 | 重试风暴或缺少退避 | 计算重复调用并检查重试间隔 |
+| 写入后文件缺失/差异陈旧 | 竞态、错误 cwd 或分支漂移 | 重新检查路径、cwd、git 状态和实际文件存在 |
+| "修复"后测试仍然失败 | 错误假设 | 隔离确切的失败测试并重新推导 bug |
 
-Diagnosis questions:
-- is this a logic failure, state failure, environment failure, or policy failure?
-- did the agent lose the real objective and start optimizing the wrong subtask?
-- is the failure deterministic or transient?
-- what is the smallest reversible action that would validate the diagnosis?
+诊断问题：
+- 这是逻辑失败、状态失败、环境失败还是策略失败？
+- 智能体是否失去了真实目标并开始优化错误的子任务？
+- 失败是确定性的还是瞬态的？
+- 最小的可逆动作是什么，能验证诊断？
 
-### Phase 3: Contained Recovery
+### 阶段 3：限定恢复
 
-Recover with the smallest action that changes the diagnosis surface.
+用最小动作恢复，改变诊断范围。
 
-Safe recovery actions:
-- stop repeated retries and restate the hypothesis
-- trim low-signal context and keep only the active goal, blockers, and evidence
-- re-check the actual filesystem / branch / process state
-- narrow the task to one failing command, one file, or one test
-- switch from speculative reasoning to direct observation
-- escalate to a human when the failure is high-risk or externally blocked
+安全恢复动作：
+- 停止重复重试并重述假设
+- 修剪低信号上下文，只保留活跃目标、阻塞器和证据
+- 重新检查实际文件系统/分支/进程状态
+- 将任务缩小到一条失败命令、一个文件或一个测试
+- 从推测性推理切换到直接观察
+- 当失败高风险或被外部阻塞时升级给人类
 
-Do not claim unsupported auto-healing actions like “reset agent state” or “update harness config” unless you are actually doing them through real tools in the current environment.
+不要声称不支持的自动修复动作，如"重置智能体状态"或"更新工具链配置"，除非你确实通过当前环境中的真实工具在做这些事。
 
-Contained recovery checklist:
-
-```markdown
-## Recovery Action
-- Diagnosis chosen:
-- Smallest action taken:
-- Why this is safe:
-- What evidence would prove the fix worked:
-```
-
-### Phase 4: Introspection Report
-
-End with a report that makes the recovery legible to the next agent or human.
+限定恢复检查清单：
 
 ```markdown
-## Agent Self-Debug Report
-- Session / task:
-- Failure:
-- Root cause:
-- Recovery action:
-- Result: success | partial | blocked
-- Token / time burn risk:
-- Follow-up needed:
-- Preventive change to encode later:
+## 恢复动作
+- 选择的诊断：
+- 采取的最小动作：
+- 为什么这是安全的：
+- 什么证据能证明修复有效：
 ```
 
-## Recovery Heuristics
+### 阶段 4：内省报告
 
-Prefer these interventions in order:
+以使恢复对下一个智能体或人类可读的报告结束。
 
-1. Restate the real objective in one sentence.
-2. Verify the world state instead of trusting memory.
-3. Shrink the failing scope.
-4. Run one discriminating check.
-5. Only then retry.
+```markdown
+## 智能体自我调试报告
+- 会话/任务：
+- 失败：
+- 根本原因：
+- 恢复动作：
+- 结果：success | partial | blocked
+- Token/时间消耗风险：
+- 需要的后续：
+- 稍后编码的预防性更改：
+```
 
-Bad pattern:
-- retrying the same action three times with slightly different wording
+## 恢复启发法
 
-Good pattern:
-- capture failure
-- classify the pattern
-- run one direct check
-- change the plan only if the check supports it
+按此顺序优先使用这些干预：
 
-## Integration with ECC
+1. 用一句话重述真实目标。
+2. 验证世界状态而非信任记忆。
+3. 缩小失败范围。
+4. 运行一个鉴别检查。
+5. 只有在那时重试。
 
-- Use `verification-loop` after recovery if code was changed.
-- Use `continuous-learning-v2` when the failure pattern is worth turning into an instinct or later skill.
-- Use `council` when the issue is not technical failure but decision ambiguity.
-- Use `workspace-surface-audit` if the failure came from conflicting local state or repo drift.
+坏模式：
+- 用略微不同的措辞重试相同动作三次
 
-## Output Standard
+好模式：
+- 捕获失败
+- 分类模式
+- 运行一个直接检查
+- 仅在检查支持时才更改计划
 
-When this skill is active, do not end with “I fixed it” alone.
+## 与 ECC 集成
 
-Always provide:
-- the failure pattern
-- the root-cause hypothesis
-- the recovery action
-- the evidence that the situation is now better or still blocked
+- 如果代码已更改，在恢复后使用 `verification-loop`。
+- 当失败模式值得转化为本能或后续技能时，使用 `continuous-learning-v2`。
+- 当问题不是技术失败而是决策模糊时，使用 `council`。
+- 当失败来自冲突的本地状态或仓库漂移时，使用 `workspace-surface-audit`。
 
+## 输出标准
+
+当此技能激活时，不要仅以"我修好了"结束。
+
+始终提供：
+- 失败模式
+- 根本原因假设
+- 恢复动作
+- 证明情况现在更好或仍被阻塞的证据
 
 ---
 
 ---
 name: agent-eval
-description: Head-to-head comparison of coding agents (Claude Code, Aider, Codex, etc.) on custom tasks with pass rate, cost, time, and consistency metrics
+description: 对编码智能体（Claude Code、Aider、Codex 等）进行自定义任务的正面比较，包含通过率、成本、时间和一致性指标。
 origin: ECC
 tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 
-# Agent Eval Skill
+# 智能体评估技能
 
-A lightweight CLI tool for comparing coding agents head-to-head on reproducible tasks. Every "which coding agent is best?" comparison runs on vibes — this tool systematizes it.
+用于对编码智能体进行可重复任务正面比较的轻量级 CLI 工具。每个"哪个编码智能体最好"的比较都是凭感觉的——此工具使其系统化。
 
-## When to Activate
+## 激活时机
 
-- Comparing coding agents (Claude Code, Aider, Codex, etc.) on your own codebase
-- Measuring agent performance before adopting a new tool or model
-- Running regression checks when an agent updates its model or tooling
-- Producing data-backed agent selection decisions for a team
+- 在你自己的代码库上比较编码智能体（Claude Code、Aider、Codex 等）
+- 在采用新工具或模型前测量智能体性能
+- 当智能体更新模型或工具时运行回归检查
+- 为团队产生数据支持的智能体选择决策
 
-## Installation
+## 安装
 
-> **Note:** Install agent-eval from its repository after reviewing the source.
+> **注意：** 在审查源代码后从其仓库安装 agent-eval。
 
-## Core Concepts
+## 核心概念
 
-### YAML Task Definitions
+### YAML 任务定义
 
-Define tasks declaratively. Each task specifies what to do, which files to touch, and how to judge success:
+声明式定义任务。每个任务指定要做什么、触及哪些文件以及如何判断成功：
 
 ```yaml
 name: add-retry-logic
-description: Add exponential backoff retry to the HTTP client
+description: 为 HTTP 客户端添加指数退避重试
 repo: ./my-project
 files:
   - src/http_client.py
 prompt: |
-  Add retry logic with exponential backoff to all HTTP requests.
-  Max 3 retries. Initial delay 1s, max delay 30s.
+  为所有 HTTP 请求添加带指数退避的重试逻辑。
+  最多 3 次重试。初始延迟 1s，最大延迟 30s。
 judge:
   - type: pytest
     command: pytest tests/test_http_client.py -v
   - type: grep
     pattern: "exponential_backoff|retry"
     files: src/http_client.py
-commit: "abc1234"  # pin to specific commit for reproducibility
+commit: "abc1234"  # 固定到特定提交以确保可复现性
 ```
 
-### Git Worktree Isolation
+### Git Worktree 隔离
 
-Each agent run gets its own git worktree — no Docker required. This provides reproducibility isolation so agents cannot interfere with each other or corrupt the base repo.
+每次智能体运行获得自己的 git worktree——无需 Docker。这提供可复现性隔离，使智能体不会相互干扰或破坏基础仓库。
 
-### Metrics Collected
+### 收集的指标
 
-| Metric | What It Measures |
-|--------|-----------------|
-| Pass rate | Did the agent produce code that passes the judge? |
-| Cost | API spend per task (when available) |
-| Time | Wall-clock seconds to completion |
-| Consistency | Pass rate across repeated runs (e.g., 3/3 = 100%) |
+| 指标 | 测量内容 |
+|--------|---------|
+| 通过率 | 智能体是否产生了通过评判的代码？ |
+| 成本 | 每个任务的 API 花费（当可用时） |
+| 时间 | 完成的墙上时钟秒数 |
+| 一致性 | 跨重复运行通过率（例如 3/3 = 100%） |
 
-## Workflow
+## 工作流
 
-### 1. Define Tasks
+### 1. 定义任务
 
-Create a `tasks/` directory with YAML files, one per task:
+创建包含 YAML 文件的 `tasks/` 目录，每个任务一个：
 
 ```bash
 mkdir tasks
-# Write task definitions (see template above)
+# 编写任务定义（见上方模板）
 ```
 
-### 2. Run Agents
+### 2. 运行智能体
 
-Execute agents against your tasks:
+针对你的任务执行智能体：
 
 ```bash
 agent-eval run --task tasks/add-retry-logic.yaml --agent claude-code --agent aider --runs 3
 ```
 
-Each run:
-1. Creates a fresh git worktree from the specified commit
-2. Hands the prompt to the agent
-3. Runs the judge criteria
-4. Records pass/fail, cost, and time
+每次运行：
+1. 从指定提交创建新的 git worktree
+2. 将提示交给智能体
+3. 运行评判标准
+4. 记录通过/失败、成本和时间
 
-### 3. Compare Results
+### 3. 比较结果
 
-Generate a comparison report:
+生成比较报告：
 
 ```bash
 agent-eval report --format table
 ```
 
 ```
-Task: add-retry-logic (3 runs each)
+任务：add-retry-logic（各 3 次运行）
 ┌──────────────┬───────────┬────────┬────────┬─────────────┐
-│ Agent        │ Pass Rate │ Cost   │ Time   │ Consistency │
+│ 智能体        │ 通过率    │ 成本   │ 时间   │ 一致性      │
 ├──────────────┼───────────┼────────┼────────┼─────────────┤
 │ claude-code  │ 3/3       │ $0.12  │ 45s    │ 100%        │
 │ aider        │ 2/3       │ $0.08  │ 38s    │  67%        │
 └──────────────┴───────────┴────────┴────────┴─────────────┘
 ```
 
-## Judge Types
+## 评判类型
 
-### Code-Based (deterministic)
+### 基于代码（确定性）
 
 ```yaml
 judge:
@@ -336,7 +334,7 @@ judge:
     command: npm run build
 ```
 
-### Pattern-Based
+### 基于模式
 
 ```yaml
 judge:
@@ -345,171 +343,169 @@ judge:
     files: src/**/*.py
 ```
 
-### Model-Based (LLM-as-judge)
+### 基于模型（LLM 作为评判）
 
 ```yaml
 judge:
   - type: llm
     prompt: |
-      Does this implementation correctly handle exponential backoff?
-      Check for: max retries, increasing delays, jitter.
+      此实现是否正确处理了指数退避？
+      检查：最大重试次数、递增延迟、抖动。
 ```
 
-## Best Practices
+## 最佳实践
 
-- **Start with 3-5 tasks** that represent your real workload, not toy examples
-- **Run at least 3 trials** per agent to capture variance — agents are non-deterministic
-- **Pin the commit** in your task YAML so results are reproducible across days/weeks
-- **Include at least one deterministic judge** (tests, build) per task — LLM judges add noise
-- **Track cost alongside pass rate** — a 95% agent at 10x the cost may not be the right choice
-- **Version your task definitions** — they are test fixtures, treat them as code
+- **从 3-5 个代表你真实工作负载的任务开始**，而非玩具示例
+- **每个智能体至少运行 3 次试验** 以捕获方差——智能体是非确定性的
+- **在任务 YAML 中固定提交**，以便在数天/数周内结果可复现
+- **每个任务至少包含一个确定性评判**（测试、构建）——LLM 评判会增加噪声
+- **跟踪成本以及通过率**——95% 的智能体以 10 倍成本可能不是正确选择
+- **版本化你的任务定义**——它们是测试固件，像代码一样对待
 
-## Links
+## 链接
 
-- Repository: [github.com/joaquinhuigomez/agent-eval](https://github.com/joaquinhuigomez/agent-eval)
-
+- 仓库：[github.com/joaquinhuigomez/agent-eval](https://github.com/joaquinhuigomez/agent-eval)
 
 ---
 
 ---
 name: agent-harness-construction
-description: Design and optimize AI agent action spaces, tool definitions, and observation formatting for higher completion rates.
+description: 设计和优化 AI 智能体的行动空间、工具定义和观察格式，以提高完成率。
 origin: ECC
 ---
 
-# Agent Harness Construction
+# 智能体工具链构建
 
-Use this skill when you are improving how an agent plans, calls tools, recovers from errors, and converges on completion.
+当你改进智能体规划、调用工具、从错误恢复和收敛到完成的方式时，使用此技能。
 
-## Core Model
+## 核心模型
 
-Agent output quality is constrained by:
-1. Action space quality
-2. Observation quality
-3. Recovery quality
-4. Context budget quality
+智能体输出质量受限于：
+1. 行动空间质量
+2. 观察质量
+3. 恢复质量
+4. 上下文预算质量
 
-## Action Space Design
+## 行动空间设计
 
-1. Use stable, explicit tool names.
-2. Keep inputs schema-first and narrow.
-3. Return deterministic output shapes.
-4. Avoid catch-all tools unless isolation is impossible.
+1. 使用稳定、明确的工具名称。
+2. 保持输入 schema 优先且窄。
+3. 返回确定性输出形状。
+4. 除非隔离不可能，否则避免万能工具。
 
-## Granularity Rules
+## 粒度规则
 
-- Use micro-tools for high-risk operations (deploy, migration, permissions).
-- Use medium tools for common edit/read/search loops.
-- Use macro-tools only when round-trip overhead is the dominant cost.
+- 对高风险操作（部署、迁移、权限）使用微工具。
+- 对常见编辑/读取/搜索循环使用中等工具。
+- 只有当往返开销是主要成本时才使用宏工具。
 
-## Observation Design
+## 观察设计
 
-Every tool response should include:
+每个工具响应应包含：
 - `status`: success|warning|error
-- `summary`: one-line result
-- `next_actions`: actionable follow-ups
-- `artifacts`: file paths / IDs
+- `summary`: 一行结果
+- `next_actions`: 可操作的跟进
+- `artifacts`: 文件路径 / ID
 
-## Error Recovery Contract
+## 错误恢复契约
 
-For every error path, include:
-- root cause hint
-- safe retry instruction
-- explicit stop condition
+每个错误路径包含：
+- 根本原因提示
+- 安全重试指令
+- 明确的停止条件
 
-## Context Budgeting
+## 上下文预算
 
-1. Keep system prompt minimal and invariant.
-2. Move large guidance into skills loaded on demand.
-3. Prefer references to files over inlining long documents.
-4. Compact at phase boundaries, not arbitrary token thresholds.
+1. 保持系统提示最小且不变。
+2. 将大型指导移至按需加载的技能中。
+3. 优先引用文件而非内联长文档。
+4. 在阶段边界压缩，而非在任意 token 阈值。
 
-## Architecture Pattern Guidance
+## 架构模式指导
 
-- ReAct: best for exploratory tasks with uncertain path.
-- Function-calling: best for structured deterministic flows.
-- Hybrid (recommended): ReAct planning + typed tool execution.
+- ReAct：最适合路径不确定的探索性任务。
+- Function-calling：最适合结构化确定性流程。
+- 混合（推荐）：ReAct 规划 + 类型化工具执行。
 
-## Benchmarking
+## 基准测试
 
-Track:
-- completion rate
-- retries per task
-- pass@1 and pass@3
-- cost per successful task
+跟踪：
+- 完成率
+- 每任务重试次数
+- pass@1 和 pass@3
+- 每成功任务成本
 
-## Anti-Patterns
+## 反模式
 
-- Too many tools with overlapping semantics.
-- Opaque tool output with no recovery hints.
-- Error-only output without next steps.
-- Context overloading with irrelevant references.
-
+- 工具过多且语义重叠。
+- 工具输出不透明且无恢复提示。
+- 仅错误输出而无下一步。
+- 用无关引用使上下文超载。
 
 ---
 
 ---
 name: agent-sort
-description: Build an evidence-backed ECC install plan for a specific repo by sorting skills, commands, rules, hooks, and extras into DAILY vs LIBRARY buckets using parallel repo-aware review passes. Use when ECC should be trimmed to what a project actually needs instead of loading the full bundle.
+description: 通过并行仓库感知审查过程，将技能、命令、规则、钩子和额外组件分类到 DAILY 和 LIBRARY 桶中，构建基于证据的 ECC 安装计划。当 ECC 应被精简为项目实际需要而非加载完整包时使用。
 origin: ECC
 ---
 
-# Agent Sort
+# 智能体排序
 
-Use this skill when a repo needs a project-specific ECC surface instead of the default full install.
+当仓库需要特定项目的 ECC 表面而非默认完整安装时，使用此技能。
 
-The goal is not to guess what "feels useful." The goal is to classify ECC components with evidence from the actual codebase.
+目标不是猜测什么"感觉有用"。目标是通过实际代码库的证据对 ECC 组件进行分类。
 
-## When to Use
+## 激活时机
 
-- A project only needs a subset of ECC and full installs are too noisy
-- The repo stack is clear, but nobody wants to hand-curate skills one by one
-- A team wants a repeatable install decision backed by grep evidence instead of opinion
-- You need to separate always-loaded daily workflow surfaces from searchable library/reference surfaces
-- A repo has drifted into the wrong language, rule, or hook set and needs cleanup
+- 项目只需要 ECC 子集而完整安装太嘈杂
+- 仓库栈清晰，但没人想逐个手动策划技能
+- 团队希望基于 grep 证据获得可重复的安装决策
+- 需要将始终加载的日常工作流表面与可搜索的库/引用表面分开
+- 仓库漂移到错误的语言、规则或钩子集需要清理
 
-## Non-Negotiable Rules
+## 不可妥协规则
 
-- Use the current repository as the source of truth, not generic preferences
-- Every DAILY decision must cite concrete repo evidence
-- LIBRARY does not mean "delete"; it means "keep accessible without loading by default"
-- Do not install hooks, rules, or scripts that the current repo cannot use
-- Prefer ECC-native surfaces; do not introduce a second install system
+- 使用当前仓库作为事实来源，而非通用偏好
+- 每个 DAILY 决策必须引用具体仓库证据
+- LIBRARY 不意味着"删除"；意味着"默认不加载但保持可访问"
+- 不安装当前仓库不能使用的钩子、规则或脚本
+- 优先使用 ECC 原生表面；不要引入第二个安装系统
 
-## Outputs
+## 输出
 
-Produce these artifacts in order:
+按顺序生成这些产物：
 
-1. DAILY inventory
-2. LIBRARY inventory
-3. install plan
-4. verification report
-5. optional `skill-library` router if the project wants one
+1. DAILY 清单
+2. LIBRARY 清单
+3. 安装计划
+4. 验证报告
+5. 可选的 `skill-library` 路由器（如果项目需要）
 
-## Classification Model
+## 分类模型
 
-Use two buckets only:
+仅使用两个桶：
 
 - `DAILY`
-  - should load every session for this repo
-  - strongly matched to the repo's language, framework, workflow, or operator surface
+  - 应为此仓库的每个会话加载
+  - 与仓库的语言、框架、工作流或操作者表面强匹配
 - `LIBRARY`
-  - useful to retain, but not worth loading by default
-  - should remain reachable through search, router skill, or selective manual use
+  - 有用但不值得默认加载
+  - 应保持可通过搜索、路由器技能或选择性手动使用访问
 
-## Evidence Sources
+## 证据来源
 
-Use repo-local evidence before making any classification:
+在做出任何分类之前使用仓库本地证据：
 
-- file extensions
-- package managers and lockfiles
-- framework configs
-- CI and hook configs
-- build/test scripts
-- imports and dependency manifests
-- repo docs that explicitly describe the stack
+- 文件扩展名
+- 包管理器和锁文件
+- 框架配置
+- CI 和钩子配置
+- 构建/测试脚本
+- 导入和依赖清单
+- 仓库文档中明确描述栈的部分
 
-Useful commands include:
+有用命令包括：
 
 ```bash
 rg --files
@@ -521,149 +517,145 @@ cat pubspec.yaml
 cat go.mod
 ```
 
-## Parallel Review Passes
+## 并行审查过程
 
-If parallel subagents are available, split the review into these passes:
+如果并行子智能体可用，将审查分为这些过程：
 
-1. Agents
-   - classify `agents/*`
-2. Skills
-   - classify `skills/*`
-3. Commands
-   - classify `commands/*`
-4. Rules
-   - classify `rules/*`
-5. Hooks and scripts
-   - classify hook surfaces, MCP health checks, helper scripts, and OS compatibility
-6. Extras
-   - classify contexts, examples, MCP configs, templates, and guidance docs
+1. 智能体
+   - 分类 `agents/*`
+2. 技能
+   - 分类 `skills/*`
+3. 命令
+   - 分类 `commands/*`
+4. 规则
+   - 分类 `rules/*`
+5. 钩子和脚本
+   - 分类钩子表面、MCP 健康检查、辅助脚本和 OS 兼容性
+6. 额外
+   - 分类上下文、示例、MCP 配置、模板和指导文档
 
-If subagents are not available, run the same passes sequentially.
+如果子智能体不可用，按顺序运行相同过程。
 
-## Core Workflow
+## 核心工作流
 
-### 1. Read the repo
+### 1. 读取仓库
 
-Establish the real stack before classifying anything:
+在分类任何内容之前建立真实栈：
 
-- languages in use
-- frameworks in use
-- primary package manager
-- test stack
-- lint/format stack
-- deployment/runtime surface
-- operator integrations already present
+- 使用的语言
+- 使用的框架
+- 主要包管理器
+- 测试栈
+- lint/格式化栈
+- 部署/运行时表面
+- 已存在的操作者集成
 
-### 2. Build the evidence table
+### 2. 构建证据表
 
-For every candidate surface, record:
+对每个候选表面记录：
 
-- component path
-- component type
-- proposed bucket
-- repo evidence
-- short justification
+- 组件路径
+- 组件类型
+- 提议的桶
+- 仓库证据
+- 简短理由
 
-Use this format:
+使用此格式：
 
 ```text
-skills/frontend-patterns | skill | DAILY | 84 .tsx files, next.config.ts present | core frontend stack
-skills/django-patterns   | skill | LIBRARY | no .py files, no pyproject.toml       | not active in this repo
-rules/typescript/*       | rules | DAILY | package.json + tsconfig.json            | active TS repo
-rules/python/*           | rules | LIBRARY | zero Python source files             | keep accessible only
+skills/frontend-patterns | skill | DAILY | 84 个 .tsx 文件，存在 next.config.ts | 核心前端栈
+skills/django-patterns   | skill | LIBRARY | 无 .py 文件，无 pyproject.toml       | 此仓库中未激活
+rules/typescript/*       | rules | DAILY | package.json + tsconfig.json            | 活跃的 TS 仓库
+rules/python/*           | rules | LIBRARY | 零个 Python 源文件             | 仅保持可访问
 ```
 
-### 3. Decide DAILY vs LIBRARY
+### 3. 决定 DAILY vs LIBRARY
 
-Promote to `DAILY` when:
+升级到 `DAILY` 当：
 
-- the repo clearly uses the matching stack
-- the component is general enough to help every session
-- the repo already depends on the corresponding runtime or workflow
+- 仓库明确使用匹配的栈
+- 组件足够通用以帮助每个会话
+- 仓库已依赖相应的运行时或工作流
 
-Demote to `LIBRARY` when:
+降级到 `LIBRARY` 当：
 
-- the component is off-stack
-- the repo might need it later, but not every day
-- it adds context overhead without immediate relevance
+- 组件离栈
+- 仓库可能稍后需要，但非每天需要
+- 它增加上下文开销而无 immediate 相关性
 
-### 4. Build the install plan
+### 4. 构建安装计划
 
-Translate the classification into action:
+将分类转化为行动：
 
-- DAILY skills -> install or keep in `.claude/skills/`
-- DAILY commands -> keep as explicit shims only if still useful
-- DAILY rules -> install only matching language sets
-- DAILY hooks/scripts -> keep only compatible ones
-- LIBRARY surfaces -> keep accessible through search or `skill-library`
+- DAILY 技能 -> 安装或保留在 `.claude/skills/`
+- DAILY 命令 -> 仅在仍有用时保留为显式填充
+- DAILY 规则 -> 仅安装匹配的语言集
+- DAILY 钩子/脚本 -> 仅保留兼容的
+- LIBRARY 表面 -> 通过搜索或 `skill-library` 保持可访问
 
-If the repo already uses selective installs, update that plan instead of creating another system.
+如果仓库已使用选择性安装，更新该计划而非创建另一个系统。
 
-### 5. Create the optional library router
+### 5. 创建可选的库路由器
 
-If the project wants a searchable library surface, create:
+如果项目需要可搜索的库表面，创建：
 
 - `.claude/skills/skill-library/SKILL.md`
 
-That router should contain:
+该路由器应包含：
 
-- a short explanation of DAILY vs LIBRARY
-- grouped trigger keywords
-- where the library references live
+- DAILY vs LIBRARY 的简短解释
+- 分组的触发关键词
+- 库引用所在位置
 
-Do not duplicate every skill body inside the router.
+不要在路由器内部复制每个技能主体。
 
-### 6. Verify the result
+### 6. 验证结果
 
-After the plan is applied, verify:
+应用计划后验证：
 
-- every DAILY file exists where expected
-- stale language rules were not left active
-- incompatible hooks were not installed
-- the resulting install actually matches the repo stack
+- 每个 DAILY 文件存在于预期位置
+- 陈旧的语言规则未被遗留
+- 不兼容的钩子未被安装
+- 生成的安装实际匹配仓库栈
 
-Return a compact report with:
+返回紧凑报告包含：
 
-- DAILY count
-- LIBRARY count
-- removed stale surfaces
-- open questions
+- DAILY 数量
+- LIBRARY 数量
+- 移除的陈旧表面
+- 开放问题
 
-## Handoffs
+## 交接
 
-If the next step is interactive installation or repair, hand off to:
+如果下一步是交互式安装或修复，交给：
 
 - `configure-ecc`
 
-If the next step is overlap cleanup or catalog review, hand off to:
+如果下一步是重叠清理或目录审查，交给：
 
 - `skill-stocktake`
 
-If the next step is broader context trimming, hand off to:
+如果下一步是更广泛的上下文修剪，交给：
 
 - `strategic-compact`
 
-## Output Format
+## 输出格式
 
-Return the result in this order:
+按此顺序返回结果：
 
 ```text
 STACK
-- language/framework/runtime summary
+- 语言/框架/运行时摘要
 
 DAILY
-- always-loaded items with evidence
+- 始终加载的项目及证据
 
 LIBRARY
-- searchable/reference items with evidence
+- 可搜索/参考的项目及证据
 
 INSTALL PLAN
-- what should be installed, removed, or routed
+- 应该安装、移除或路由的内容
 
 VERIFICATION
-- checks run and remaining gaps
+- 运行的检查和剩余差距
 ```
-
-
----
-

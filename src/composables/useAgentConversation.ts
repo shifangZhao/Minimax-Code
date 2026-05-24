@@ -577,6 +577,26 @@ export function useAgentConversation(agentType: string) {
   }
 
   const displayMessages = computed(() => {
+    // Collect tool results from hidden tool_result messages
+    const toolResults = new Map<string, string>()
+    for (const m of messages.value) {
+      if ((m as any).raw_json) {
+        try {
+          const blocks = JSON.parse((m as any).raw_json)
+          if (Array.isArray(blocks)) {
+            for (const b of blocks) {
+              if (b.type === 'tool_result' && b.tool_use_id && b.content) {
+                toolResults.set(
+                  b.tool_use_id,
+                  typeof b.content === 'string' ? b.content : JSON.stringify(b.content)
+                )
+              }
+            }
+          }
+        } catch {}
+      }
+    }
+
     const result: any[] = []
     for (const m of messages.value) {
       const hidden = isInternalCacheMessage(m)
@@ -602,7 +622,7 @@ export function useAgentConversation(agentType: string) {
                 id: `tool-${tc.id}`,
                 role: 'tool',
                 tool_calls: JSON.stringify([tc]),
-                content: '',
+                content: toolResults.get(tc.id) || '',
                 created_at: m.created_at,
               } as any)
             }

@@ -120,21 +120,22 @@
           </div>
         </div>
       </div>
-      <div v-if="(currentStreaming.text || currentStreaming.thinking || streamingToolCards.length > 0) && !currentStreaming.done" class="message assistant">
+      <div v-if="(currentStreaming.text || currentStreaming.thinking) && !currentStreaming.done" class="message assistant">
         <div class="avatar">A</div>
         <div class="content">
-          <div
-            v-for="card in streamingToolCards"
-            :key="card.name + (card.args || '')"
-            class="tool-msg"
-          >
-            <ToolCard :toolInfo="card" />
-          </div>
-          <div v-if="currentStreaming.toolCallCount > 0 && streamingToolCards.length === 0" class="tool-counter">
-            已使用 {{ currentStreaming.toolCallCount }} 个工具
-          </div>
           <div class="thinking-text" v-if="currentStreaming.thinking">{{ currentStreaming.thinking }}</div>
           <pre class="streaming-text" v-if="currentStreaming.text && !currentStreaming.done">{{ currentStreaming.text }}</pre>
+        </div>
+      </div>
+      <div
+        v-for="card in streamingToolCards"
+        :key="card.tool_id"
+        class="message tool"
+      >
+        <div class="content">
+          <div class="tool-msg">
+            <ToolCard :toolInfo="{ name: card.name, args: card.args, result: card.result }" />
+          </div>
         </div>
       </div>
     </div>
@@ -361,11 +362,12 @@ const currentStreaming = computed(() => {
 
 const streamingToolCards = computed(() => {
   const events = currentStreaming.value.toolEvents || []
-  const cards = new Map<string, { name: string; args?: string; result?: string; state: string }>()
+  const cards = new Map<string, { tool_id: string; name: string; args?: string; result?: string; state: string }>()
   for (const ev of events) {
     const existing = cards.get(ev.tool_id)
     if (ev.type === 'tool_start') {
       cards.set(ev.tool_id, {
+        tool_id: ev.tool_id,
         name: ev.tool,
         args: ev.input ? JSON.stringify(ev.input) : undefined,
         result: existing?.result,
@@ -373,6 +375,7 @@ const streamingToolCards = computed(() => {
       })
     } else if (ev.type === 'tool_end') {
       cards.set(ev.tool_id, {
+        tool_id: ev.tool_id,
         name: ev.tool,
         args: existing?.args,
         result: ev.result,
