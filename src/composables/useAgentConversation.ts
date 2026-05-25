@@ -638,17 +638,24 @@ export function useAgentConversation(agentType: string) {
 
   const showClearConfirm = ref(false)
 
+  /** Clear module-level caches for a session without touching the DB. */
+  function clearSessionCache(sid: number | null) {
+    if (sid === null) return
+    sessionMessages.delete(sid)
+    sessionTokenUsage.delete(sid)
+    sessionMeta.delete(sid)
+    useTodoStore().clearState(sid)
+  }
+
   async function clearConversation() {
     if (!sessionId.value) return
     try {
       clearStreamState(sessionId.value)
       await db.clearSessionHistory(sessionId.value)
       messages.value = []
-      sessionMessages.delete(sessionId.value)
+      clearSessionCache(sessionId.value)
       toolEvents.value = []
       tokenUsage.value = { estimated_tokens: 0, context_window: 204800, usage_pct: 0 }
-      sessionTokenUsage.delete(sessionId.value)
-      useTodoStore().clearState(sessionId.value)
       showClearConfirm.value = false
     } catch (e) {
       console.error('Clear failed:', e)
@@ -758,6 +765,7 @@ export function useAgentConversation(agentType: string) {
     sendMessage,
     clearAsk,
     clearToolEvents,
+    clearSessionCache,
     switchGroupChat,
     tokenUsage,
     cacheUsage,

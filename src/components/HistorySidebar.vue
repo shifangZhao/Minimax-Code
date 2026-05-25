@@ -66,7 +66,7 @@ defineProps<{
 }>()
 
 const emit = defineEmits<{
-  (e: 'selectGroupChat', chatId: number): void
+  (e: 'selectGroupChat', chatId: number | null): void
 }>()
 
 const editingId = ref<number | null>(null)
@@ -93,7 +93,7 @@ const loadGroupChats = async () => {
 watch(currentMode, () => {
   activeChatId.value = null
   loadGroupChats()
-  emit('selectGroupChat', null as any)
+  emit('selectGroupChat', null)
 })
 
 const createGroupChat = () => {

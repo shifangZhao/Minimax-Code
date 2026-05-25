@@ -289,6 +289,7 @@ const {
   loadMoreMessages,
   hasMoreOlder,
   loadingMore,
+  clearSessionCache,
 } = useAgentConversation(props.agentType)
 
 const { sessions } = useGlobalStreaming()
@@ -944,11 +945,13 @@ watch(() => props.groupChatId, async (newId) => {
   if (newId) {
     await initSession(newId)
     scrollToBottom(true)
-  } else if (newId === null || newId === undefined) {
-    // Group chat was deleted — clear all state
+  } else if (newId == null || newId === 0) {
+    // Group chat was deleted or is invalid — clear all state
+    const oldSid = sessionId.value
     messages.value = []
     sessionId.value = null
     currentGroupChatId.value = null
+    if (oldSid) clearSessionCache(oldSid)
   }
 }, { immediate: true })
 

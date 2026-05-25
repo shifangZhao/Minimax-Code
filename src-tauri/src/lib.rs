@@ -213,6 +213,8 @@ fn delete_group_chat(state: State<AppState>, id: i64) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM group_chat WHERE id = ?1", [id])
         .map_err(|e| e.to_string())?;
+    // Compact after bulk delete so disk space doesn't stay fragmented
+    conn.execute_batch("VACUUM;").ok();
     Ok(())
 }
 
@@ -358,6 +360,8 @@ fn clear_session_history(state: State<AppState>, session_id: i64) -> Result<(), 
     // Clean up automatic file snapshots (bookmarks survive — they're intentional saves)
     conn.execute("DELETE FROM file_snapshot WHERE session_id = ?1", [session_id])
         .map_err(|e| e.to_string())?;
+    // Compact after bulk delete so disk space doesn't stay fragmented
+    conn.execute_batch("VACUUM;").ok();
     Ok(())
 }
 
@@ -2072,7 +2076,7 @@ fn read_file_base64(path: String) -> Result<String, String> {
     Ok(format!("data:{};base64,{}", mime, base64_encode_fast(&bytes)))
 }
 
-fn init_user_dir() {
+fn init_user_dir() -> std::path::PathBuf {
     let home = if cfg!(windows) {
         std::env::var("USERPROFILE")
             .or_else(|_| std::env::var("HOMEDRIVE").and_then(|hd| std::env::var("HOMEPATH").map(|hp| format!("{}{}", hd, hp))))
@@ -2126,6 +2130,7 @@ fn init_user_dir() {
         }
     }
     eprintln!("[init] User dir ready: {}", base.display());
+    base
 }
 
 // ========== Undo / Rewind / Bookmark Commands ==========
@@ -2347,13 +2352,8 @@ fn delete_bookmark(state: State<AppState>, bookmark_id: i64) -> Result<(), Strin
 }
 
 pub fn run() {
-    let app_dir = dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("minimax-code");
-    std::fs::create_dir_all(&app_dir).ok();
-
-    init_user_dir();
-    let db_path = app_dir.join("minimax.db");
+    let user_dir = init_user_dir();
+    let db_path = user_dir.join("minimax.db");
 
     let conn = Connection::open(&db_path).expect("Failed to open database");
 
