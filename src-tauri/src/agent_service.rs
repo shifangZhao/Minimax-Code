@@ -427,6 +427,7 @@ pub struct AgentService {
     lsp_manager: Arc<StdMutex<Option<LspManager>>>,
     permission_service: Arc<StdMutex<PermissionService>>,
     pending_asks: PendingAsks,
+    todo_store: Arc<StdMutex<HashMap<i64, String>>>,
 }
 
 impl Clone for AgentService {
@@ -444,6 +445,7 @@ impl Clone for AgentService {
             lsp_manager: self.lsp_manager.clone(),
             permission_service: self.permission_service.clone(),
             pending_asks: self.pending_asks.clone(),
+            todo_store: self.todo_store.clone(),
         }
     }
 }
@@ -463,6 +465,7 @@ impl AgentService {
             lsp_manager,
             permission_service,
             pending_asks,
+            todo_store: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 
@@ -670,7 +673,7 @@ impl AgentService {
             // so the agent follows critical rules without needing an extra skill-call round-trip.
             let builtins: Vec<_> = relevant.iter().filter(|m| m.source == "builtin").collect();
             if !builtins.is_empty() {
-                let mut ctx = String::from("## 内置参考资料\n\n");
+                let mut ctx = String::from("## 内置技能\n\n");
                 for m in &builtins {
                     if m.score > 0.75 {
                         // High confidence — inject full content so the rule is impossible to miss
@@ -682,7 +685,7 @@ impl AgentService {
                         ctx.push_str(&format!("- **{}** (匹配度: {:.0}%): {}\n", m.name, m.score * 100.0, m.description));
                     }
                 }
-                ctx.push_str("以上参考资料已自动加载，直接按指引执行，不要再调用 skill 工具。\n");
+                ctx.push_str("以上内置技能已自动加载，直接按指引执行，不要再调用 skill 工具。\n");
                 api_messages.push(json!({"role": "user", "content": ctx}));
             }
             // User/project skills — visible to user
@@ -909,6 +912,7 @@ impl AgentService {
                 &mut api_messages,
                 cancel_rx.clone(),
                 &mut repeat_guard_fired,
+                self.todo_store.clone(),
             ).await;
 
             eprintln!("[stream_chat] Model: {}, stop_reason: {:?}, thinking: {} chars, text: {} chars, tool_uses: {}", self.model,
@@ -1116,6 +1120,7 @@ async fn process_sse_stream(
     _api_messages: &mut Vec<serde_json::Value>,
     mut cancel_rx: watch::Receiver<bool>,
     repeat_guard_fired: &mut bool,
+    todo_store: Arc<StdMutex<HashMap<i64, String>>>,
 ) -> (Option<String>, String, String, Vec<(String, String, String)>, Vec<(String, String, String)>, Option<u64>) {
     eprintln!("[process_sse_stream] Starting with session_key: {}", session_key);
     let mut current_tool_id: Option<String> = None;
@@ -1401,6 +1406,7 @@ async fn process_sse_stream(
                 let lsp_manager = lsp_manager.clone();
                 let permission_service = permission_service.clone();
                 let pending_asks = pending_asks.clone();
+                let todo_store = todo_store.clone();
                 let app = app.clone();
                 let sid = session_id;
                 let cancel_rx = cancel_rx.clone();
@@ -1410,7 +1416,7 @@ async fn process_sse_stream(
                         api_key, api_url, model, provider,
                         skill_service, mcp_service,
                         db, lsp_manager, permission_service, pending_asks, app,
-                        cancel_rx,
+                        cancel_rx, todo_store,
                     ).await;
                     (i, tool_name, result)
                 })
@@ -1541,6 +1547,7 @@ async fn execute_tool(
     pending_asks: PendingAsks,
     app_handle: AppHandle,
     cancel_rx: watch::Receiver<bool>,
+    todo_store: Arc<StdMutex<HashMap<i64, String>>>,
 ) -> String {
     let params: serde_json::Value = serde_json::from_str(input).unwrap_or(json!({}));
 
@@ -1732,6 +1739,7 @@ async fn execute_tool(
         "read_lints" => tool_read_lints(&params, lsp_manager.clone(), db.clone()).await,
         "touch_file" => tool_touch_file(&params, lsp_manager.clone(), db.clone()).await,
         "ask_choice" => tool_ask_choice(&params, session_id, "unknown", pending_asks.clone(), app_handle.clone()).await,
+        "todo_write" => tool_todo_write(&params, &todo_store, session_id).await,
         // Fallback: try MCP
         _ => {
             let mcp = mcp_service.read().await;
@@ -1841,6 +1849,9 @@ fn get_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
         ("send_to_agent", "向其他智能体发送消息，发送即完成，无需等待回复。target_agent: front/plan/work/review/explore", schema_obj(json!({"target_agent": {"type": "string"}, "message": {"type": "string"}}), &["target_agent", "message"])),
     ];
 
+    // Todo tracking (ace / work / front)
+    let todo_tool = ("todo_write", "创建和更新结构化任务列表来跟踪进度——防偷懒利器。每次调用用完整列表替换旧列表。\ntodos: [{content: 任务描述(单一具体动作), status: pending|in_progress|completed, activeForm: 进行时描述}]\n规则：\n1. 任何非纯问答任务的第一步就是调此工具，3-7项为宜\n2. 每项是单一具体动作，禁止\"实现功能\"这类模糊描述\n3. 同一时间只有一项 in_progress\n4. 完成一项立刻标记 completed，不许批量标记\n5. 只有验证通过（测试/lint 通过）才能标记 completed\n6. 全部 completed 后才汇报任务完成", schema_obj(json!({"todos": {"type": "array", "items": {"type": "object", "properties": {"content": {"type": "string", "description": "任务描述，单一具体动作"}, "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}, "activeForm": {"type": "string", "description": "进行时描述，如 '正在添加登录组件'"}}, "required": ["content", "status"]}}}), &["todos"]));
+
     // Skill tools (front / plan / work / review - NOT explore)
     let skill_tools: &[(&str, &str, serde_json::Value)] = &[
         ("skill", "加载指定技能的完整操作指令", schema_obj(json!({"name": {"type": "string"}}), &["name"])),
@@ -1879,6 +1890,7 @@ fn get_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
             tools.push(make_tool(ask_tool.0, ask_tool.1, ask_tool.2.clone()));
             add_tools(&mut tools, comm_tools);
             add_tools(&mut tools, skill_tools);
+            tools.push(make_tool(todo_tool.0, todo_tool.1, todo_tool.2.clone()));
         }
         "plan" => {
             add_tools(&mut tools, read_only_files);
@@ -1930,6 +1942,7 @@ fn get_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
             tools.push(make_tool(kw.0, kw.1, kw.2.clone()));
             add_tools(&mut tools, comm_tools);
             add_tools(&mut tools, skill_tools);
+            tools.push(make_tool(todo_tool.0, todo_tool.1, todo_tool.2.clone()));
         }
         "ace" => {
             // Ace: all tools from all agents, minus send_to_agent
@@ -1946,6 +1959,7 @@ fn get_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
             tools.push(make_tool(kw.0, kw.1, kw.2.clone()));
             tools.push(make_tool(ask_tool.0, ask_tool.1, ask_tool.2.clone()));  // ask_choice
             add_tools(&mut tools, skill_tools);
+            tools.push(make_tool(todo_tool.0, todo_tool.1, todo_tool.2.clone()));
         }
         _ => {
             // Fallback: same as front

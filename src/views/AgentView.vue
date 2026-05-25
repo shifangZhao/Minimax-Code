@@ -67,6 +67,7 @@
       </div>
       <span class="context-label">{{ formatTokens(tokenUsage.estimated_tokens) }} / {{ formatTokens(tokenUsage.context_window) }}</span>
     </div>
+    <TodoPanel :sessionId="sessionId" />
     <div class="messages" ref="messagesEl" @scroll="saveScrollPos">
       <div v-if="hasMoreOlder" class="load-earlier-wrap">
         <button class="load-earlier-btn" :disabled="loadingMore" @click="loadMoreMessages()">
@@ -160,9 +161,7 @@
         </div>
       </template>
     </div>
-    <div v-if="agentType === 'front' || agentType === 'ace'" class="scroll-bottom-wrap">
-      <button v-show="!isAtBottom()" class="scroll-bottom-btn" title="回到底部" @click="scrollToBottom(true)">↓</button>
-    </div>
+    <button v-show="!atBottom" class="scroll-bottom-btn" title="回到底部" @click="scrollToBottom(true)">↓</button>
     <ConfirmDialog
       :visible="showRewindConfirm !== null"
       title="回退消息"
@@ -253,6 +252,7 @@ import ConfirmDialog from '../components/ConfirmDialog.vue'
 import AttachmentPreview from '../components/AttachmentPreview.vue'
 import CommandPopup from '../components/CommandPopup.vue'
 import PermissionCard from '../components/PermissionCard.vue'
+import TodoPanel from '../components/TodoPanel.vue'
 import { useUndoHistory } from '../composables/useUndoHistory'
 import { useBookmarks } from '../composables/useBookmarks'
 
@@ -345,6 +345,7 @@ function saveScrollPos() {
   if (messagesEl.value) {
     scrollTop.value = messagesEl.value.scrollTop
     scrollCache.set(agentScrollKey.value, messagesEl.value.scrollTop)
+    updateAtBottom()
     if (!navScrolling.value) syncNavFromScroll()
   }
 }
@@ -424,7 +425,9 @@ const streamingSegments = computed(() => {
       })
     }
   }
-  const cardList = [...cards.values()].sort((a, b) => a.textBefore.length - b.textBefore.length)
+  const cardList = [...cards.values()]
+    .filter(c => c.name !== 'todo_write')
+    .sort((a, b) => a.textBefore.length - b.textBefore.length)
 
   // Build interleaved segments: thinking → text → tool → thinking → text → tool → ...
   const segments: StreamSegment[] = []
@@ -556,19 +559,25 @@ function getToolCardInfo(msg: { role: string; content?: string; tool_calls?: str
     const calls = JSON.parse(msg.tool_calls)
     if (!Array.isArray(calls) || calls.length === 0) return null
     const tc = calls[0]
+    const name = tc.function?.name || 'tool'
+    if (name === 'todo_write') return null
     return {
-      name: tc.function?.name || 'tool',
+      name,
       args: tc.function?.arguments || undefined,
       result: msg.content || undefined,
     }
   } catch { return null }
 }
 
-function isAtBottom(): boolean {
-  if (!messagesEl.value) return true
+const atBottom = ref(true)
+
+function updateAtBottom() {
+  if (!messagesEl.value) { atBottom.value = true; return }
   const el = messagesEl.value
-  return el.scrollHeight - el.scrollTop - el.clientHeight < 80
+  atBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 80
 }
+
+function isAtBottom(): boolean { return atBottom.value }
 
 function scrollToBottom(force = false) {
   requestAnimationFrame(() => {
@@ -963,6 +972,7 @@ watch(() => messages.value.length, (len, oldLen) => {
       scrollToBottom(true)  // force: user just sent something
     }
   }
+  nextTick(() => updateAtBottom())
 })
 
 // Keep navCurrent in bounds when messages change
@@ -1021,6 +1031,7 @@ onDeactivated(() => {
   flex-direction: column;
   height: 100%;
   overflow: hidden;
+  position: relative;
 }
 
 .agent-header {
@@ -1798,14 +1809,10 @@ onDeactivated(() => {
   border-top: 1px solid var(--border-color);
 }
 
-.scroll-bottom-wrap {
-  display: flex;
-  justify-content: flex-end;
-  padding: 0 16px 6px;
-  background: var(--bg-primary);
-}
-
 .scroll-bottom-btn {
+  position: absolute;
+  right: 24px;
+  bottom: 130px;
   width: 32px;
   height: 32px;
   border: 1px solid var(--border-color);
@@ -1818,6 +1825,7 @@ onDeactivated(() => {
   align-items: center;
   justify-content: center;
   transition: background 0.15s, color 0.15s;
+  z-index: 10;
 }
 
 .scroll-bottom-btn:hover {

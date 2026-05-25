@@ -6,6 +6,7 @@ import { db, type ChatMessage, type MessagePart, type UIMessage } from '../servi
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { useGlobalStreaming, activeFrontendSessions } from './useGlobalStreaming'
+import { useTodoStore } from './useTodoStore'
 
 export interface ToolEvent {
   type: 'tool_start' | 'tool_end'
@@ -200,6 +201,10 @@ export function useAgentConversation(agentType: string) {
       const est = Math.max(1, Math.round(totalChars / 3))
       sessionTokenUsage.set(sid, { estimated_tokens: est, context_window: 204800, usage_pct: 0 })
     }
+
+    // Restore todo panel state from persisted messages
+    const allParts = msgs.flatMap(m => m.parts || [])
+    useTodoStore().restoreFromMessages(sid, allParts)
   }
 
   async function loadMoreMessages() {
@@ -432,6 +437,10 @@ export function useAgentConversation(agentType: string) {
             updateStreamState(finalSessionId, {
               text: fullText, thinking: fullThinking, done: false, toolCallCount, toolEvents: [...streamToolEvents]
             })
+            // Update todo panel when todo_write completes
+            if (ev.tool === 'todo_write' && ev.result) {
+              useTodoStore().updateFromResult(finalSessionId, ev.result)
+            }
           }
           break
         case 'done':
@@ -639,6 +648,7 @@ export function useAgentConversation(agentType: string) {
       toolEvents.value = []
       tokenUsage.value = { estimated_tokens: 0, context_window: 204800, usage_pct: 0 }
       sessionTokenUsage.delete(sessionId.value)
+      useTodoStore().clearState(sessionId.value)
       showClearConfirm.value = false
     } catch (e) {
       console.error('Clear failed:', e)
@@ -646,7 +656,7 @@ export function useAgentConversation(agentType: string) {
   }
 
   function isInternalCacheMessage(msg: ChatMessage): boolean {
-    if (msg.role === 'user' && msg.content?.startsWith('## 内置参考资料')) return true
+    if (msg.role === 'user' && msg.content?.startsWith('## 内置技能')) return true
     if (msg.role === 'user' && !msg.content?.trim() && (!msg.parts || msg.parts.length === 0)) return true
     // Hide user messages that are purely tool_results (no text content, only tool_result parts)
     if (msg.role === 'user' && msg.parts && msg.parts.length > 0 && msg.parts.every(p => p.part_type === 'tool_result')) return true
@@ -693,6 +703,8 @@ export function useAgentConversation(agentType: string) {
           } else if (p.part_type === 'text') {
             textBuf += p.content
           } else if (p.part_type === 'tool_use') {
+            // Skip todo_write — handled by TodoPanel instead of inline ToolCard
+            if (p.tool_name === 'todo_write') continue
             if (textBuf.trim() || thinkBuf) {
               result.push({ ...m, thinking: thinkBuf || undefined, content: textBuf, parts: [] } as UIMessage)
               textBuf = ''; thinkBuf = ''

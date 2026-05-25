@@ -6,6 +6,7 @@ use base64::Engine as _;
 use rusqlite::Connection;
 use serde_json::json;
 use std::sync::{Arc, Mutex as StdMutex};
+use std::collections::HashMap;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{RwLock, watch};
 
@@ -2539,6 +2540,56 @@ pub(crate) fn format_lints_result(diags: &[crate::lsp_types::FileDiagnostics]) -
     }
 
     json!({"success": true, "diagnostics": output}).to_string()
+}
+
+// ========== Todo Tracking ==========
+
+pub(crate) async fn tool_todo_write(
+    params: &serde_json::Value,
+    todo_store: &Arc<StdMutex<HashMap<i64, String>>>,
+    session_id: i64,
+) -> String {
+    let todos = match params["todos"].as_array() {
+        Some(arr) => arr,
+        None => return json!({"error": "todos array required"}).to_string(),
+    };
+
+    // Validate each item
+    for (i, item) in todos.iter().enumerate() {
+        if item["content"].as_str().is_none() || item["content"].as_str().map(|s| s.trim().is_empty()).unwrap_or(true) {
+            return json!({"error": format!("todo[{}]: content is required", i)}).to_string();
+        }
+        let status = item["status"].as_str().unwrap_or("");
+        if !["pending", "in_progress", "completed"].contains(&status) {
+            return json!({"error": format!("todo[{}]: status must be pending|in_progress|completed, got '{}'", i, status)}).to_string();
+        }
+    }
+
+    // Count statuses for summary
+    let mut pending = 0i32;
+    let mut in_progress = 0i32;
+    let mut completed = 0i32;
+    for item in todos {
+        match item["status"].as_str().unwrap_or("") {
+            "pending" => pending += 1,
+            "in_progress" => in_progress += 1,
+            "completed" => completed += 1,
+            _ => {}
+        }
+    }
+
+    let total = todos.len();
+    let todos_json = serde_json::to_string(&params).unwrap_or_default();
+
+    if let Ok(mut store) = todo_store.lock() {
+        store.insert(session_id, todos_json);
+    }
+
+    json!({
+        "todos": todos,
+        "summary": format!("{} 项: {} 待处理, {} 进行中, {} 已完成", total, pending, in_progress, completed),
+        "pct": if total > 0 { (completed as f64 / total as f64 * 100.0) as i32 } else { 0 }
+    }).to_string()
 }
 
 // ========== Tests ==========
