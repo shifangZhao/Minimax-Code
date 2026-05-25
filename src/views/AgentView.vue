@@ -573,20 +573,27 @@ function scrollToBottom(force = false) {
 }
 
 // User message navigation (quick-jump between user prompts)
+
+/** Get an element's top position relative to the scroll container. */
+function relativeTop(el: HTMLElement): number {
+  if (!messagesEl.value) return 0
+  const cr = messagesEl.value.getBoundingClientRect()
+  const er = el.getBoundingClientRect()
+  return er.top - cr.top + messagesEl.value.scrollTop
+}
+
 const userMsgNav = computed(() => {
   const indices: number[] = []
   for (let i = 0; i < displayMessages.value.length; i++) {
     if (displayMessages.value[i].role === 'user') indices.push(i)
   }
-  // Find which user message is at or first above the viewport top.
-  // If the viewport top is above all user messages, current = 0.
-  // If the viewport top is below all user messages, current = last.
+  // Find which user message is closest above the viewport top
   let current = 0
   if (indices.length > 0) {
     const top = scrollTop.value
     for (let j = indices.length - 1; j >= 0; j--) {
       const el = messagesEl.value?.querySelector(`[data-msg-idx="${indices[j]}"]`) as HTMLElement | null
-      if (el && el.offsetTop <= top + 60) {
+      if (el && relativeTop(el) <= top + 20) {
         current = j
         break
       }
@@ -597,16 +604,16 @@ const userMsgNav = computed(() => {
 
 function navToUserMsg(direction: 1 | -1) {
   const { indices, current } = userMsgNav.value
-  if (indices.length === 0) return
+  if (indices.length === 0 || !messagesEl.value) return
   let target = current + direction
   if (target < 0) target = 0
   if (target >= indices.length) target = indices.length - 1
   const msgIdx = indices[target]
-  const el = messagesEl.value?.querySelector(`[data-msg-idx="${msgIdx}"]`) as HTMLElement | null
+  const el = messagesEl.value.querySelector(`[data-msg-idx="${msgIdx}"]`) as HTMLElement | null
   if (el) {
-    el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-    // Update scrollTop immediately so the next click works from the new position
-    scrollTop.value = el.offsetTop
+    const pos = relativeTop(el) - 16  // 16px padding from container top
+    messagesEl.value.scrollTo({ top: Math.max(0, pos), behavior: 'smooth' })
+    scrollTop.value = pos
   }
 }
 

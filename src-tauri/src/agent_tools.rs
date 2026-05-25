@@ -129,22 +129,64 @@ pub(crate) async fn tool_send_to_agent(
         )
         .map_err(|e| format!("Failed to save message: {}", e))?;
 
-        // Load full conversation history for the target agent
+        // Load full conversation history with parts, reconstruct raw_json for API
         let mut stmt = conn.prepare(
-            "SELECT role, content, tool_calls, thinking, raw_json FROM chat_message WHERE session_id = ?1 ORDER BY created_at ASC"
+            "SELECT id, role, content FROM chat_message WHERE session_id = ?1 ORDER BY id ASC"
         ).map_err(|e| format!("Failed to prepare history query: {}", e))?;
-        let history: Vec<Message> = stmt.query_map(
+        let msgs: Vec<(i64, String, String)> = stmt.query_map(
             rusqlite::params![target_session_id],
-            |row| Ok(Message {
-                role: row.get(0)?,
-                content: row.get(1)?,
-                tool_calls: row.get(2)?,
-                thinking: row.get(3)?,
-                raw_json: row.get(4)?,
-            }),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
         ).map_err(|e| format!("Failed to query history: {}", e))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("Failed to collect history: {}", e))?;
+        drop(stmt);
+
+        // Load parts for all messages
+        let msg_ids: Vec<String> = msgs.iter().map(|m| m.0.to_string()).collect();
+        let parts_map: std::collections::HashMap<i64, Vec<(i64, String, String, Option<String>, Option<String>, Option<String>)>> = if !msg_ids.is_empty() {
+            let ph = msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let psql = format!("SELECT message_id, part_order, part_type, content, tool_use_id, tool_name, tool_input FROM message_part WHERE message_id IN ({}) ORDER BY message_id, part_order", ph);
+            let mut pstmt = conn.prepare(&psql).map_err(|e| format!("Failed to prepare parts query: {}", e))?;
+            let params: Vec<&dyn rusqlite::types::ToSql> = msg_ids.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+            let parts: Vec<(i64, i64, String, String, Option<String>, Option<String>, Option<String>)> = pstmt.query_map(params.as_slice(), |row| Ok((
+                row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?, row.get::<_, Option<String>>(6)?,
+            ))).map_err(|e| format!("Failed to query parts: {}", e))?.filter_map(|r| r.ok()).collect();
+            let mut map: std::collections::HashMap<i64, Vec<_>> = std::collections::HashMap::new();
+            for (mid, _order, ptype, pcontent, tuid, tname, tinput) in parts {
+                map.entry(mid).or_default().push((_order, ptype, pcontent, tuid, tname, tinput));
+            }
+            map
+        } else { std::collections::HashMap::new() };
+
+        let history: Vec<Message> = msgs.into_iter().map(|(id, role, content)| {
+            let raw_json = parts_map.get(&id).and_then(|plist| {
+                if plist.is_empty() { return None }
+                let blocks: Vec<serde_json::Value> = plist.iter().map(|(_order, ptype, pcontent, tuid, tname, tinput)| {
+                    match ptype.as_str() {
+                        "thinking" => json!({"type": "thinking", "thinking": pcontent}),
+                        "tool_use" => {
+                            let input_val: serde_json::Value = tinput.as_ref()
+                                .and_then(|s| serde_json::from_str(s).ok()).unwrap_or(json!({}));
+                            json!({"type": "tool_use", "id": tuid, "name": tname, "input": input_val})
+                        }
+                        "tool_result" => json!({"type": "tool_result", "tool_use_id": tuid, "content": pcontent}),
+                        _ => json!({"type": "text", "text": pcontent}),
+                    }
+                }).collect();
+                Some(serde_json::to_string(&blocks).unwrap_or_default())
+            });
+            // Reconstruct thinking from parts
+            let thinking = parts_map.get(&id).and_then(|plist| {
+                let t: String = plist.iter()
+                    .filter(|(_, ptype, _, _, _, _)| ptype == "thinking")
+                    .map(|(_, _, pcontent, _, _, _)| pcontent.clone())
+                    .collect::<Vec<_>>().join("");
+                if t.is_empty() { None } else { Some(t) }
+            });
+            Message { role, content, tool_calls: None, thinking, raw_json }
+        }).collect();
 
         eprintln!("[send_to_agent] Loaded {} history messages for target session {}", history.len(), target_session_id);
 

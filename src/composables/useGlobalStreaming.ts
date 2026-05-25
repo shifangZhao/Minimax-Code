@@ -27,6 +27,7 @@ export interface StreamToolEvent {
   input?: Record<string, unknown>
   result?: string
   textBefore?: string
+  thinkingBefore?: string
 }
 
 interface StreamState {
@@ -46,6 +47,10 @@ interface SessionEntry {
 }
 
 const sessions = shallowRef<Map<string, SessionEntry>>(new Map())
+
+// Track sessions that have an active frontend listener (mounted agent tab).
+// App.vue's global fallback checks this to avoid double-listening.
+export const activeFrontendSessions = new Set<number>()
 
 function getStreamKey(sessionId: number | null): string {
   return `agent_stream_${sessionId ?? 'null'}`

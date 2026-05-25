@@ -16,15 +16,26 @@ export interface AgentSession {
 
 export type MessageRole = 'user' | 'assistant' | 'tool' | 'system'
 
+export interface MessagePart {
+  id: number
+  message_id: number
+  session_id: number
+  part_order: number
+  part_type: 'text' | 'thinking' | 'tool_use' | 'tool_result'
+  content: string
+  tool_use_id?: string
+  tool_name?: string
+  tool_input?: string
+  created_at: string
+}
+
 export interface ChatMessage {
   id: number
   session_id: number
   role: MessageRole
   content: string
-  thinking?: string
-  tool_calls?: string  // JSON array of ToolCall objects
   attachments?: string  // JSON array of {name, path, kind}
-  raw_json?: string  // full JSON of content block array for cache-aware reconstruction
+  parts: MessagePart[]  // structured content blocks (thinking, tool_use, tool_result, text)
   created_at: string
 }
 
@@ -32,6 +43,10 @@ export interface ChatMessage {
 export interface UIMessage extends ChatMessage {
   loading?: boolean
   cmdResult?: string
+  // Legacy fields for backward compat during transition
+  thinking?: string
+  tool_calls?: string
+  raw_json?: string
 }
 
 export interface Bookmark {

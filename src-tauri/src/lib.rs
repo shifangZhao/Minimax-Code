@@ -9,6 +9,7 @@ mod mcp_service;
 mod permission;
 mod skill_service;
 mod system_prompts;
+use serde_json::json;
 
 pub(crate) const DEFAULT_API_URL: &str = "https://api.minimaxi.com";
 pub(crate) const SEARCH_TIMEOUT_SECS: u64 = 30;
@@ -77,20 +78,33 @@ pub struct AgentSession {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ChatMessage {
     pub id: i64,
     pub session_id: i64,
     pub role: String,
     pub content: String,
     #[serde(default)]
-    pub tool_calls: Option<String>,  // JSON string of tool_calls array
-    #[serde(default)]
-    pub thinking: Option<String>,  // thinking content
-    #[serde(default)]
     pub attachments: Option<String>,  // JSON array of {name, path, kind}
     #[serde(default)]
-    pub raw_json: Option<String>,  // full JSON of content block array for cache preservation
+    pub parts: Vec<MessagePart>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MessagePart {
+    pub id: i64,
+    pub message_id: i64,
+    pub session_id: i64,
+    pub part_order: i64,
+    pub part_type: String,  // "text", "thinking", "tool_use", "tool_result"
+    pub content: String,
+    #[serde(default)]
+    pub tool_use_id: Option<String>,
+    #[serde(default)]
+    pub tool_name: Option<String>,
+    #[serde(default)]
+    pub tool_input: Option<String>,
     pub created_at: String,
 }
 
@@ -244,11 +258,11 @@ fn get_agent_sessions(state: State<AppState>, group_chat_id: i64, agent_type: St
 // ========== Chat Message Commands ==========
 
 #[tauri::command]
-fn add_message(state: State<AppState>, session_id: i64, role: String, content: String, tool_calls: Option<String>, thinking: Option<String>, attachments: Option<String>, raw_json: Option<String>) -> Result<i64, String> {
+fn add_message(state: State<AppState>, session_id: i64, role: String, content: String, _tool_calls: Option<String>, _thinking: Option<String>, attachments: Option<String>, _raw_json: Option<String>) -> Result<i64, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     conn.execute(
-        "INSERT INTO chat_message (session_id, role, content, tool_calls, thinking, attachments, raw_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params![session_id, role, content, tool_calls, thinking, attachments, raw_json],
+        "INSERT INTO chat_message (session_id, role, content, attachments) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![session_id, role, content, attachments],
     ).map_err(|e| e.to_string())?;
     Ok(conn.last_insert_rowid())
 }
@@ -258,26 +272,63 @@ fn get_messages(state: State<AppState>, session_id: i64, offset: Option<i64>, li
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let off = offset.unwrap_or(0).max(0);
     let lim = limit.unwrap_or(100).max(1).min(1000);
-    // Load newest messages first (DESC) with limit+offset, then reorder to ASC for display.
-    // offset=0 means "newest N", offset=N means "next N older".
-    let sql = "SELECT id, session_id, role, content, tool_calls, thinking, attachments, raw_json, created_at FROM (SELECT * FROM chat_message WHERE session_id = ?1 ORDER BY created_at DESC LIMIT ?2 OFFSET ?3) ORDER BY created_at ASC";
+    let sql = "SELECT id, session_id, role, content, attachments, created_at FROM (SELECT * FROM chat_message WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2 OFFSET ?3) ORDER BY id ASC";
     let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
-    let messages = stmt.query_map(rusqlite::params![session_id, lim, off], |row| {
-        let created_at: String = row.get(8)?;
+    let mut messages: Vec<ChatMessage> = stmt.query_map(rusqlite::params![session_id, lim, off], |row| {
+        let created_at: String = row.get(5)?;
         Ok(ChatMessage {
             id: row.get(0)?,
             session_id: row.get(1)?,
             role: row.get(2)?,
             content: row.get(3)?,
-            tool_calls: row.get(4)?,
-            thinking: row.get(5)?,
-            attachments: row.get(6)?,
-            raw_json: row.get(7)?,
+            attachments: row.get(4)?,
+            parts: Vec::new(),
             created_at: created_at.replace(' ', "T") + "Z",
         })
     }).map_err(|e| e.to_string())?
     .collect::<Result<Vec<_>, _>>()
     .map_err(|e| e.to_string())?;
+
+    // Batch-load parts for all loaded messages
+    if !messages.is_empty() {
+        let ids: Vec<String> = messages.iter().map(|m| m.id.to_string()).collect();
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let part_sql = format!(
+            "SELECT id, message_id, session_id, part_order, part_type, content, tool_use_id, tool_name, tool_input, created_at FROM message_part WHERE message_id IN ({}) ORDER BY message_id, part_order",
+            placeholders
+        );
+        let mut pstmt = conn.prepare(&part_sql).map_err(|e| e.to_string())?;
+        let params: Vec<&dyn rusqlite::types::ToSql> = ids.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+        let parts: Vec<MessagePart> = pstmt.query_map(params.as_slice(), |row| {
+            let created_at: String = row.get(9)?;
+            Ok(MessagePart {
+                id: row.get(0)?,
+                message_id: row.get(1)?,
+                session_id: row.get(2)?,
+                part_order: row.get(3)?,
+                part_type: row.get(4)?,
+                content: row.get(5)?,
+                tool_use_id: row.get(6)?,
+                tool_name: row.get(7)?,
+                tool_input: row.get(8)?,
+                created_at: created_at.replace(' ', "T") + "Z",
+            })
+        }).map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+        // Group parts by message_id
+        let mut parts_map: std::collections::HashMap<i64, Vec<MessagePart>> = std::collections::HashMap::new();
+        for p in parts {
+            parts_map.entry(p.message_id).or_default().push(p);
+        }
+        for m in &mut messages {
+            if let Some(ps) = parts_map.remove(&m.id) {
+                m.parts = ps;
+            }
+        }
+    }
+
     Ok(messages)
 }
 
@@ -1710,8 +1761,9 @@ pub(crate) async fn compact_messages(
     eprintln!("[compact] {}: {} → {} messages, {} → {} tokens, summary {} chars",
         agent_type, msg_before, api_messages.len(), token_before, token_after, summary_len);
 
-    // Persist to DB: compressed messages replace originals, old snapshots are stale
+    // Persist to DB: compressed messages replace originals
     let conn = db.lock().map_err(|e| e.to_string())?;
+    // CASCADE will auto-delete parts when messages are deleted
     conn.execute("DELETE FROM chat_message WHERE session_id = ?1", rusqlite::params![session_id])
         .map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM file_snapshot WHERE session_id = ?1", rusqlite::params![session_id])
@@ -1720,22 +1772,47 @@ pub(crate) async fn compact_messages(
     for msg in api_messages.iter() {
         let role = msg["role"].as_str().unwrap_or("user");
         let content_val = &msg["content"];
-        let display_text: String = if let Some(s) = content_val.as_str() {
-            s.to_string()
-        } else if let Some(arr) = content_val.as_array() {
-            arr.iter()
-                .filter(|b| b["type"] == "text")
-                .map(|b| b["text"].as_str().unwrap_or(""))
-                .collect::<Vec<_>>()
-                .join("\n")
-        } else {
-            String::new()
+
+        let (display_text, parts): (String, Vec<(i64, String, String, Option<String>, Option<String>, Option<String>)>) = match content_val {
+            serde_json::Value::String(s) => (s.clone(), vec![]),
+            serde_json::Value::Array(blocks) => {
+                let text = blocks.iter()
+                    .filter(|b| b["type"] == "text")
+                    .map(|b| b["text"].as_str().unwrap_or(""))
+                    .collect::<Vec<_>>()
+                    .join("");
+                let parts_vec: Vec<_> = blocks.iter().enumerate().map(|(i, b)| {
+                    let ptype = b["type"].as_str().unwrap_or("text").to_string();
+                    let pcontent = match ptype.as_str() {
+                        "thinking" => b["thinking"].as_str().unwrap_or("").to_string(),
+                        "tool_result" => b["content"].as_str().unwrap_or("").to_string(),
+                        "tool_use" => String::new(),
+                        _ => b["text"].as_str().unwrap_or("").to_string(),
+                    };
+                    let tuid = b["id"].as_str().map(|s| s.to_string());
+                    let tname = b["name"].as_str().map(|s| s.to_string());
+                    let tinput = if ptype == "tool_use" {
+                        Some(serde_json::to_string(&b["input"]).unwrap_or_default())
+                    } else { None };
+                    (i as i64, ptype, pcontent, tuid, tname, tinput)
+                }).collect();
+                (text, parts_vec)
+            }
+            _ => (String::new(), vec![]),
         };
-        let raw_json = serde_json::to_string(content_val).unwrap_or_default();
+
         conn.execute(
-            "INSERT INTO chat_message (session_id, role, content, tool_calls, thinking, raw_json) VALUES (?1, ?2, ?3, NULL, NULL, ?4)",
-            rusqlite::params![session_id, role, display_text, raw_json],
+            "INSERT INTO chat_message (session_id, role, content) VALUES (?1, ?2, ?3)",
+            rusqlite::params![session_id, role, display_text],
         ).map_err(|e| e.to_string())?;
+        let msg_id = conn.last_insert_rowid();
+
+        for (order, ptype, pcontent, tuid, tname, tinput) in &parts {
+            conn.execute(
+                "INSERT INTO message_part (message_id, session_id, part_order, part_type, content, tool_use_id, tool_name, tool_input) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![msg_id, session_id, order, ptype, pcontent, tuid, tname, tinput],
+            ).map_err(|e| e.to_string())?;
+        }
     }
 
     Ok((token_before, token_after))
@@ -1773,31 +1850,63 @@ async fn compact_session(state: State<'_, AppState>, session_id: i64) -> Result<
         (at, ak, au, mp, md)
     };
 
-    // Read all messages (release DB lock before async model call)
+    // Read all messages with parts, reconstruct api_messages
     let mut api_messages = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn.prepare(
-            "SELECT role, content, tool_calls, thinking, raw_json FROM chat_message WHERE session_id = ?1 ORDER BY created_at ASC"
+            "SELECT id, role, content FROM chat_message WHERE session_id = ?1 ORDER BY id ASC"
         ).map_err(|e| e.to_string())?;
-
-        let rows: Vec<(String, String, Option<String>, Option<String>, Option<String>)> = stmt.query_map(
+        let msgs: Vec<(i64, String, String)> = stmt.query_map(
             rusqlite::params![session_id],
-            |row| Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-            ))
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
         ).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
         drop(stmt);
 
-        rows.iter().map(|(role, content, _tc, _th, raw_json)| {
-            let content_val = match raw_json {
-                Some(ref raw) => serde_json::from_str(raw).unwrap_or(serde_json::json!(content)),
-                None => serde_json::json!(content),
-            };
-            serde_json::json!({"role": role, "content": content_val})
+        // Batch-load parts
+        let msg_ids: Vec<i64> = msgs.iter().map(|m| m.0).collect();
+        let parts_map: std::collections::HashMap<i64, Vec<(String, String, Option<String>, Option<String>, Option<String>)>> = if !msg_ids.is_empty() {
+            let ids_str: Vec<String> = msg_ids.iter().map(|id| id.to_string()).collect();
+            let ph = ids_str.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let part_sql = format!("SELECT message_id, part_order, part_type, content, tool_use_id, tool_name, tool_input FROM message_part WHERE message_id IN ({}) ORDER BY message_id, part_order", ph);
+            let mut pstmt = conn.prepare(&part_sql).map_err(|e| e.to_string())?;
+            let params: Vec<&dyn rusqlite::types::ToSql> = ids_str.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+            let parts: Vec<(i64, i64, String, String, Option<String>, Option<String>, Option<String>)> = pstmt.query_map(params.as_slice(), |row| Ok((
+                row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?, row.get::<_, Option<String>>(6)?,
+            ))).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
+            let mut map: std::collections::HashMap<i64, Vec<_>> = std::collections::HashMap::new();
+            for (mid, _order, ptype, pcontent, tuid, tname, tinput) in parts {
+                map.entry(mid).or_default().push((ptype, pcontent, tuid, tname, tinput));
+            }
+            map
+        } else {
+            std::collections::HashMap::new()
+        };
+
+        msgs.into_iter().map(|(id, role, content)| {
+            let parts = parts_map.get(&id);
+            match parts {
+                Some(plist) if !plist.is_empty() => {
+                    let blocks: Vec<serde_json::Value> = plist.iter().map(|(ptype, pcontent, tuid, tname, tinput)| {
+                        match ptype.as_str() {
+                            "thinking" => json!({"type": "thinking", "thinking": pcontent}),
+                            "tool_use" => {
+                                let input_val: serde_json::Value = tinput.as_ref()
+                                    .and_then(|s| serde_json::from_str(s).ok())
+                                    .unwrap_or(json!({}));
+                                json!({"type": "tool_use", "id": tuid, "name": tname, "input": input_val})
+                            }
+                            "tool_result" => json!({"type": "tool_result", "tool_use_id": tuid, "content": pcontent}),
+                            _ => json!({"type": "text", "text": pcontent}),
+                        }
+                    }).collect();
+                    json!({"role": role, "content": blocks})
+                }
+                _ => {
+                    json!({"role": role, "content": if content.is_empty() { json!("") } else { json!(content) }})
+                }
+            }
         }).collect::<Vec<_>>()
     };
 
@@ -2248,6 +2357,15 @@ pub fn run() {
 
     let conn = Connection::open(&db_path).expect("Failed to open database");
 
+    // Performance & durability (opencode-style)
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = NORMAL;
+         PRAGMA busy_timeout = 5000;
+         PRAGMA cache_size = -64000;
+         PRAGMA foreign_keys = ON;"
+    ).expect("Failed to set PRAGMAs");
+
     // Drop old chat_history table if exists (migration from old schema)
     conn.execute("DROP TABLE IF EXISTS chat_history", [])
         .expect("Failed to drop old chat_history table");
@@ -2271,17 +2389,39 @@ pub fn run() {
             FOREIGN KEY (group_chat_id) REFERENCES group_chat(id)
         )", [], ).expect("Failed to create agent_session table");
 
+    // v2 schema: chat_message holds display content; structured blocks go to message_part
     conn.execute(
         "CREATE TABLE IF NOT EXISTS chat_message (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id INTEGER NOT NULL,
-            role TEXT NOT NULL,
-            content TEXT NOT NULL,
-            tool_calls TEXT DEFAULT NULL,
-            thinking TEXT DEFAULT NULL,
+            role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'system')),
+            content TEXT NOT NULL DEFAULT '',
+            attachments TEXT DEFAULT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (session_id) REFERENCES agent_session(id)
         )", [], ).expect("Failed to create chat_message table");
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS message_part (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id INTEGER NOT NULL,
+            session_id INTEGER NOT NULL,
+            part_order INTEGER NOT NULL DEFAULT 0,
+            part_type TEXT NOT NULL CHECK(part_type IN ('text', 'thinking', 'tool_use', 'tool_result')),
+            content TEXT NOT NULL DEFAULT '',
+            tool_use_id TEXT DEFAULT NULL,
+            tool_name TEXT DEFAULT NULL,
+            tool_input TEXT DEFAULT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (message_id) REFERENCES chat_message(id) ON DELETE CASCADE,
+            FOREIGN KEY (session_id) REFERENCES agent_session(id)
+        )", [], ).expect("Failed to create message_part table");
+
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_part_msg ON message_part(message_id, part_order);
+         CREATE INDEX IF NOT EXISTS idx_part_session ON message_part(session_id);
+         CREATE INDEX IF NOT EXISTS idx_msg_session_id ON chat_message(session_id, id);"
+    ).expect("Failed to create indexes");
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS file_snapshot (
@@ -2377,22 +2517,6 @@ pub fn run() {
         Migration { version: 1, desc: "group_chat.mode",
             cond: "SELECT COUNT(*) FROM pragma_table_info('group_chat') WHERE name='mode'",
             sql: "ALTER TABLE group_chat ADD COLUMN mode TEXT NOT NULL DEFAULT 'team'" },
-        // V2: chat_message tool_calls
-        Migration { version: 2, desc: "chat_message.tool_calls",
-            cond: "SELECT COUNT(*) FROM pragma_table_info('chat_message') WHERE name='tool_calls'",
-            sql: "ALTER TABLE chat_message ADD COLUMN tool_calls TEXT DEFAULT NULL" },
-        // V3: chat_message thinking
-        Migration { version: 3, desc: "chat_message.thinking",
-            cond: "SELECT COUNT(*) FROM pragma_table_info('chat_message') WHERE name='thinking'",
-            sql: "ALTER TABLE chat_message ADD COLUMN thinking TEXT DEFAULT NULL" },
-        // V4: chat_message attachments
-        Migration { version: 4, desc: "chat_message.attachments",
-            cond: "SELECT COUNT(*) FROM pragma_table_info('chat_message') WHERE name='attachments'",
-            sql: "ALTER TABLE chat_message ADD COLUMN attachments TEXT DEFAULT NULL" },
-        // V5: chat_message raw_json
-        Migration { version: 5, desc: "chat_message.raw_json",
-            cond: "SELECT COUNT(*) FROM pragma_table_info('chat_message') WHERE name='raw_json'",
-            sql: "ALTER TABLE chat_message ADD COLUMN raw_json TEXT DEFAULT NULL" },
         // V6: custom_model_config context_window
         Migration { version: 6, desc: "custom_model_config.context_window",
             cond: "SELECT COUNT(*) FROM pragma_table_info('custom_model_config') WHERE name='context_window'",
@@ -2409,10 +2533,6 @@ pub fn run() {
         Migration { version: 9, desc: "permission_rules",
             cond: "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='permission_rules'",
             sql: "CREATE TABLE permission_rules (id INTEGER PRIMARY KEY AUTOINCREMENT, tool TEXT NOT NULL, pattern TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(tool, pattern))" },
-        // V10: chat_message session_id index for fast per-session queries
-        Migration { version: 10, desc: "chat_message.session_id index",
-            cond: "SELECT COUNT(*) FROM pragma_index_list('chat_message') WHERE name='idx_chat_message_session'",
-            sql: "CREATE INDEX idx_chat_message_session ON chat_message(session_id)" },
     ];
 
     for m in migrations {

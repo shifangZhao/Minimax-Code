@@ -33,7 +33,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { db } from './services/db'
 import { check } from '@tauri-apps/plugin-updater'
 
-import { useGlobalStreaming, type StreamEventPayload } from './composables/useGlobalStreaming'
+import { useGlobalStreaming, activeFrontendSessions, type StreamEventPayload } from './composables/useGlobalStreaming'
 import { usePermissions } from './composables/usePermissions'
 import type { AgentInvokedPayload } from './composables/useAgentConversation'
 import TitleBar from './components/TitleBar.vue'
@@ -105,6 +105,9 @@ onMounted(async () => {
     const { target_agent, session_id } = event.payload
     console.log('[agent_invoked] target:', target_agent, 'session:', session_id)
 
+    // If a frontend tab is already handling this session, skip global fallback
+    if (activeFrontendSessions.has(session_id)) return
+
     // Clean up previous listener for same session
     if (activeStreamListeners.has(session_id)) {
       activeStreamListeners.get(session_id)!()
@@ -139,7 +142,7 @@ onMounted(async () => {
           break
         case 'cache_usage':
           console.log(
-            `[cache] session=${session_id} hit=${e.cache_hit_tokens} miss=${e.cache_miss_tokens} ratio=${((e.cache_hit_ratio || 0) * 100).toFixed(1)}%`
+            `[cache] session=${session_id} hit=${e.cache_hit_tokens} miss=${e.cache_miss_tokens} ratio=${((e.cache_hit_ratio || 0) * 100).toFixed(2)}%`
           )
           break
         case 'error':
