@@ -159,6 +159,7 @@
           </div>
         </div>
       </template>
+      <button v-show="!isAtBottom()" class="scroll-bottom-btn" title="回到底部" @click="scrollToBottom(true)">↓</button>
     </div>
     <ConfirmDialog
       :visible="showRewindConfirm !== null"
@@ -204,31 +205,31 @@
     />
     <div class="input-area" v-if="agentType === 'front' || agentType === 'ace'">
       <textarea
-        ref="inputEl"
-        v-model="inputText"
-        :placeholder="inputPlaceholder"
-        @keydown.enter.exact="onSendKey"
-        @keydown.ctrl.enter.exact="onNewline"
-        @paste="onPaste"
-        @input="autoResize"
-        rows="1"
-      ></textarea>
-      <div class="input-toolbar">
-        <div class="toolbar-left">
-          <button class="toolbar-btn" @click="onAttachment" title="添加附件">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+          ref="inputEl"
+          v-model="inputText"
+          :placeholder="inputPlaceholder"
+          @keydown.enter.exact="onSendKey"
+          @keydown.ctrl.enter.exact="onNewline"
+          @paste="onPaste"
+          @input="autoResize"
+          rows="1"
+        ></textarea>
+        <div class="input-toolbar">
+          <div class="toolbar-left">
+            <button class="toolbar-btn" @click="onAttachment" title="添加附件">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+            </button>
+            <button class="toolbar-btn" @click="showCommands = !showCommands; manualCommands = showCommands" title="命令">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="17" y1="2" x2="7" y2="22"/></svg>
+            </button>
+          </div>
+          <button v-if="!loading" class="send-btn" @click="onSend" title="发送">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
           </button>
-          <button class="toolbar-btn" @click="showCommands = !showCommands; manualCommands = showCommands" title="命令">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="17" y1="2" x2="7" y2="22"/></svg>
+          <button v-else class="send-btn stop-btn" @click="stopStream()" title="停止生成">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
           </button>
         </div>
-        <button v-if="!loading" class="send-btn" @click="onSend" title="发送">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
-        </button>
-        <button v-else class="send-btn stop-btn" @click="stopStream()" title="停止生成">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
-        </button>
-      </div>
     </div>
   </div>
 </template>
@@ -335,10 +336,14 @@ const scrollCache = new Map<string, number>()
 const agentScrollKey = computed(() => `scroll_${props.agentType}`)
 const scrollTop = ref(0)
 
+const navScrolling = ref(false)
+let navScrollTimer: ReturnType<typeof setTimeout> | null = null
+
 function saveScrollPos() {
   if (messagesEl.value) {
     scrollTop.value = messagesEl.value.scrollTop
     scrollCache.set(agentScrollKey.value, messagesEl.value.scrollTop)
+    if (!navScrolling.value) syncNavFromScroll()
   }
 }
 
@@ -582,40 +587,53 @@ function relativeTop(el: HTMLElement): number {
   return er.top - cr.top + messagesEl.value.scrollTop
 }
 
-const userMsgNav = computed(() => {
-  const indices: number[] = []
+const userMsgIndices = computed(() => {
+  const idx: number[] = []
   for (let i = 0; i < displayMessages.value.length; i++) {
-    if (displayMessages.value[i].role === 'user') indices.push(i)
+    if (displayMessages.value[i].role === 'user') idx.push(i)
   }
-  // Find which user message is closest above the viewport top
-  let current = 0
-  if (indices.length > 0) {
-    const top = scrollTop.value
-    for (let j = indices.length - 1; j >= 0; j--) {
-      const el = messagesEl.value?.querySelector(`[data-msg-idx="${indices[j]}"]`) as HTMLElement | null
-      if (el && relativeTop(el) <= top + 20) {
-        current = j
-        break
-      }
-    }
-  }
-  return { indices, current, count: indices.length }
+  return idx
 })
 
-function navToUserMsg(direction: 1 | -1) {
-  const { indices, current } = userMsgNav.value
+// navCurrent tracks the nav cursor independently of scroll position.
+// Only updated on explicit nav clicks; synced from scroll on manual scroll.
+const navCurrent = ref(0)
+
+/** Sync navCurrent to the user message closest above the current scrollTop. */
+function syncNavFromScroll() {
+  const indices = userMsgIndices.value
   if (indices.length === 0 || !messagesEl.value) return
-  let target = current + direction
-  if (target < 0) target = 0
-  if (target >= indices.length) target = indices.length - 1
+  const top = messagesEl.value.scrollTop
+  for (let j = indices.length - 1; j >= 0; j--) {
+    const el = messagesEl.value.querySelector(`[data-msg-idx="${indices[j]}"]`) as HTMLElement | null
+    if (el && relativeTop(el) <= top + 20) {
+      navCurrent.value = j
+      return
+    }
+  }
+  navCurrent.value = 0
+}
+
+function navToUserMsg(direction: 1 | -1) {
+  const indices = userMsgIndices.value
+  if (indices.length === 0 || !messagesEl.value) return
+  const target = Math.max(0, Math.min(indices.length - 1, navCurrent.value + direction))
+  navCurrent.value = target
   const msgIdx = indices[target]
   const el = messagesEl.value.querySelector(`[data-msg-idx="${msgIdx}"]`) as HTMLElement | null
   if (el) {
-    const pos = relativeTop(el) - 16  // 16px padding from container top
+    const pos = relativeTop(el) - 16
+    navScrolling.value = true
     messagesEl.value.scrollTo({ top: Math.max(0, pos), behavior: 'smooth' })
-    scrollTop.value = pos
+    if (navScrollTimer) clearTimeout(navScrollTimer)
+    navScrollTimer = setTimeout(() => { navScrolling.value = false }, 500)
   }
 }
+
+const userMsgNav = computed(() => ({
+  current: navCurrent.value,
+  count: userMsgIndices.value.length,
+}))
 
 interface AttachedFile {
   name: string
@@ -945,6 +963,15 @@ watch(() => messages.value.length, (len, oldLen) => {
   }
 })
 
+// Keep navCurrent in bounds when messages change
+watch(userMsgIndices, (indices) => {
+  if (indices.length === 0) {
+    navCurrent.value = 0
+  } else if (navCurrent.value >= indices.length) {
+    navCurrent.value = indices.length - 1
+  }
+})
+
 // Persist scroll position across tab switches (KeepAlive)
 // Auto-resize textarea when inputText is cleared programmatically (after send)
 watch(inputText, () => {
@@ -962,6 +989,7 @@ onMounted(() => {
     if (messagesEl.value) {
       const pos = scrollCache.get(agentScrollKey.value)
       messagesEl.value.scrollTop = pos ?? messagesEl.value.scrollHeight
+      syncNavFromScroll()
     }
   })
 })
@@ -973,6 +1001,7 @@ onActivated(() => {
         if (messagesEl.value) {
           const pos = scrollCache.get(agentScrollKey.value)
           messagesEl.value.scrollTop = pos ?? messagesEl.value.scrollHeight
+          syncNavFromScroll()
         }
       })
     })
@@ -1105,6 +1134,7 @@ onDeactivated(() => {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  position: relative;
 }
 
 .empty-chat {
@@ -1765,6 +1795,31 @@ onDeactivated(() => {
   padding: 10px 12px;
   background-color: var(--bg-secondary);
   border-top: 1px solid var(--border-color);
+}
+
+.scroll-bottom-btn {
+  position: absolute;
+  right: 24px;
+  bottom: 20px;
+  width: 38px;
+  height: 38px;
+  border: 1px solid var(--border-color);
+  border-radius: 50%;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 18px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+  z-index: 10;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+
+.scroll-bottom-btn:hover {
+  background: var(--bg-input);
+  color: var(--text-primary);
 }
 
 .input-area textarea {
