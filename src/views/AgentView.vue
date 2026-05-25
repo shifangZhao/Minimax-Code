@@ -2,6 +2,11 @@
   <div class="agent-view" :class="agentType">
     <div class="agent-header">
       <span class="agent-name">{{ agentName }}</span>
+      <div v-if="userMsgNav.count > 0" class="msg-nav">
+        <button class="nav-btn" title="上一则用户消息" :disabled="userMsgNav.current <= 0" @click="navToUserMsg(-1)">▲</button>
+        <span class="nav-label">{{ userMsgNav.current + 1 }}/{{ userMsgNav.count }}</span>
+        <button class="nav-btn" title="下一则用户消息" :disabled="userMsgNav.current >= userMsgNav.count - 1" @click="navToUserMsg(1)">▼</button>
+      </div>
       <div class="header-actions">
         <button
           v-if="loading"
@@ -27,7 +32,7 @@
           @click="showClearConfirm = true"
         >🗑</button>
         <span v-if="cacheUsage.ratio > 0" class="cache-badge" :title="`缓存命中: ${cacheUsage.hit} tokens / 未命中: ${cacheUsage.miss} tokens`">
-          ⚡{{ cacheUsage.hit }}/{{ cacheUsage.hit + cacheUsage.miss }} {{ cacheUsage.ratio }}%
+          ⚡{{ cacheUsage.hit }}/{{ cacheUsage.hit + cacheUsage.miss }} {{ cacheUsage.ratio.toFixed(2) }}%
         </span>
       </div>
     </div>
@@ -75,6 +80,8 @@
         v-for="(msg, i) in displayMessages"
         :key="(msg.id || 0)"
         :class="['message', msg.role]"
+        :data-msg-idx="i"
+        :data-msg-role="msg.role"
       >
         <div v-if="msg.role !== 'tool' && msg.role !== 'system'" class="avatar">{{ msg.role === 'user' ? 'U' : 'A' }}</div>
         <div class="content">
@@ -123,22 +130,27 @@
         </div>
       </div>
       <template v-if="!currentStreaming.done">
-        <div v-for="(seg, si) in streamingSegments" :key="si" :class="['message', seg.kind === 'tool' ? 'tool' : 'assistant']">
-          <template v-if="seg.kind === 'text'">
+        <template v-for="(seg, si) in streamingSegments" :key="si">
+          <div v-if="seg.kind === 'thinking'" class="message assistant">
             <div class="avatar">A</div>
             <div class="content">
-              <div class="thinking-text" v-if="si === 0 && currentStreaming.thinking">{{ currentStreaming.thinking }}</div>
-              <pre class="streaming-text" v-if="seg.text">{{ seg.text }}</pre>
+              <div class="thinking-text">{{ seg.thinking }}</div>
             </div>
-          </template>
-          <template v-else>
+          </div>
+          <div v-else-if="seg.kind === 'text'" class="message assistant">
+            <div class="avatar">A</div>
+            <div class="content">
+              <pre class="streaming-text">{{ seg.text }}</pre>
+            </div>
+          </div>
+          <div v-else class="message tool">
             <div class="content">
               <div class="tool-msg">
                 <ToolCard :toolInfo="{ name: seg.name || '', args: seg.args, result: seg.result }" />
               </div>
             </div>
-          </template>
-        </div>
+          </div>
+        </template>
         <div v-if="streamingSegments.length === 0 && (currentStreaming.text || currentStreaming.thinking)" class="message assistant">
           <div class="avatar">A</div>
           <div class="content">
@@ -321,9 +333,11 @@ const thinkingExpanded = ref<Record<number, boolean>>({})
 // Per-agent scroll position cache (survives KeepAlive tab switches)
 const scrollCache = new Map<string, number>()
 const agentScrollKey = computed(() => `scroll_${props.agentType}`)
+const scrollTop = ref(0)
 
 function saveScrollPos() {
   if (messagesEl.value) {
+    scrollTop.value = messagesEl.value.scrollTop
     scrollCache.set(agentScrollKey.value, messagesEl.value.scrollTop)
   }
 }
@@ -362,7 +376,8 @@ const currentStreaming = computed(() => {
 })
 
 interface StreamSegment {
-  kind: 'text' | 'tool'
+  kind: 'thinking' | 'text' | 'tool'
+  thinking?: string
   text?: string
   tool_id?: string
   name?: string
@@ -373,9 +388,10 @@ interface StreamSegment {
 const streamingSegments = computed(() => {
   const events = currentStreaming.value.toolEvents || []
   const fullText = currentStreaming.value.text || ''
+  const fullThinking = currentStreaming.value.thinking || ''
 
   // Build merged tool cards (start + end paired by tool_id)
-  type Card = { tool_id: string; name: string; args?: string; result?: string; state: string; textBefore: string }
+  type Card = { tool_id: string; name: string; args?: string; result?: string; state: string; textBefore: string; thinkingBefore: string }
   const cards = new Map<string, Card>()
   for (const ev of events) {
     const existing = cards.get(ev.tool_id)
@@ -387,6 +403,7 @@ const streamingSegments = computed(() => {
         result: existing?.result,
         state: 'running',
         textBefore: ev.textBefore || '',
+        thinkingBefore: ev.thinkingBefore || '',
       })
     } else if (ev.type === 'tool_end') {
       cards.set(ev.tool_id, {
@@ -396,17 +413,23 @@ const streamingSegments = computed(() => {
         result: ev.result,
         state: 'done',
         textBefore: existing?.textBefore || '',
+        thinkingBefore: existing?.thinkingBefore || '',
       })
     }
   }
   const cardList = [...cards.values()].sort((a, b) => a.textBefore.length - b.textBefore.length)
 
-  // Build interleaved segments
+  // Build interleaved segments: thinking → text → tool → thinking → text → tool → ...
   const segments: StreamSegment[] = []
-  let prevEnd = ''
+  let prevTextEnd = ''
+  let prevThinkEnd = ''
 
   for (const card of cardList) {
-    const textBetween = fullText.slice(prevEnd.length, card.textBefore.length)
+    const thinkBetween = fullThinking.slice(prevThinkEnd.length, card.thinkingBefore.length)
+    if (thinkBetween.trim()) {
+      segments.push({ kind: 'thinking', thinking: thinkBetween })
+    }
+    const textBetween = fullText.slice(prevTextEnd.length, card.textBefore.length)
     if (textBetween.trim()) {
       segments.push({ kind: 'text', text: textBetween })
     }
@@ -417,13 +440,18 @@ const streamingSegments = computed(() => {
       args: card.args,
       result: card.result,
     })
-    prevEnd = card.textBefore
+    prevTextEnd = card.textBefore
+    prevThinkEnd = card.thinkingBefore
   }
 
-  // Remaining text after last tool
-  const remaining = fullText.slice(prevEnd.length)
-  if (remaining.trim()) {
-    segments.push({ kind: 'text', text: remaining })
+  // Remaining thinking + text after last tool
+  const remThinking = fullThinking.slice(prevThinkEnd.length)
+  if (remThinking.trim()) {
+    segments.push({ kind: 'thinking', thinking: remThinking })
+  }
+  const remText = fullText.slice(prevTextEnd.length)
+  if (remText.trim()) {
+    segments.push({ kind: 'text', text: remText })
   }
 
   return segments
@@ -542,6 +570,44 @@ function scrollToBottom(force = false) {
       saveScrollPos()
     }
   })
+}
+
+// User message navigation (quick-jump between user prompts)
+const userMsgNav = computed(() => {
+  const indices: number[] = []
+  for (let i = 0; i < displayMessages.value.length; i++) {
+    if (displayMessages.value[i].role === 'user') indices.push(i)
+  }
+  // Find which user message is at or first above the viewport top.
+  // If the viewport top is above all user messages, current = 0.
+  // If the viewport top is below all user messages, current = last.
+  let current = 0
+  if (indices.length > 0) {
+    const top = scrollTop.value
+    for (let j = indices.length - 1; j >= 0; j--) {
+      const el = messagesEl.value?.querySelector(`[data-msg-idx="${indices[j]}"]`) as HTMLElement | null
+      if (el && el.offsetTop <= top + 60) {
+        current = j
+        break
+      }
+    }
+  }
+  return { indices, current, count: indices.length }
+})
+
+function navToUserMsg(direction: 1 | -1) {
+  const { indices, current } = userMsgNav.value
+  if (indices.length === 0) return
+  let target = current + direction
+  if (target < 0) target = 0
+  if (target >= indices.length) target = indices.length - 1
+  const msgIdx = indices[target]
+  const el = messagesEl.value?.querySelector(`[data-msg-idx="${msgIdx}"]`) as HTMLElement | null
+  if (el) {
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    // Update scrollTop immediately so the next click works from the new position
+    scrollTop.value = el.offsetTop
+  }
 }
 
 interface AttachedFile {
@@ -933,6 +999,46 @@ onDeactivated(() => {
   font-size: 14px;
   font-weight: 500;
   color: var(--text-primary);
+}
+
+.msg-nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 16px;
+}
+
+.nav-btn {
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+}
+
+.nav-btn:hover:not(:disabled) {
+  background: var(--bg-input);
+  color: var(--text-primary);
+}
+
+.nav-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.nav-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  min-width: 36px;
+  text-align: center;
 }
 
 .cache-badge {

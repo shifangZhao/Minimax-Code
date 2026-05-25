@@ -136,59 +136,46 @@ fn save_api_message(db: &Arc<StdMutex<Connection>>, session_id: i64, message: &s
     let role = message["role"].as_str().unwrap_or("user");
     let content_val = &message["content"];
 
-    // Extract display text from content (string or array of blocks)
-    let display_text = match content_val {
-        serde_json::Value::String(s) => s.clone(),
+    let (display_text, parts): (String, Vec<(i64, String, String, Option<String>, Option<String>, Option<String>)>) = match content_val {
+        serde_json::Value::String(s) => (s.clone(), vec![]),
         serde_json::Value::Array(blocks) => {
-            blocks.iter()
+            let text = blocks.iter()
                 .filter(|b| b["type"] == "text")
                 .map(|b| b["text"].as_str().unwrap_or(""))
                 .collect::<Vec<_>>()
-                .join("")
-        }
-        _ => String::new(),
-    };
-
-    // Full JSON of the content for cache-identical reconstruction
-    let raw_json = serde_json::to_string(content_val).unwrap_or_default();
-
-    // Extract thinking from blocks for the thinking column
-    let thinking = match content_val {
-        serde_json::Value::Array(blocks) => {
-            let t: String = blocks.iter()
-                .filter(|b| b["type"] == "thinking")
-                .map(|b| b["thinking"].as_str().unwrap_or(""))
-                .collect::<Vec<_>>()
                 .join("");
-            if t.is_empty() { None } else { Some(t) }
+            let parts_vec = blocks.iter().enumerate().map(|(i, b)| {
+                let ptype = b["type"].as_str().unwrap_or("text").to_string();
+                let pcontent = match ptype.as_str() {
+                    "thinking" => b["thinking"].as_str().unwrap_or("").to_string(),
+                    "tool_result" => b["content"].as_str().unwrap_or("").to_string(),
+                    "tool_use" => String::new(),
+                    _ => b["text"].as_str().unwrap_or("").to_string(),
+                };
+                let tuid = b["id"].as_str().map(|s| s.to_string());
+                let tname = b["name"].as_str().map(|s| s.to_string());
+                let tinput = if ptype == "tool_use" {
+                    Some(serde_json::to_string(&b["input"]).unwrap_or_default())
+                } else { None };
+                (i as i64, ptype, pcontent, tuid, tname, tinput)
+            }).collect();
+            (text, parts_vec)
         }
-        _ => None,
-    };
-
-    // Extract tool_calls from blocks for the tool_calls column
-    let tool_calls = match content_val {
-        serde_json::Value::Array(blocks) => {
-            let tc: Vec<serde_json::Value> = blocks.iter()
-                .filter(|b| b["type"] == "tool_use")
-                .map(|b| json!({
-                    "id": b["id"],
-                    "type": "function",
-                    "function": {
-                        "name": b["name"],
-                        "arguments": serde_json::to_string(&b["input"]).unwrap_or_default()
-                    }
-                }))
-                .collect();
-            if tc.is_empty() { None } else { Some(serde_json::to_string(&tc).unwrap_or_default()) }
-        }
-        _ => None,
+        _ => (String::new(), vec![]),
     };
 
     if let Ok(conn) = db.lock() {
         let _ = conn.execute(
-            "INSERT INTO chat_message (session_id, role, content, tool_calls, thinking, raw_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![session_id, role, display_text, tool_calls, thinking, raw_json],
+            "INSERT INTO chat_message (session_id, role, content) VALUES (?1, ?2, ?3)",
+            rusqlite::params![session_id, role, display_text],
         );
+        let msg_id = conn.last_insert_rowid();
+        for (order, ptype, pcontent, tuid, tname, tinput) in &parts {
+            let _ = conn.execute(
+                "INSERT INTO message_part (message_id, session_id, part_order, part_type, content, tool_use_id, tool_name, tool_input) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![msg_id, session_id, order, ptype, pcontent, tuid, tname, tinput],
+            );
+        }
     }
 }
 
@@ -611,11 +598,19 @@ impl AgentService {
                         if let Some(ref tc) = msg.tool_calls {
                             if let Ok(tool_calls) = serde_json::from_str::<Vec<serde_json::Value>>(tc) {
                                 for tc in &tool_calls {
+                                    let input_val = match &tc["function"]["arguments"] {
+                                        // arguments is stored as a JSON string (e.g. "{\"pattern\":\"foo\"}")
+                                        serde_json::Value::String(s) => {
+                                            serde_json::from_str::<serde_json::Value>(s).unwrap_or_else(|_| json!({}))
+                                        }
+                                        // arguments is already an object — use directly
+                                        other => other.clone(),
+                                    };
                                     blocks.push(json!({
                                         "type": "tool_use",
                                         "id": tc["id"],
                                         "name": tc["function"]["name"],
-                                        "input": tc["function"]["arguments"]
+                                        "input": input_val
                                     }));
                                 }
                             }
@@ -710,17 +705,12 @@ impl AgentService {
             mark_last_message_for_cache(&mut api_messages);
         }
 
-        // Custom provider validation: ensure tool_use blocks are always immediately
-        // followed by matching tool_result blocks (Anthropic API strict requirement).
-        // Auto-heal orphaned tool_use by injecting stub tool_result messages so a
-        // single corrupt DB row doesn't render the session permanently unusable.
-        if self.provider == "custom" {
-            validate_tool_pairing(&mut api_messages);
-        }
+        // Validate tool_use ↔ tool_result pairing. Auto-heal orphaned tool_use
+        // (from aborted streams or crashes) by injecting stub tool_result blocks.
+        // This prevents API 400 errors from permanently breaking the session.
+        validate_tool_pairing(&mut api_messages);
 
         // Accumulate thinking across tool-use turns — only attach to the final message
-        // so the UI shows one combined thinking block instead of one per turn.
-        let mut accumulated_thinking = String::new();
 
         // Stability guards
         let max_steps: usize = std::env::var("MINIMAX_MAX_STEPS")
@@ -971,16 +961,13 @@ impl AgentService {
                 });
             }
 
-            // Accumulate thinking from this turn
-            accumulated_thinking.push_str(&assistant_thinking);
-
             // Check cancel after SSE process returns
             if *cancel_rx.borrow() {
                 eprintln!("[stream_chat] Canceled after SSE for session {}", session_id);
-                if !accumulated_thinking.is_empty() || !assistant_text.is_empty() {
+                if !assistant_thinking.is_empty() || !assistant_text.is_empty() {
                     let mut partial = Vec::new();
-                    if !accumulated_thinking.is_empty() {
-                        partial.push(json!({"type": "thinking", "thinking": accumulated_thinking}));
+                    if !assistant_thinking.is_empty() {
+                        partial.push(json!({"type": "thinking", "thinking": assistant_thinking}));
                     }
                     if !assistant_text.is_empty() {
                         partial.push(json!({"type": "text", "text": assistant_text}));
@@ -993,12 +980,11 @@ impl AgentService {
             }
 
             // If stop_reason is not "tool_use", we're done.
-            // Attach accumulated thinking (across all turns) to the final message.
             if stop_reason.as_deref() != Some("tool_use") {
-                if !accumulated_thinking.is_empty() || !assistant_text.is_empty() {
+                if !assistant_thinking.is_empty() || !assistant_text.is_empty() {
                     let mut final_content = Vec::new();
-                    if !accumulated_thinking.is_empty() {
-                        final_content.push(json!({"type": "thinking", "thinking": accumulated_thinking}));
+                    if !assistant_thinking.is_empty() {
+                        final_content.push(json!({"type": "thinking", "thinking": assistant_thinking}));
                     }
                     if !assistant_text.is_empty() {
                         final_content.push(json!({"type": "text", "text": assistant_text}));
@@ -1015,9 +1001,9 @@ impl AgentService {
             }
 
             // stop_reason was "tool_use"
-            // 1) Add assistant message to api_messages WITH thinking (API needs it for
-            //    Interleaved Thinking chain / cache). Save to DB WITHOUT thinking
-            //    so the UI doesn't show a thinking bubble per turn.
+            // Add assistant message to api_messages WITH thinking (API needs it for
+            // Interleaved Thinking chain / cache). DB also gets thinking so the UI
+            // shows thinking-per-turn aligned with its corresponding tool_use.
             if !assistant_thinking.is_empty() || !assistant_text.is_empty() || !tool_uses.is_empty() {
                 // Full content for API (includes thinking)
                 let mut api_content = Vec::new();
@@ -1038,8 +1024,11 @@ impl AgentService {
                 }
                 api_messages.push(json!({"role": "assistant", "content": api_content}));
 
-                // DB content without thinking — thinking deferred to final message
+                // DB content — thinking saved per-turn so UI shows it inline with its tool_use
                 let mut db_content = Vec::new();
+                if !assistant_thinking.is_empty() {
+                    db_content.push(json!({"type": "thinking", "thinking": assistant_thinking}));
+                }
                 if !assistant_text.is_empty() {
                     db_content.push(json!({"type": "text", "text": assistant_text}));
                 }

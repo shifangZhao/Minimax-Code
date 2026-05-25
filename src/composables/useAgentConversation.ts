@@ -2,10 +2,10 @@
 // Supports Interleaved Thinking with complete message history
 
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { db, type ChatMessage, type UIMessage } from '../services/db'
+import { db, type ChatMessage, type MessagePart, type UIMessage } from '../services/db'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { useGlobalStreaming } from './useGlobalStreaming'
+import { useGlobalStreaming, activeFrontendSessions } from './useGlobalStreaming'
 
 export interface ToolEvent {
   type: 'tool_start' | 'tool_end'
@@ -13,6 +13,7 @@ export interface ToolEvent {
   tool_id: string
   input?: Record<string, unknown>
   result?: string
+  thinkingBefore?: string
 }
 
 export interface AskPayload {
@@ -184,7 +185,7 @@ export function useAgentConversation(agentType: string) {
       if (cached) {
         tokenUsage.value = cached
       } else if (msgs.length > 0) {
-        const totalChars = msgs.reduce((sum, m) => sum + (m.content?.length || 0) + (m.thinking?.length || 0), 0)
+        const totalChars = msgs.reduce((sum, m) => sum + (m.content?.length || 0) + (m.parts?.reduce((s, p) => s + (p.content?.length || 0), 0) || 0), 0)
         const est = Math.max(1, Math.round(totalChars / 3))
         const cw = tokenUsage.value.context_window
         tokenUsage.value = { estimated_tokens: est, context_window: cw, usage_pct: Math.min((est / cw) * 100, 99) }
@@ -195,7 +196,7 @@ export function useAgentConversation(agentType: string) {
     // Always update token cache for the loaded session
     const tu = sessionTokenUsage.get(sid)
     if (!tu && msgs.length > 0) {
-      const totalChars = msgs.reduce((sum, m) => sum + (m.content?.length || 0) + (m.thinking?.length || 0), 0)
+      const totalChars = msgs.reduce((sum, m) => sum + (m.content?.length || 0) + (m.parts?.reduce((s, p) => s + (p.content?.length || 0), 0) || 0), 0)
       const est = Math.max(1, Math.round(totalChars / 3))
       sessionTokenUsage.set(sid, { estimated_tokens: est, context_window: 204800, usage_pct: 0 })
     }
@@ -234,27 +235,47 @@ export function useAgentConversation(agentType: string) {
   function buildHistoryMessages(): HistoryMessage[] {
     const history: HistoryMessage[] = []
 
+    // Reconstruct raw_json from parts for backend consumption
+    function rebuildRawJson(msg: ChatMessage): string | undefined {
+      if (!msg.parts || msg.parts.length === 0) return undefined
+      const blocks = msg.parts.map(p => {
+        switch (p.part_type) {
+          case 'thinking': return { type: 'thinking', thinking: p.content }
+          case 'tool_use': return {
+            type: 'tool_use',
+            id: p.tool_use_id,
+            name: p.tool_name,
+            input: (() => { try { return JSON.parse(p.tool_input || '{}') } catch { return {} } })()
+          }
+          case 'tool_result': return { type: 'tool_result', tool_use_id: p.tool_use_id, content: p.content }
+          default: return { type: 'text', text: p.content }
+        }
+      })
+      return JSON.stringify(blocks)
+    }
+
+    function rebuildThinking(msg: ChatMessage): string | undefined {
+      if (!msg.parts || msg.parts.length === 0) return undefined
+      const t = msg.parts.filter(p => p.part_type === 'thinking').map(p => p.content).join('')
+      return t || undefined
+    }
+
     for (const msg of messages.value) {
+      const rawJson = rebuildRawJson(msg)
       if (msg.role === 'user') {
-        history.push({
-          role: 'user',
-          content: msg.content,
-          raw_json: msg.raw_json || undefined
-        })
+        // Skip pure tool_result messages (they are internal, not sent to API)
+        if (msg.parts && msg.parts.length > 0 && msg.parts.every(p => p.part_type === 'tool_result')) continue
+        history.push({ role: 'user', content: msg.content, raw_json: rawJson })
       } else if (msg.role === 'assistant') {
+        const thinking = rebuildThinking(msg)
+        // If we have parts with tool_use, the raw_json is the full content
+        const hasToolUse = msg.parts?.some(p => p.part_type === 'tool_use')
         history.push({
           role: 'assistant',
-          content: msg.content || '',
-          tool_calls: msg.tool_calls || undefined,
-          thinking: msg.thinking || undefined,
-          raw_json: msg.raw_json || undefined
-        })
-      } else if (msg.role === 'tool' || msg.raw_json) {
-        // Tool result messages (stored as user role with tool_result content blocks)
-        history.push({
-          role: 'user',
-          content: msg.content,
-          raw_json: msg.raw_json || undefined
+          content: hasToolUse ? '' : msg.content,
+          tool_calls: undefined,
+          thinking: thinking,
+          raw_json: hasToolUse ? rawJson : (msg.content ? undefined : undefined)
         })
       }
     }
@@ -372,6 +393,7 @@ export function useAgentConversation(agentType: string) {
 
     // Set up event listener for real-time streaming (managed by useGlobalStreaming)
     console.log('[sendMessage] Setting up event listener for:', `agent_stream_${finalSessionId}`)
+    activeFrontendSessions.add(finalSessionId)
     await setupListener(finalSessionId, (event) => {
       console.log('[sendMessage] Received event:', event.payload.type)
       const ev = event.payload
@@ -394,7 +416,7 @@ export function useAgentConversation(agentType: string) {
             })
           }
           {
-            const te = { type: 'tool_start' as const, tool: ev.tool || '', tool_id: ev.tool_id || '', input: ev.input, textBefore: fullText }
+            const te = { type: 'tool_start' as const, tool: ev.tool || '', tool_id: ev.tool_id || '', input: ev.input, textBefore: fullText, thinkingBefore: fullThinking }
             toolEvents.value.push(te)
             streamToolEvents.push(te)
             updateStreamState(finalSessionId, {
@@ -414,21 +436,15 @@ export function useAgentConversation(agentType: string) {
           break
         case 'done':
           resolveStream?.()
-          updateStreamState(finalSessionId, {
-            text: fullText, thinking: fullThinking, done: false, toolCallCount
-          })
           break
         case 'aborted':
           resolveStream?.()
-          updateStreamState(finalSessionId, {
-            text: fullText, thinking: fullThinking, done: false, toolCallCount
-          })
           break
         case 'cache_usage':
           cacheUsage.value = {
             hit: ev.cache_hit_tokens || 0,
             miss: ev.cache_miss_tokens || 0,
-            ratio: Math.round((ev.cache_hit_ratio || 0) * 100),
+            ratio: (ev.cache_hit_ratio || 0) * 100,
           }
           break
         case 'token_usage':
@@ -479,44 +495,62 @@ export function useAgentConversation(agentType: string) {
       console.log('[sendMessage] Waiting for stream...')
       await streamComplete
 
-      // Keep streaming content visible until DB load confirms persistence
-      updateStreamState(finalSessionId, {
-        text: fullText || undefined,
-        thinking: fullThinking,
-        done: false,
-        toolCallCount
-      })
+      // Build fallback message from stream buffer FIRST, before touching
+      // streaming state. This guarantees something is visible immediately
+      // in the persisted section — no blank gap.
+      let optimisticMsg: ChatMessage | null = null
+      let optimisticList: ChatMessage[] | null = null
+      if (fullText || fullThinking) {
+        const fallbackParts: MessagePart[] = []
+        let partOrder = 0
+        if (fullThinking) {
+          fallbackParts.push({ id: 0, message_id: 0, session_id: finalSessionId, part_order: partOrder++, part_type: 'thinking', content: fullThinking, created_at: new Date().toISOString() } as MessagePart)
+        }
+        if (fullText) {
+          fallbackParts.push({ id: 0, message_id: 0, session_id: finalSessionId, part_order: partOrder++, part_type: 'text', content: fullText, created_at: new Date().toISOString() } as MessagePart)
+        }
+        for (const tc of collectedToolCalls) {
+          fallbackParts.push({ id: 0, message_id: 0, session_id: finalSessionId, part_order: partOrder++, part_type: 'tool_use', content: '', tool_use_id: tc.id, tool_name: tc.function.name, tool_input: tc.function.arguments, created_at: new Date().toISOString() } as MessagePart)
+        }
+        const fallbackContent = fullThinking
+          ? `💭 ${fullThinking}\n\n${fullText}`
+          : fullText
+        optimisticMsg = {
+          id: Date.now() + 1,
+          session_id: finalSessionId,
+          role: 'assistant',
+          content: fallbackContent,
+          parts: fallbackParts,
+          created_at: new Date().toISOString(),
+        } as ChatMessage
+        // Optimistic UI: push immediately so user sees the response.
+        // loadMessages will silently overwrite with the real DB row afterwards.
+        const cachedBefore = sessionMessages.get(finalSessionId) || []
+        optimisticList = [...cachedBefore, optimisticMsg]
+        sessionMessages.set(finalSessionId, optimisticList)
+        if (finalSessionId === sessionId.value) {
+          messages.value = optimisticList
+        }
+      }
 
-      // Reload messages for this specific session (not current view)
-      await loadMessages(finalSessionId)
-
-      // Clear streaming display after DB messages are available
+      // Now hide streaming — the persisted section already has the message
       updateStreamState(finalSessionId, {
         text: '', thinking: '', done: true, toolCallCount
       })
 
-      // Fallback: if no new messages appeared in DB, push stream buffer
-      // into the session cache so the user sees output even after tab switches.
-      if (fullText || fullThinking) {
-        const cachedMsgs = sessionMessages.get(finalSessionId) || []
-        if (cachedMsgs.length <= msgCountBefore) {
-          const fallbackContent = fullThinking
-            ? `💭 ${fullThinking}\n\n${fullText}`
-            : fullText
-          const fallbackMsg = {
-            id: Date.now() + 1,
-            session_id: finalSessionId,
-            role: 'assistant',
-            content: fallbackContent,
-            thinking: fullThinking || undefined,
-            tool_calls: collectedToolCalls.length > 0 ? JSON.stringify(collectedToolCalls) : undefined,
-            created_at: new Date().toISOString(),
-          } as ChatMessage
-          cachedMsgs.push(fallbackMsg)
-          sessionMessages.set(finalSessionId, cachedMsgs)
-          // If user is still viewing this session, update the reactive array too
+      // Reload from DB to get authoritative message IDs and any parts the
+      // backend saved (tool results, etc.). Overwrites the optimistic copy.
+      await loadMessages(finalSessionId)
+
+      // If DB still doesn't have the message (save failed), the optimistic
+      // copy is already in the cache and visible — nothing more to do.
+      // But if DB load brought back fewer messages than expected, re-apply.
+      if (optimisticList) {
+        const after = sessionMessages.get(finalSessionId) || []
+        if (after.length <= msgCountBefore) {
+          sessionMessages.set(finalSessionId, optimisticList)
           if (finalSessionId === sessionId.value) {
-            messages.value.push(fallbackMsg)
+            messages.value = optimisticList
           }
         }
       }
@@ -538,6 +572,7 @@ export function useAgentConversation(agentType: string) {
       // Only show loading state if the current session is still streaming
       loading.value = loadingSessions.has(sessionId.value!)
       teardownListener(finalSessionId)
+      activeFrontendSessions.delete(finalSessionId)
     }
   }
 
@@ -610,38 +645,16 @@ export function useAgentConversation(agentType: string) {
     }
   }
 
-  interface ContentBlock {
-    type: string
-    text?: string
-    tool_use_id?: string
-    content?: string | unknown
-    tool_use?: unknown
-    thinking?: unknown
-  }
-
   function isInternalCacheMessage(msg: ChatMessage): boolean {
     if (msg.role === 'user' && msg.content?.startsWith('## 内置参考资料')) return true
-    if (msg.raw_json) {
-      try {
-        const blocks: ContentBlock[] = JSON.parse(msg.raw_json)
-        if (Array.isArray(blocks)) {
-          if (msg.role === 'user' && blocks.some((b) => b.type === 'tool_result')) return true
-          if (msg.role === 'assistant' && blocks.some((b) => b.type === 'tool_use')) {
-            const hasText = blocks.some((b) => b.type === 'text' && (b.text ?? '').trim())
-            const hasThinking = blocks.some((b) => b.type === 'thinking')
-            if (!hasText && !hasThinking) return true
-          }
-        }
-      } catch {}
-    }
-    if (msg.role === 'user' && !msg.content?.trim()) return true
-    if (msg.tool_calls) {
-      try {
-        const tc = JSON.parse(msg.tool_calls)
-        if (Array.isArray(tc) && tc.some((t: any) =>
-          ['skill', 'match_skills', 'list_skills'].includes(t.function?.name)
-        )) return true
-      } catch {}
+    if (msg.role === 'user' && !msg.content?.trim() && (!msg.parts || msg.parts.length === 0)) return true
+    // Hide user messages that are purely tool_results (no text content, only tool_result parts)
+    if (msg.role === 'user' && msg.parts && msg.parts.length > 0 && msg.parts.every(p => p.part_type === 'tool_result')) return true
+    // Hide assistant messages that have zero displayable parts
+    // (tool_use parts ARE displayable — they render as ToolCards)
+    if (msg.role === 'assistant' && msg.parts && msg.parts.length > 0) {
+      const hasVisible = msg.parts.some(p => p.part_type === 'text' || p.part_type === 'thinking' || p.part_type === 'tool_use')
+      if (!hasVisible) return true
     }
     return false
   }
@@ -651,65 +664,65 @@ export function useAgentConversation(agentType: string) {
   let _dispCache: UIMessage[] = []
 
   const displayMessages = computed(() => {
-    // Build a lightweight fingerprint of the array
-    const fp = messages.value.map(m => `${m.id}:${m.role}:${m.content?.length ?? 0}:${m.thinking?.length ?? 0}:${m.tool_calls?.length ?? 0}`).join('|')
+    const fp = messages.value.map(m => `${m.id}:${m.role}:${m.content?.length ?? 0}:${m.parts?.length ?? 0}`).join('|')
     if (fp === _dispFingerprint) return _dispCache
 
-    // Collect tool results from hidden tool_result messages
+    // Collect tool_results from hidden messages (keyed by tool_use_id)
     const toolResults = new Map<string, string>()
     for (const m of messages.value) {
-      if (m.raw_json) {
-        try {
-          const blocks = JSON.parse(m.raw_json)
-          if (Array.isArray(blocks)) {
-            for (const b of blocks) {
-              if (b.type === 'tool_result' && b.tool_use_id && b.content) {
-                toolResults.set(
-                  b.tool_use_id,
-                  typeof b.content === 'string' ? b.content : JSON.stringify(b.content)
-                )
-              }
-            }
+      if (m.parts) {
+        for (const p of m.parts) {
+          if (p.part_type === 'tool_result' && p.tool_use_id) {
+            toolResults.set(p.tool_use_id, p.content)
           }
-        } catch {}
+        }
       }
     }
 
     const result: UIMessage[] = []
     for (const m of messages.value) {
       const hidden = isInternalCacheMessage(m)
-      if (!hidden) {
-        if (m.content && m.content.startsWith('💭')) {
-          const parts = m.content.split('\n\n')
-          result.push({
-            ...m,
-            thinking: parts[0].replace('💭 ', ''),
-            content: parts.slice(1).join('\n\n'),
-          })
-        } else {
-          result.push({ ...m, thinking: m.thinking } as UIMessage)
-        }
-      }
-      // Emit tool cards after this message (whether hidden or not)
-      if (m.role === 'assistant' && m.tool_calls) {
-        try {
-          const calls = JSON.parse(m.tool_calls)
-          if (Array.isArray(calls)) {
-            for (const tc of calls) {
-              result.push({
-                id: `tool-${tc.id}` as unknown as number,
-                session_id: m.session_id,
-                role: 'tool' as const,
-                tool_calls: JSON.stringify([tc]),
-                content: toolResults.get(tc.id) || '',
-                created_at: m.created_at,
-                thinking: undefined,
-                attachments: undefined,
-                raw_json: undefined,
-              } as UIMessage)
+
+      // Assistant messages with parts: interleave text/thinking/tool_use in part_order
+      if (m.role === 'assistant' && m.parts && m.parts.length > 0 && !hidden) {
+        let textBuf = ''
+        let thinkBuf = ''
+        for (const p of m.parts) {
+          if (p.part_type === 'thinking') {
+            thinkBuf += p.content
+          } else if (p.part_type === 'text') {
+            textBuf += p.content
+          } else if (p.part_type === 'tool_use') {
+            if (textBuf.trim() || thinkBuf) {
+              result.push({ ...m, thinking: thinkBuf || undefined, content: textBuf, parts: [] } as UIMessage)
+              textBuf = ''; thinkBuf = ''
             }
+            const tcId = p.tool_use_id || ''
+            result.push({
+              id: `tool-${tcId}` as unknown as number,
+              session_id: m.session_id,
+              role: 'tool' as const,
+              content: toolResults.get(tcId) || '',
+              parts: [],
+              tool_calls: JSON.stringify([{ id: tcId, type: 'function', function: { name: p.tool_name || '', arguments: p.tool_input || '{}' } }]),
+              created_at: m.created_at,
+            } as UIMessage)
           }
-        } catch {}
+        }
+        if (textBuf.trim() || thinkBuf) {
+          result.push({ ...m, thinking: thinkBuf || undefined, content: textBuf, parts: [] } as UIMessage)
+        }
+        continue
+      }
+
+      // Non-assistant or no parts: show as-is (unless hidden)
+      if (!hidden) {
+        if (m.content?.startsWith('💭')) {
+          const parts = m.content.split('\n\n')
+          result.push({ ...m, thinking: parts[0].replace('💭 ', ''), content: parts.slice(1).join('\n\n'), parts: m.parts || [] } as UIMessage)
+        } else {
+          result.push({ ...m, thinking: undefined, parts: m.parts || [] } as UIMessage)
+        }
       }
     }
     _dispFingerprint = fp

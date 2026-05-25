@@ -175,38 +175,53 @@ fn count_tokens_from_chars(text: &str) -> usize {
 /// with tool_use blocks and the user message with the matching tool_result blocks.
 /// Anthropic-compatible APIs require each tool_use to be immediately followed by
 /// its tool_result in the next message.
+fn is_tool_use_msg(msg: &Value) -> bool {
+    msg["role"].as_str() == Some("assistant")
+        && msg["content"].as_array().map_or(false, |blocks| {
+            blocks.iter().any(|b| b["type"] == "tool_use")
+        })
+}
+
+fn is_tool_result_msg(msg: &Value) -> bool {
+    msg["role"].as_str() == Some("user")
+        && msg["content"].as_array().map_or(false, |blocks| {
+            !blocks.is_empty() && blocks.iter().all(|b| b["type"] == "tool_result")
+        })
+}
+
 fn safe_split_index(messages: &[Value], mut split_idx: usize) -> usize {
     if split_idx == 0 || split_idx >= messages.len() {
         return split_idx;
     }
-    // If the message just before the split is an assistant with tool_use,
-    // walk backward past the assistant message so both stay in the recent tail.
-    let prev = &messages[split_idx - 1];
-    if prev["role"].as_str() == Some("assistant")
-        && prev["content"].as_array().map_or(false, |blocks| {
-            blocks.iter().any(|b| b["type"] == "tool_use")
-        })
-    {
-        // Move split back before this assistant message
-        if split_idx > 1 {
+
+    // Walk backward to find a safe split boundary. Never split inside a
+    // tool_use → tool_result pair — either keep both or drop both.
+    while split_idx > 1 {
+        let prev = &messages[split_idx - 1];
+        if is_tool_use_msg(prev) {
+            // assistant with tool_use at prev → must keep this pair intact
             split_idx -= 1;
+            continue;
         }
-    }
-    // Also ensure we don't start the recent tail with a tool_result whose
-    // tool_use is in the dropped section. Walk forward past orphaned
-    // tool_result messages until we find a non-tool_result or an assistant.
-    while split_idx < messages.len() {
-        let cur = &messages[split_idx];
-        if cur["role"].as_str() == Some("user")
-            && cur["content"].as_array().map_or(false, |blocks| {
-                blocks.iter().all(|b| b["type"] == "tool_result")
-            })
-        {
-            split_idx += 1;
-        } else {
-            break;
+        if is_tool_result_msg(prev) {
+            // tool_result at prev → must walk back to its tool_use
+            split_idx -= 1;
+            // Now prev is the assistant that owns these tool_results.
+            // Walk back one more to include it.
+            if split_idx > 0 && is_tool_use_msg(&messages[split_idx - 1]) {
+                split_idx -= 1;
+            }
+            continue;
         }
+        // Safe boundary: prev is a regular message
+        break;
     }
+
+    // Walk forward past orphaned tool_results at the split point
+    while split_idx < messages.len() && is_tool_result_msg(&messages[split_idx]) {
+        split_idx += 1;
+    }
+
     split_idx.min(messages.len())
 }
 
