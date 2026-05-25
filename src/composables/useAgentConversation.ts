@@ -646,7 +646,15 @@ export function useAgentConversation(agentType: string) {
     return false
   }
 
+  // Cache fingerprints to avoid re-processing unchanged message arrays
+  let _dispFingerprint = ''
+  let _dispCache: UIMessage[] = []
+
   const displayMessages = computed(() => {
+    // Build a lightweight fingerprint of the array
+    const fp = messages.value.map(m => `${m.id}:${m.role}:${m.content?.length ?? 0}:${m.thinking?.length ?? 0}:${m.tool_calls?.length ?? 0}`).join('|')
+    if (fp === _dispFingerprint) return _dispCache
+
     // Collect tool results from hidden tool_result messages
     const toolResults = new Map<string, string>()
     for (const m of messages.value) {
@@ -704,6 +712,8 @@ export function useAgentConversation(agentType: string) {
         } catch {}
       }
     }
+    _dispFingerprint = fp
+    _dispCache = result
     return result
   })
 

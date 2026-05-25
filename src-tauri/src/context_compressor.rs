@@ -171,6 +171,45 @@ fn count_tokens_from_chars(text: &str) -> usize {
 
 // ── Compression ──
 
+/// Adjust a split index backward so we never cut between an assistant message
+/// with tool_use blocks and the user message with the matching tool_result blocks.
+/// Anthropic-compatible APIs require each tool_use to be immediately followed by
+/// its tool_result in the next message.
+fn safe_split_index(messages: &[Value], mut split_idx: usize) -> usize {
+    if split_idx == 0 || split_idx >= messages.len() {
+        return split_idx;
+    }
+    // If the message just before the split is an assistant with tool_use,
+    // walk backward past the assistant message so both stay in the recent tail.
+    let prev = &messages[split_idx - 1];
+    if prev["role"].as_str() == Some("assistant")
+        && prev["content"].as_array().map_or(false, |blocks| {
+            blocks.iter().any(|b| b["type"] == "tool_use")
+        })
+    {
+        // Move split back before this assistant message
+        if split_idx > 1 {
+            split_idx -= 1;
+        }
+    }
+    // Also ensure we don't start the recent tail with a tool_result whose
+    // tool_use is in the dropped section. Walk forward past orphaned
+    // tool_result messages until we find a non-tool_result or an assistant.
+    while split_idx < messages.len() {
+        let cur = &messages[split_idx];
+        if cur["role"].as_str() == Some("user")
+            && cur["content"].as_array().map_or(false, |blocks| {
+                blocks.iter().all(|b| b["type"] == "tool_result")
+            })
+        {
+            split_idx += 1;
+        } else {
+            break;
+        }
+    }
+    split_idx.min(messages.len())
+}
+
 /// Collapse Drain — aggressive compression when API returns context overflow.
 /// `level`: 1 = moderately aggressive, 2 = keep only the very last exchange.
 /// `summary`: model-generated summary.
@@ -186,7 +225,8 @@ pub fn compress_context_aggressive(agent_type: &str, messages: &mut Vec<Value>, 
     }
 
     let old_len = messages.len();
-    let split_idx = messages.len() - keep_recent;
+    let raw_idx = messages.len().saturating_sub(keep_recent);
+    let split_idx = safe_split_index(messages, raw_idx);
     let first_msg = messages[0].clone();
     let recent: Vec<Value> = messages[split_idx..].to_vec();
 
@@ -195,7 +235,7 @@ pub fn compress_context_aggressive(agent_type: &str, messages: &mut Vec<Value>, 
     messages.push(serde_json::json!({ "role": "user", "content": summary }));
     messages.extend(recent);
 
-    eprintln!("[collapse_drain] {} level={}: {} → {} messages", agent_type, level, old_len, messages.len());
+    eprintln!("[collapse_drain] {} level={}: {} → {} messages (split at {})", agent_type, level, old_len, messages.len(), split_idx);
     true
 }
 
@@ -218,7 +258,8 @@ pub fn compress_context(agent_type: &str, messages: &mut Vec<Value>, summary: St
     }
 
     let old_len = messages.len();
-    let split_idx = messages.len() - keep_recent;
+    let raw_idx = messages.len().saturating_sub(keep_recent);
+    let split_idx = safe_split_index(messages, raw_idx);
     let first_msg = messages[0].clone();
     let recent: Vec<Value> = messages[split_idx..].to_vec();
 
@@ -227,5 +268,5 @@ pub fn compress_context(agent_type: &str, messages: &mut Vec<Value>, summary: St
     messages.push(serde_json::json!({ "role": "user", "content": summary }));
     messages.extend(recent);
 
-    eprintln!("[compress] {}: {} → {} messages", agent_type, old_len, messages.len());
+    eprintln!("[compress] {}: {} → {} messages (split at {})", agent_type, old_len, messages.len(), split_idx);
 }

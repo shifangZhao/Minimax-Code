@@ -62,41 +62,34 @@
       </div>
       <span class="context-label">{{ formatTokens(tokenUsage.estimated_tokens) }} / {{ formatTokens(tokenUsage.context_window) }}</span>
     </div>
-    <div class="messages" ref="messagesEl" @scroll="onMessagesScroll">
+    <div class="messages" ref="messagesEl" @scroll="saveScrollPos">
       <div v-if="hasMoreOlder" class="load-earlier-wrap">
         <button class="load-earlier-btn" :disabled="loadingMore" @click="loadMoreMessages()">
           {{ loadingMore ? '加载中...' : '▲ 加载更早消息' }}
         </button>
       </div>
-      <!-- Virtual scroll: spacer for messages before visible window -->
-      <div :style="{ height: (offsets[visibleRange.start] || 0) + 'px', flexShrink: '0' }"></div>
+      <div v-if="displayMessages.length === 0 && !showLoading && currentStreaming.done" class="empty-chat">
+        开始对话吧
+      </div>
       <div
-        v-for="(msg, vi) in visibleMessages"
-        :key="`msg-${(msg.id || 0)}-${visibleRange.start + vi}`"
-        :ref="(el) => measureMsg(visibleRange.start + vi, el as HTMLElement | null)"
+        v-for="(msg, i) in displayMessages"
+        :key="(msg.id || 0)"
         :class="['message', msg.role]"
       >
         <div v-if="msg.role !== 'tool' && msg.role !== 'system'" class="avatar">{{ msg.role === 'user' ? 'U' : 'A' }}</div>
         <div class="content">
           <div v-if="msg.thinking && msg.role === 'assistant'" class="thinking-block">
-            <div class="thinking-toggle" :class="{ collapsed: !isThinkingExpanded(visibleRange.start + vi) }" @click="toggleThinking(visibleRange.start + vi)">
+            <div class="thinking-toggle" :class="{ collapsed: !isThinkingExpanded(i) }" @click="toggleThinking(i)">
               思考过程
               <span class="toggle-arrow"></span>
             </div>
-            <div v-if="isThinkingExpanded(visibleRange.start + vi)" class="thinking-text" v-html="formatContent(msg.thinking)"></div>
+            <div v-if="isThinkingExpanded(i)" class="thinking-text" v-html="formatContent(msg.thinking)"></div>
           </div>
           <div v-if="msg.role === 'user'" class="user-msg">
             <div v-if="parsedAttachments(msg)" class="user-attachments">
               <div v-for="(att, j) in parsedAttachments(msg)" :key="j" class="msg-att-wrap">
                 <template v-if="att.kind === 'image'">
-                  <img
-                    v-if="getImageSrc(att.path)"
-                    :src="getImageSrc(att.path)"
-                    class="msg-image"
-                    :alt="att.name"
-                    :title="att.name"
-                    @error="onImgError($event)"
-                  />
+                  <img v-if="getImageSrc(att.path)" :src="getImageSrc(att.path)" class="msg-image" :alt="att.name" :title="att.name" @error="onImgError($event)" />
                   <div v-else class="msg-img-placeholder">🖼 {{ att.name }}</div>
                 </template>
                 <div v-else class="msg-file-badge">📄 {{ att.name }}</div>
@@ -108,9 +101,7 @@
             <ToolCard v-if="getToolCardInfo(msg)" :toolInfo="getToolCardInfo(msg)!" />
           </div>
           <div v-else-if="msg.role === 'system'" class="system-msg">
-            <template v-if="msg.loading">
-              <span class="cmd-spinner"></span> {{ msg.content }}
-            </template>
+            <template v-if="msg.loading"><span class="cmd-spinner"></span> {{ msg.content }}</template>
             <template v-else-if="msg.cmdResult">
               <div class="cmd-line">{{ msg.content }}</div>
               <div class="cmd-result">{{ msg.cmdResult }}</div>
@@ -121,26 +112,18 @@
           <div class="time" v-if="msg.created_at">{{ formatTime(msg.created_at) }}</div>
         </div>
         <div v-if="msg.role === 'user'" class="msg-hover-actions">
-          <button class="hover-btn" title="重新生成" @click="retryMessage(visibleRange.start + vi)">⟳</button>
+          <button class="hover-btn" title="重新生成" @click="retryMessage(i)">⟳</button>
           <button class="hover-btn" title="回退到此" @click="rewindToMessage(msg.id, msg.content)">↩</button>
         </div>
       </div>
       <div v-if="showLoading" class="message assistant">
         <div class="avatar">A</div>
         <div class="content loading-content">
-          <div class="loading-dots">
-            <span></span><span></span><span></span>
-          </div>
+          <div class="loading-dots"><span></span><span></span><span></span></div>
         </div>
       </div>
-      <!-- Virtual scroll: spacer for messages after visible window -->
-      <div :style="{ height: (totalHeight - (offsets[Math.min(visibleRange.end, offsets.length - 1)] || 0)) + 'px', flexShrink: '0' }"></div>
       <template v-if="!currentStreaming.done">
-        <div
-          v-for="(seg, si) in streamingSegments"
-          :key="si"
-          :class="['message', seg.kind === 'tool' ? 'tool' : 'assistant']"
-        >
+        <div v-for="(seg, si) in streamingSegments" :key="si" :class="['message', seg.kind === 'tool' ? 'tool' : 'assistant']">
           <template v-if="seg.kind === 'text'">
             <div class="avatar">A</div>
             <div class="content">
@@ -170,6 +153,7 @@
       title="回退消息"
       message="回退至此消息发送前的状态，该消息及之后的所有内容将被删除。"
       confirmText="确认回退"
+      danger
       @confirm="handleRewindConfirm()"
       @cancel="cancelRewind()"
     />
@@ -333,100 +317,18 @@ function insertCommand(name: string) {
   inputEl.value?.focus()
 }
 const thinkingExpanded = ref<Record<number, boolean>>({})
+
 // Per-agent scroll position cache (survives KeepAlive tab switches)
 const scrollCache = new Map<string, number>()
 const agentScrollKey = computed(() => `scroll_${props.agentType}`)
 
-// ── Virtual scrolling ─────────────────────────────────────────────────────
-const EST_MSG_HEIGHT = 180     // px, initial estimate for unmeasured messages
-const OVERSCAN = 3             // extra items above/below viewport
-const measuredHeights = ref<Map<number, number>>(new Map())
-const containerHeight = ref(600)
-
-function getMsgHeight(idx: number): number {
-  return measuredHeights.value.get(idx) ?? EST_MSG_HEIGHT
-}
-
-// Cumulative heights: offset[i] = sum of heights for messages [0..i-1]
-const offsets = computed(() => {
-  const off = [0]
-  const msgs = displayMessages.value
-  for (let i = 0; i < msgs.length; i++) {
-    off.push(off[i] + getMsgHeight(i))
+function saveScrollPos() {
+  if (messagesEl.value) {
+    scrollCache.set(agentScrollKey.value, messagesEl.value.scrollTop)
   }
-  return off
-})
-
-const totalHeight = computed(() => offsets.value[offsets.value.length - 1] || 0)
-
-const visibleRange = computed(() => {
-  const scrollPos = scrollCache.get(agentScrollKey.value) ?? 0
-  const ch = containerHeight.value
-  const off = offsets.value
-  const total = displayMessages.value.length
-
-  // Binary search for first visible message
-  let lo = 0, hi = total
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1
-    if (off[mid + 1] <= scrollPos - EST_MSG_HEIGHT * OVERSCAN) {
-      lo = mid + 1
-    } else {
-      hi = mid
-    }
-  }
-  const start = Math.max(0, lo)
-
-  // Find last visible message
-  const bottom = scrollPos + ch + EST_MSG_HEIGHT * OVERSCAN
-  lo = start; hi = total
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1
-    if (off[mid] <= bottom) {
-      lo = mid + 1
-    } else {
-      hi = mid
-    }
-  }
-  const end = Math.min(total, lo)
-
-  return { start, end }
-})
-
-const visibleMessages = computed(() => {
-  const { start, end } = visibleRange.value
-  return displayMessages.value.slice(start, end)
-})
-
-function measureMsg(idx: number, el: HTMLElement | null) {
-  if (!el) return
-  const h = el.getBoundingClientRect().height
-  if (h > 0 && h !== getMsgHeight(idx)) {
-    measuredHeights.value.set(idx, h)
-  }
-}
-
-// Track scroll position from the messages container
-function onMessagesScroll(e: Event) {
-  const el = e.target as HTMLElement
-  if (el) {
-    const key = agentScrollKey.value
-    scrollCache.set(key, el.scrollTop)
-  }
-}
-// Also observe container resize to update visible range
-let resizeObs: ResizeObserver | null = null
-function setupResizeObserver(el: HTMLElement | null) {
-  if (resizeObs) { resizeObs.disconnect(); resizeObs = null }
-  if (!el) return
-  resizeObs = new ResizeObserver(([entry]) => {
-    if (entry) containerHeight.value = entry.contentRect.height
-  })
-  resizeObs.observe(el)
 }
 
 function isThinkingExpanded(idx: number): boolean {
-  // Default to expanded; only collapse if explicitly set to false
   return thinkingExpanded.value[idx] !== false
 }
 
@@ -533,16 +435,28 @@ const showLoading = computed(() => {
   return loading.value && cs && !cs.done && !cs.text && !cs.thinking
 })
 
+// Markdown render cache — renderMarkdown with hljs is expensive
+const mdCache = new Map<string, string>()
+const MAX_MD_CACHE = 600
+
 function formatContent(text: string, streaming?: boolean): string {
-  if (streaming && text) {
-    // Defer unclosed fenced code blocks — prevent half the page from
-    // flashing into code-style while the LLM is still typing.
+  if (!text) return ''
+  if (streaming) {
     const lastOpen = text.lastIndexOf('```')
     if (lastOpen >= 0 && text.slice(lastOpen).split('\n').filter(l => l.trim().startsWith('```')).length % 2 !== 0) {
       text = text.slice(0, lastOpen)
     }
+    return renderMarkdown(text) || ''
   }
-  return renderMarkdown(text) || ''
+  const cached = mdCache.get(text)
+  if (cached !== undefined) return cached
+  const result = renderMarkdown(text) || ''
+  if (mdCache.size >= MAX_MD_CACHE) {
+    const firstKey = mdCache.keys().next().value
+    if (firstKey !== undefined) mdCache.delete(firstKey)
+  }
+  mdCache.set(text, result)
+  return result
 }
 
 function formatTokens(n: number): string {
@@ -625,7 +539,7 @@ function scrollToBottom(force = false) {
   requestAnimationFrame(() => {
     if (messagesEl.value && (force || isAtBottom())) {
       messagesEl.value.scrollTop = messagesEl.value.scrollHeight
-      scrollCache.set(agentScrollKey.value, messagesEl.value.scrollTop)
+      saveScrollPos()
     }
   })
 }
@@ -972,7 +886,6 @@ watch(inputText, () => {
 
 onMounted(() => {
   nextTick(() => {
-    setupResizeObserver(messagesEl.value ?? null)
     if (messagesEl.value) {
       const pos = scrollCache.get(agentScrollKey.value)
       messagesEl.value.scrollTop = pos ?? messagesEl.value.scrollHeight
@@ -982,7 +895,6 @@ onMounted(() => {
 
 onActivated(() => {
   nextTick(() => {
-    setupResizeObserver(messagesEl.value ?? null)
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         if (messagesEl.value) {
@@ -995,10 +907,7 @@ onActivated(() => {
 })
 
 onDeactivated(() => {
-  if (messagesEl.value) {
-    scrollCache.set(agentScrollKey.value, messagesEl.value.scrollTop)
-  }
-  if (resizeObs) { resizeObs.disconnect(); resizeObs = null }
+  saveScrollPos()
 })
 </script>
 
@@ -1085,16 +994,27 @@ onDeactivated(() => {
   gap: 16px;
 }
 
+.empty-chat {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  font-size: 14px;
+  opacity: 0.6;
+}
+
 .message {
   display: flex;
   gap: 12px;
   align-items: flex-start;
   width: 100%;
   position: relative;
+  padding: 8px 0;
 }
 
 .message.user {
-  /* left-aligned like DeepSeek */
+  /* user messages left-aligned */
 }
 
 .message.assistant {

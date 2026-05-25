@@ -229,6 +229,90 @@ fn mark_last_message_for_cache(msgs: &mut Vec<serde_json::Value>) {
     }
 }
 
+/// Validate that every assistant message with tool_use blocks is immediately
+/// followed by a user message with matching tool_result blocks. Required by
+/// Anthropic-compatible APIs. If orphans are found, inject stub tool_result
+/// messages so the session can recover without a restart.
+fn validate_tool_pairing(msgs: &mut Vec<serde_json::Value>) {
+    let mut i = 0;
+    while i < msgs.len() {
+        let role = msgs[i]["role"].as_str().unwrap_or("");
+        if role != "assistant" {
+            i += 1;
+            continue;
+        }
+        let content = &msgs[i]["content"];
+        let tool_use_ids: Vec<String> = content
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|b| b["type"] == "tool_use")
+            .filter_map(|b| b["id"].as_str().map(|s| s.to_string()))
+            .collect();
+
+        if tool_use_ids.is_empty() {
+            i += 1;
+            continue;
+        }
+
+        // Check the next message for matching tool_result blocks
+        let next_idx = i + 1;
+        let mut missing: Vec<&String> = tool_use_ids.iter().collect();
+
+        if next_idx < msgs.len()
+            && msgs[next_idx]["role"].as_str() == Some("user")
+            && msgs[next_idx]["content"].is_array()
+        {
+            let existing_ids: Vec<&str> = msgs[next_idx]["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|b| b["type"] == "tool_result")
+                .filter_map(|b| b["tool_use_id"].as_str())
+                .collect();
+            missing.retain(|id| !existing_ids.contains(&id.as_str()));
+        } else {
+            // Next message is missing or wrong role — all tool_use ids are orphans
+        }
+
+        if !missing.is_empty() {
+            eprintln!(
+                "[tool_pair_validate] Orphaned tool_use at message[{}]: {} — injecting stub tool_result",
+                i,
+                missing.iter().map(|id| id.as_str()).collect::<Vec<_>>().join(", ")
+            );
+            let stubs: Vec<serde_json::Value> = missing
+                .iter()
+                .map(|id| {
+                    serde_json::json!({
+                        "type": "tool_result",
+                        "tool_use_id": id,
+                        "content": "[Auto-recovered] Tool result was lost — this stub injected to maintain API compliance."
+                    })
+                })
+                .collect();
+
+            if next_idx < msgs.len()
+                && msgs[next_idx]["role"].as_str() == Some("user")
+                && msgs[next_idx]["content"].is_array()
+            {
+                // Append stubs to existing user message
+                if let Some(arr) = msgs[next_idx]["content"].as_array_mut() {
+                    arr.extend(stubs);
+                }
+            } else {
+                // Insert new user message with stubs
+                msgs.insert(
+                    next_idx,
+                    serde_json::json!({"role": "user", "content": stubs}),
+                );
+            }
+        }
+
+        i += 1;
+    }
+}
+
 /// Save original file content before modification for undo support.
 /// Each call creates a new version, so multi-edit workflows can rewind step by step.
 fn save_file_snapshot(db: &Arc<StdMutex<Connection>>, session_id: i64, file_path: &str) {
@@ -553,8 +637,8 @@ impl AgentService {
         }
 
         // Merge consecutive tool_result-only user messages into one.
-        // Strict Anthropic-compatible APIs (DeepSeek) require all tool_results
-        // matching one assistant turn to be in a single user message.
+        // Strict Anthropic-compatible APIs require all tool_results matching
+        // one assistant turn to be in a single user message.
         {
             let mut merged: Vec<serde_json::Value> = Vec::new();
             for msg in api_messages.drain(..) {
@@ -624,6 +708,14 @@ impl AgentService {
         if self.provider != "custom" {
             strip_cache_control(&mut api_messages);
             mark_last_message_for_cache(&mut api_messages);
+        }
+
+        // Custom provider validation: ensure tool_use blocks are always immediately
+        // followed by matching tool_result blocks (Anthropic API strict requirement).
+        // Auto-heal orphaned tool_use by injecting stub tool_result messages so a
+        // single corrupt DB row doesn't render the session permanently unusable.
+        if self.provider == "custom" {
+            validate_tool_pairing(&mut api_messages);
         }
 
         // Accumulate thinking across tool-use turns — only attach to the final message
@@ -808,7 +900,7 @@ impl AgentService {
             };
 
             // Process SSE stream and collect result
-            let mut storm_correction_used = false;
+            let mut repeat_guard_fired = false;
             let (stop_reason, assistant_text, assistant_thinking, tool_uses, tool_results, actual_tokens) = process_sse_stream(
                 response.bytes_stream(),
                 app.clone(),
@@ -826,15 +918,15 @@ impl AgentService {
                 pending_asks.clone(),
                 &mut api_messages,
                 cancel_rx.clone(),
-                &mut storm_correction_used,
+                &mut repeat_guard_fired,
             ).await;
 
             eprintln!("[stream_chat] Model: {}, stop_reason: {:?}, thinking: {} chars, text: {} chars, tool_uses: {}", self.model,
                 stop_reason, assistant_thinking.len(), assistant_text.len(), tool_uses.len());
 
-            // Storm breaker self-correction: inject stub tool results so the model
+            // Repeat guard self-correction: inject stub tool results so the model
             // sees the suppressed calls and can adapt its approach.
-            if storm_correction_used {
+            if repeat_guard_fired {
                 // Save assistant message (with tool_use blocks but no text) to DB
                 let mut db_content = Vec::new();
                 if !assistant_text.is_empty() {
@@ -851,16 +943,18 @@ impl AgentService {
                 }
                 let db_msg = json!({"role": "assistant", "content": if db_content.is_empty() { json!(assistant_text) } else { json!(db_content) }});
                 save_api_message(&self.db, session_id, &db_msg);
+                // Push assistant message to api_messages so tool_use blocks are present
+                api_messages.push(db_msg);
 
                 // Inject stub tool results as a user message so model sees the rejection
                 let result_blocks: Vec<serde_json::Value> = tool_uses.iter().map(|(tool_id, tool_name, _input)| {
-                    json!({"type": "tool_result", "tool_use_id": tool_id, "content": format!("Tool '{}' was suppressed by storm breaker (repeated identical call). Please use a different approach or different arguments.", tool_name)})
+                    json!({"type": "tool_result", "tool_use_id": tool_id, "content": format!("Tool '{}' was suppressed (repeated identical call). Please use a different approach or different arguments.", tool_name)})
                 }).collect();
                 let stub_msg = json!({"role": "user", "content": result_blocks});
                 save_api_message(&self.db, session_id, &stub_msg);
                 api_messages.push(stub_msg);
 
-                eprintln!("[storm_breaker] Injected {} stub results for self-correction", tool_uses.len());
+                eprintln!("[repeat_guard] Injected {} stub results for self-correction", tool_uses.len());
                 continue;
             }
 
@@ -967,7 +1061,7 @@ impl AgentService {
 
             // 2) Add ALL tool results as a SINGLE user message (Anthropic spec: one
             //    user message must contain all tool_result blocks matching the
-            //    assistant's tool_use blocks). DeepSeek enforces this strictly.
+            //    assistant's tool_use blocks).
             if !tool_results.is_empty() {
                 let result_blocks: Vec<serde_json::Value> = tool_results.iter().map(|(_tool_name, tool_id, result)| {
                     json!({"type": "tool_result", "tool_use_id": tool_id, "content": result})
@@ -1032,7 +1126,7 @@ async fn process_sse_stream(
     pending_asks: PendingAsks,
     _api_messages: &mut Vec<serde_json::Value>,
     mut cancel_rx: watch::Receiver<bool>,
-    storm_correction_used: &mut bool,
+    repeat_guard_fired: &mut bool,
 ) -> (Option<String>, String, String, Vec<(String, String, String)>, Vec<(String, String, String)>, Option<u64>) {
     eprintln!("[process_sse_stream] Starting with session_key: {}", session_key);
     let mut current_tool_id: Option<String> = None;
@@ -1219,41 +1313,41 @@ async fn process_sse_stream(
         })
         .collect();
 
-    // Storm breaker: sliding window of recent (tool, input) pairs.
+    // Repeat guard: sliding window of recent (tool, input) pairs.
     // If the same call appears 3+ times in the window, suppress it.
     // If ALL calls are suppressed, give one self-correction chance
     // (inject stub tool results so the model sees the failure and adapts).
-    let storm_window: usize = std::env::var("MINIMAX_STORM_WINDOW")
+    let repeat_window: usize = std::env::var("MINIMAX_REPEAT_WINDOW")
         .ok().and_then(|v| v.parse().ok()).unwrap_or(6);
-    let storm_threshold: usize = std::env::var("MINIMAX_STORM_THRESHOLD")
+    let repeat_threshold: usize = std::env::var("MINIMAX_REPEAT_THRESHOLD")
         .ok().and_then(|v| v.parse().ok()).unwrap_or(3);
-    let mut storm_history: Vec<String> = Vec::with_capacity(storm_window);
+    let mut repeat_history: Vec<String> = Vec::with_capacity(repeat_window);
 
     let tool_uses = if stop_reason.as_deref() == Some("tool_use") {
-        let storm_passed: Vec<(String, String, String)> = tool_uses.iter().filter(|(_, name, input)| {
+        let allowed_calls: Vec<(String, String, String)> = tool_uses.iter().filter(|(_, name, input)| {
             let key = format!("{}|{}", name, input);
-            let count = storm_history.iter().filter(|k| *k == &key).count() + 1;
-            storm_history.push(key.clone());
-            if storm_history.len() > storm_window { storm_history.remove(0); }
-            count < storm_threshold
+            let count = repeat_history.iter().filter(|k| *k == &key).count() + 1;
+            repeat_history.push(key.clone());
+            if repeat_history.len() > repeat_window { repeat_history.remove(0); }
+            count < repeat_threshold
         }).cloned().collect();
-        let blocked = tool_uses.len() - storm_passed.len();
-        if storm_passed.is_empty() && !tool_uses.is_empty() {
-            if !*storm_correction_used {
-                *storm_correction_used = true;
-                eprintln!("[storm_breaker] All {} calls suppressed — self-correction", tool_uses.len());
+        let blocked = tool_uses.len() - allowed_calls.len();
+        if allowed_calls.is_empty() && !tool_uses.is_empty() {
+            if !*repeat_guard_fired {
+                *repeat_guard_fired = true;
+                eprintln!("[repeat_guard] All {} calls suppressed — self-correction", tool_uses.len());
                 // Return original tool_uses so stream_chat knows what to inject stubs for.
                 // Set stop_reason to signal self-correction mode.
-                stop_reason = Some("storm_self_correction".into());
+                stop_reason = Some("repeat_guard_correction".into());
                 tool_uses.clone()
             } else {
-                eprintln!("[storm_breaker] Still stuck after self-correction — allowing through");
-                storm_history.clear();
+                eprintln!("[repeat_guard] Still stuck after self-correction — allowing through");
+                repeat_history.clear();
                 tool_uses.clone()
             }
         } else {
-            if blocked > 0 { eprintln!("[storm_breaker] Blocked {} repeated tool calls", blocked); }
-            storm_passed
+            if blocked > 0 { eprintln!("[repeat_guard] Blocked {} repeated tool calls", blocked); }
+            allowed_calls
         }
     } else {
         tool_uses
@@ -1388,7 +1482,7 @@ fn handle_sse_event(
                     current_tool_input.clear();
                 }
                 "thinking" => {
-                    // Some providers (DeepSeek) send full thinking in content_block_start
+                    // Some providers send full thinking in content_block_start
                     if let Some(thinking) = block["thinking"].as_str() {
                         if !thinking.is_empty() {
                             eprintln!("[sse] thinking block_start: {} chars", thinking.len());

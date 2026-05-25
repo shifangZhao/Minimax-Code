@@ -5,7 +5,7 @@
       <button class="add-btn" @click.stop="createGroupChat" :title="currentMode === 'ace' ? '新建会话' : '新建群聊'">+</button>
     </div>
     <div class="sidebar-content">
-      <div v-if="loading" class="loading">加载中...</div>
+      <div v-if="initialLoading" class="loading">加载中...</div>
       <div v-else-if="groupChats.length === 0" class="empty">{{ currentMode === 'ace' ? '暂无会话' : '暂无群聊' }}</div>
       <div v-else class="chat-list">
         <div
@@ -56,7 +56,7 @@ interface GroupChat {
   temporary?: boolean
 }
 
-const loading = ref(false)
+const initialLoading = ref(true)
 const groupChats = ref<GroupChat[]>([])
 const activeChatId = ref<number | null>(null)
 const nextTemporaryId = ref(-1)
@@ -75,10 +75,10 @@ const editInput = ref<HTMLInputElement | null>(null)
 const confirmDeleteId = ref<number | null>(null)
 
 const loadGroupChats = async () => {
-  loading.value = true
   try {
     const chats = await db.getGroupChats(currentMode.value)
     groupChats.value = chats
+    initialLoading.value = false
 
     // Auto-select first chat if none selected
     if (chats.length > 0 && activeChatId.value === null) {
@@ -86,8 +86,6 @@ const loadGroupChats = async () => {
     }
   } catch (e) {
     console.error('Failed to load group chats:', e)
-  } finally {
-    loading.value = false
   }
 }
 
@@ -266,6 +264,7 @@ onMounted(async () => {
   gap: 4px;
   padding: 8px 12px;
   cursor: pointer;
+  contain: layout style;
 }
 
 .chat-meta {
