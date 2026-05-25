@@ -74,14 +74,16 @@ const editingName = ref('')
 const editInput = ref<HTMLInputElement | null>(null)
 const confirmDeleteId = ref<number | null>(null)
 
-const loadGroupChats = async () => {
+const loadGroupChats = async (selectId?: number) => {
   try {
     const chats = await db.getGroupChats(currentMode.value)
     groupChats.value = chats
     initialLoading.value = false
 
-    // Auto-select first chat if none selected
-    if (chats.length > 0 && activeChatId.value === null) {
+    // Select the specified chat, or auto-select first if none selected
+    if (selectId !== undefined) {
+      activeChatId.value = selectId
+    } else if (chats.length > 0 && activeChatId.value === null) {
       selectGroupChat(chats[0].id)
     }
   } catch (e) {
@@ -105,7 +107,7 @@ const createGroupChat = () => {
     created_at: new Date().toISOString(),
     temporary: true,
   }
-  groupChats.value.unshift(tempChat)
+  // Don't add to visible list — it appears when persisted on first message
   activeChatId.value = tempChat.id
   emit('selectGroupChat', tempChat.id)
 }

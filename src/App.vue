@@ -58,7 +58,7 @@ const onSelectGroupChat = (chatId: number | null) => {
 
 const onGroupChatCreated = (chatId: number) => {
   currentGroupChatId.value = chatId
-  historySidebarRef.value?.loadGroupChats()
+  historySidebarRef.value?.loadGroupChats(chatId)
 }
 
 // Global fallback: listen for agent_invoked and capture stream events + save to DB
