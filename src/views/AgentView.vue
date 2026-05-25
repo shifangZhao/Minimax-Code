@@ -159,6 +159,8 @@
           </div>
         </div>
       </template>
+    </div>
+    <div v-if="agentType === 'front' || agentType === 'ace'" class="scroll-bottom-wrap">
       <button v-show="!isAtBottom()" class="scroll-bottom-btn" title="回到底部" @click="scrollToBottom(true)">↓</button>
     </div>
     <ConfirmDialog
@@ -1134,7 +1136,6 @@ onDeactivated(() => {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  position: relative;
 }
 
 .empty-chat {
@@ -1797,24 +1798,26 @@ onDeactivated(() => {
   border-top: 1px solid var(--border-color);
 }
 
+.scroll-bottom-wrap {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 16px 6px;
+  background: var(--bg-primary);
+}
+
 .scroll-bottom-btn {
-  position: absolute;
-  right: 24px;
-  bottom: 20px;
-  width: 38px;
-  height: 38px;
+  width: 32px;
+  height: 32px;
   border: 1px solid var(--border-color);
   border-radius: 50%;
   background: var(--bg-secondary);
   color: var(--text-secondary);
-  font-size: 18px;
+  font-size: 16px;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
   transition: background 0.15s, color 0.15s;
-  z-index: 10;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
 }
 
 .scroll-bottom-btn:hover {
