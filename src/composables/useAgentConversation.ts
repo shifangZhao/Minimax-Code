@@ -252,10 +252,10 @@ export function useAgentConversation(agentType: string) {
             name: p.tool_name,
             input: (() => { try { return JSON.parse(p.tool_input || '{}') } catch { return {} } })()
           }
-          case 'tool_result': return { type: 'tool_result', tool_use_id: p.tool_use_id, content: p.content }
+          case 'tool_result': return p.tool_use_id ? { type: 'tool_result', tool_use_id: p.tool_use_id, content: p.content } : null
           default: return { type: 'text', text: p.content }
         }
-      })
+      }).filter(Boolean)
       return JSON.stringify(blocks)
     }
 
@@ -268,13 +268,8 @@ export function useAgentConversation(agentType: string) {
     for (const msg of messages.value) {
       const rawJson = rebuildRawJson(msg)
       if (msg.role === 'user') {
-        // Skip pure tool_result messages from legacy data (NULL tool_use_id).
-        // Backend save_api_message was fixed to correctly store tool_use_id,
-        // but old sessions still have corrupted rows. Skip those rather than
-        // sending broken tool_result blocks to the API.
-        if (msg.parts && msg.parts.length > 0 && msg.parts.every(p => p.part_type === 'tool_result')) {
-          if (!msg.parts.every(p => p.tool_use_id)) continue
-        }
+        // Include tool_result messages so the model sees previous tool outputs.
+        // raw_json is rebuilt from parts and contains the full tool_result blocks.
         history.push({ role: 'user', content: msg.content, raw_json: rawJson })
       } else if (msg.role === 'assistant') {
         const thinking = rebuildThinking(msg)
