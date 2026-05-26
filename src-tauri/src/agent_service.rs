@@ -34,7 +34,7 @@ pub(crate) fn hidden_cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
 
 /// Run a command with a timeout. Graceful kill (SIGTERM equivalent), then force kill
 /// after a 2s grace period. Output is capped at 256KB to prevent OOM.
-pub(crate) fn output_with_timeout(cmd: &mut Command, timeout_secs: u64) -> String {
+pub(crate) fn output_with_timeout(cmd: &mut Command, timeout_secs: u64, session_id: i64, running_pids: Option<&Arc<StdMutex<HashMap<i64, u32>>>>) -> String {
     use std::sync::mpsc;
     let child = match cmd
         .stdout(std::process::Stdio::piped())
@@ -45,12 +45,20 @@ pub(crate) fn output_with_timeout(cmd: &mut Command, timeout_secs: u64) -> Strin
         Err(e) => return format!("Error spawning command: {}", e),
     };
     let pid = child.id();
+
+    // Register PID so abort_stream can kill this process
+    if let Some(ref map) = running_pids {
+        if let Ok(mut m) = map.lock() {
+            m.insert(session_id, pid);
+        }
+    }
+
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let result = child.wait_with_output();
         let _ = tx.send(result);
     });
-    match rx.recv_timeout(std::time::Duration::from_secs(timeout_secs)) {
+    let result = match rx.recv_timeout(std::time::Duration::from_secs(timeout_secs)) {
         Ok(Ok(o)) => {
             const MAX_BYTES: usize = 256 * 1024;
             let stdout = if o.stdout.len() > MAX_BYTES {
@@ -66,7 +74,6 @@ pub(crate) fn output_with_timeout(cmd: &mut Command, timeout_secs: u64) -> Strin
         }
         Ok(Err(e)) => format!("Error waiting for command: {}", e),
         Err(_) => {
-            // Two-phase kill: graceful first, then force after 2s grace
             #[cfg(windows)]
             {
                 let _ = hidden_cmd("taskkill").args(["/PID", &pid.to_string()]).output();
@@ -81,7 +88,16 @@ pub(crate) fn output_with_timeout(cmd: &mut Command, timeout_secs: u64) -> Strin
             }
             format!("Command timed out after {}s (killed)", timeout_secs)
         }
+    };
+
+    // Deregister PID
+    if let Some(ref map) = running_pids {
+        if let Ok(mut m) = map.lock() {
+            m.remove(&session_id);
+        }
     }
+
+    result
 }
 
 use crate::context_compressor::{compress_context_aggressive, estimate_request_tokens, estimate_tokens, summarize_with_model};
@@ -428,6 +444,7 @@ pub struct AgentService {
     permission_service: Arc<StdMutex<PermissionService>>,
     pending_asks: PendingAsks,
     todo_store: Arc<StdMutex<HashMap<i64, String>>>,
+    running_command_pids: Arc<StdMutex<HashMap<i64, u32>>>,
 }
 
 impl Clone for AgentService {
@@ -446,12 +463,13 @@ impl Clone for AgentService {
             permission_service: self.permission_service.clone(),
             pending_asks: self.pending_asks.clone(),
             todo_store: self.todo_store.clone(),
+            running_command_pids: self.running_command_pids.clone(),
         }
     }
 }
 
 impl AgentService {
-    pub fn new(api_key: String, api_url: String, messages_path: String, model: String, context_window: usize, provider: String, skill_service: Arc<SkillService>, mcp_service: Arc<RwLock<McpService>>, db: Arc<StdMutex<Connection>>, lsp_manager: Arc<StdMutex<Option<LspManager>>>, permission_service: Arc<StdMutex<PermissionService>>, pending_asks: PendingAsks) -> Self {
+    pub fn new(api_key: String, api_url: String, messages_path: String, model: String, context_window: usize, provider: String, skill_service: Arc<SkillService>, mcp_service: Arc<RwLock<McpService>>, db: Arc<StdMutex<Connection>>, lsp_manager: Arc<StdMutex<Option<LspManager>>>, permission_service: Arc<StdMutex<PermissionService>>, pending_asks: PendingAsks, running_command_pids: Arc<StdMutex<HashMap<i64, u32>>>) -> Self {
         Self {
             api_url,
             messages_path,
@@ -466,6 +484,7 @@ impl AgentService {
             permission_service,
             pending_asks,
             todo_store: Arc::new(StdMutex::new(HashMap::new())),
+            running_command_pids,
         }
     }
 
@@ -913,6 +932,7 @@ impl AgentService {
                 cancel_rx.clone(),
                 &mut repeat_guard_fired,
                 self.todo_store.clone(),
+                self.running_command_pids.clone(),
             ).await;
 
             eprintln!("[stream_chat] Model: {}, stop_reason: {:?}, thinking: {} chars, text: {} chars, tool_uses: {}", self.model,
@@ -1121,6 +1141,7 @@ async fn process_sse_stream(
     mut cancel_rx: watch::Receiver<bool>,
     repeat_guard_fired: &mut bool,
     todo_store: Arc<StdMutex<HashMap<i64, String>>>,
+    running_command_pids: Arc<StdMutex<HashMap<i64, u32>>>,
 ) -> (Option<String>, String, String, Vec<(String, String, String)>, Vec<(String, String, String)>, Option<u64>) {
     eprintln!("[process_sse_stream] Starting with session_key: {}", session_key);
     let mut current_tool_id: Option<String> = None;
@@ -1407,6 +1428,7 @@ async fn process_sse_stream(
                 let permission_service = permission_service.clone();
                 let pending_asks = pending_asks.clone();
                 let todo_store = todo_store.clone();
+                let running_command_pids = running_command_pids.clone();
                 let app = app.clone();
                 let sid = session_id;
                 let cancel_rx = cancel_rx.clone();
@@ -1416,7 +1438,7 @@ async fn process_sse_stream(
                         api_key, api_url, model, provider,
                         skill_service, mcp_service,
                         db, lsp_manager, permission_service, pending_asks, app,
-                        cancel_rx, todo_store,
+                        cancel_rx, todo_store, running_command_pids,
                     ).await;
                     (i, tool_name, result)
                 })
@@ -1548,6 +1570,7 @@ async fn execute_tool(
     app_handle: AppHandle,
     cancel_rx: watch::Receiver<bool>,
     todo_store: Arc<StdMutex<HashMap<i64, String>>>,
+    running_command_pids: Arc<StdMutex<HashMap<i64, u32>>>,
 ) -> String {
     let params: serde_json::Value = serde_json::from_str(input).unwrap_or(json!({}));
 
@@ -1701,7 +1724,7 @@ async fn execute_tool(
         "search_in_dir" => tool_search_in_dir(&params).await,
         "get_env_info" => tool_get_env_info(&params).await,
         "analyze_project_structure" => tool_analyze_project_structure(&params).await,
-        "run_command" => tool_run_command(&params).await,
+        "run_command" => tool_run_command(&params, session_id, Some(running_command_pids.clone())).await,
         "write_file" => tool_write_file(&params).await,
         "write_files" => tool_write_files(&params).await,
         "find_replace_in_files" => tool_find_replace_in_files(&params).await,
@@ -1721,7 +1744,7 @@ async fn execute_tool(
         "run_background" => tool_run_background(&params).await,
         "job_output" => tool_job_output(&params).await,
         "list_jobs" => tool_list_jobs(&params).await,
-        "run_tests" => tool_run_tests(&params).await,
+        "run_tests" => tool_run_tests(&params, session_id, Some(running_command_pids.clone())).await,
         "spawn_process" => tool_spawn_process(&params).await,
         "kill_process" => tool_kill_process(&params).await,
         "web_search" => tool_web_search(params.clone(), api_key.clone(), api_url.clone(), provider.clone()).await,
@@ -1735,7 +1758,7 @@ async fn execute_tool(
         "read_knowledge" => tool_read_knowledge(&params).await,
         "write_knowledge" => tool_write_knowledge(&params).await,
         "list_knowledge" => tool_list_knowledge().await,
-        "send_to_agent" => tool_send_to_agent(session_id, &params, api_key.clone(), skill_service.clone(), mcp_service.clone(), db.clone(), lsp_manager.clone(), permission_service.clone(), pending_asks.clone(), app_handle.clone(), cancel_rx.clone()).await,
+        "send_to_agent" => tool_send_to_agent(session_id, &params, api_key.clone(), skill_service.clone(), mcp_service.clone(), db.clone(), lsp_manager.clone(), permission_service.clone(), pending_asks.clone(), app_handle.clone(), cancel_rx.clone(), running_command_pids.clone()).await,
         "read_lints" => tool_read_lints(&params, lsp_manager.clone(), db.clone()).await,
         "touch_file" => tool_touch_file(&params, lsp_manager.clone(), db.clone()).await,
         "ask_choice" => tool_ask_choice(&params, session_id, "unknown", pending_asks.clone(), app_handle.clone()).await,

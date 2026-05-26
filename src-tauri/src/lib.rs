@@ -60,6 +60,7 @@ struct AppState {
     permission_service: Arc<Mutex<PermissionService>>,
     pending_asks: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
     cancel_registry: CancelRegistry,
+    running_command_pids: Arc<Mutex<HashMap<i64, u32>>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1666,7 +1667,7 @@ async fn agent_chat_stream(
     }
 
     // Create agent service
-    let service = AgentService::new(api_key, api_url, messages_path, model, context_window, provider, state.skill_service.clone(), state.mcp_service.clone(), state.db.clone(), state.lsp_manager.clone(), state.permission_service.clone(), state.pending_asks.clone());
+    let service = AgentService::new(api_key, api_url, messages_path, model, context_window, provider, state.skill_service.clone(), state.mcp_service.clone(), state.db.clone(), state.lsp_manager.clone(), state.permission_service.clone(), state.pending_asks.clone(), state.running_command_pids.clone());
     eprintln!("[agent_chat_stream] AgentService created, spawning stream_chat");
 
     // Register cancel channel for this stream session.
@@ -1717,6 +1718,25 @@ fn open_devtools(window: tauri::WebviewWindow) -> Result<(), String> {
 
 #[tauri::command]
 fn abort_stream(state: State<'_, AppState>, session_id: i64) -> Result<(), String> {
+    // Kill any running command process for this session before signaling cancel
+    if let Ok(mut pids) = state.running_command_pids.lock() {
+        if let Some(pid) = pids.remove(&session_id) {
+            #[cfg(windows)]
+            {
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/F", "/T", "/PID", &pid.to_string()])
+                    .output();
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = std::process::Command::new("kill")
+                    .args(["-9", &pid.to_string()])
+                    .output();
+            }
+            eprintln!("[abort_stream] Killed running command PID {} for session {}", pid, session_id);
+        }
+    }
+
     let mut registry = state.cancel_registry.lock().map_err(|e| e.to_string())?;
     if let Some(tx) = registry.get(&session_id) {
         let _ = tx.send(true);
@@ -2595,6 +2615,7 @@ pub fn run() {
             permission_service: Arc::new(Mutex::new(perm_svc)),
             pending_asks: Arc::new(Mutex::new(HashMap::new())),
             cancel_registry: Arc::new(Mutex::new(HashMap::new())),
+            running_command_pids: Arc::new(Mutex::new(HashMap::new())),
         })
         .setup(move |_app| {
             // Set builtin skills root - use directory relative to executable

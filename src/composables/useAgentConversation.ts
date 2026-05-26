@@ -268,8 +268,8 @@ export function useAgentConversation(agentType: string) {
     for (const msg of messages.value) {
       const rawJson = rebuildRawJson(msg)
       if (msg.role === 'user') {
-        // Skip pure tool_result messages (they are internal, not sent to API)
-        if (msg.parts && msg.parts.length > 0 && msg.parts.every(p => p.part_type === 'tool_result')) continue
+        // Include tool_result messages so the model sees previous tool outputs.
+        // raw_json is rebuilt from parts and contains the full tool_result blocks.
         history.push({ role: 'user', content: msg.content, raw_json: rawJson })
       } else if (msg.role === 'assistant') {
         const thinking = rebuildThinking(msg)

@@ -61,6 +61,7 @@ pub(crate) async fn tool_send_to_agent(
     pending_asks: PendingAsks,
     app_handle: AppHandle,
     cancel_rx: watch::Receiver<bool>,
+    running_command_pids: Arc<StdMutex<HashMap<i64, u32>>>,
 ) -> String {
     let target_agent = params["target_agent"].as_str().unwrap_or("");
     let message = params["message"].as_str().unwrap_or("");
@@ -270,7 +271,7 @@ pub(crate) async fn tool_send_to_agent(
 
             std::thread::spawn(move || {
                 handle.block_on(async move {
-                    let agent = AgentService::new(api_key, api_url, messages_path, model, context_window, provider, skill_service, mcp_service, db, lm, pm, pa);
+                    let agent = AgentService::new(api_key, api_url, messages_path, model, context_window, provider, skill_service, mcp_service, db, lm, pm, pa, running_command_pids.clone());
                     agent.stream_chat(&agent_type, history, None, workspace, app, target_session_id, cancel_rx).await;
                 });
             });
@@ -651,7 +652,7 @@ pub(crate) async fn tool_analyze_project_structure(params: &serde_json::Value) -
         .unwrap_or_else(|_| "Task cancelled".to_string())
 }
 
-pub(crate) async fn tool_run_command(params: &serde_json::Value) -> String {
+pub(crate) async fn tool_run_command(params: &serde_json::Value, session_id: i64, running_pids: Option<Arc<StdMutex<HashMap<i64, u32>>>>) -> String {
     let command = params["command"].as_str().unwrap_or("").to_string();
     let cwd = params["path"].as_str().map(normalize_file_path);
     let timeout_secs = params["timeout"].as_u64().unwrap_or(300);
@@ -668,7 +669,7 @@ pub(crate) async fn tool_run_command(params: &serde_json::Value) -> String {
         if let Some(dir) = &cwd {
             cmd.current_dir(dir);
         }
-        output_with_timeout(&mut cmd, timeout_secs)
+        output_with_timeout(&mut cmd, timeout_secs, session_id, running_pids.as_ref())
     })
     .await
     .unwrap_or_else(|_| "Task cancelled".to_string())
@@ -1558,7 +1559,7 @@ pub(crate) async fn tool_list_jobs(_params: &serde_json::Value) -> String {
     }
 }
 
-pub(crate) async fn tool_run_tests(params: &serde_json::Value) -> String {
+pub(crate) async fn tool_run_tests(params: &serde_json::Value, session_id: i64, running_pids: Option<Arc<StdMutex<HashMap<i64, u32>>>>) -> String {
     let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     let framework = params["test_framework"].as_str().unwrap_or("npm");
     let path = path.to_string();
@@ -1576,7 +1577,7 @@ pub(crate) async fn tool_run_tests(params: &serde_json::Value) -> String {
             process.current_dir(&path);
         }
         process.args(&args);
-        output_with_timeout(&mut process, 300)
+        output_with_timeout(&mut process, 300, session_id, running_pids.as_ref())
     })
     .await
     .unwrap_or_else(|_| "Task cancelled".to_string())

@@ -1,5 +1,5 @@
 <template>
-  <div v-if="state && state.items.length > 0" class="todo-panel">
+  <div v-if="state && state.items.length > 0 && !hidden" class="todo-panel">
     <div class="todo-header" @click="expanded = !expanded">
       <span class="todo-icon">{{ expanded ? '▼' : '▶' }}</span>
       <span class="todo-summary">{{ state.summary }}</span>
@@ -31,7 +31,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useTodoStore, type TodoState } from '../composables/useTodoStore'
 
 const props = defineProps<{
@@ -46,6 +46,23 @@ const state = computed<TodoState | null>(() => {
 })
 
 const expanded = ref(true)
+const hidden = ref(false)
+
+// Auto-hide when all items are completed
+let hideTimer: ReturnType<typeof setTimeout> | null = null
+
+watch(state, (newState) => {
+  if (hideTimer) {
+    clearTimeout(hideTimer)
+    hideTimer = null
+  }
+  hidden.value = false
+  if (newState && newState.items.length > 0 && newState.items.every(i => i.status === 'completed')) {
+    hideTimer = setTimeout(() => {
+      hidden.value = true
+    }, 5000)
+  }
+}, { deep: true })
 </script>
 
 <style scoped>

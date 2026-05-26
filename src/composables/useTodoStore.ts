@@ -16,6 +16,8 @@ export interface TodoState {
 // Updated from tool_end events during streaming, restored from message history on reload.
 const todoStates = shallowRef<Map<number, TodoState>>(new Map())
 
+const VALID_STATUSES = new Set(['pending', 'in_progress', 'completed'])
+
 export function useTodoStore() {
   function getState(sessionId: number | null): TodoState | null {
     if (sessionId === null) return null
@@ -24,26 +26,30 @@ export function useTodoStore() {
 
   /** Parse a todo_write tool_end result and update state. */
   function updateFromResult(sessionId: number, resultJson: string) {
+    let parsed: any
     try {
-      const parsed = JSON.parse(resultJson)
-      if (parsed.todos && Array.isArray(parsed.todos)) {
-        const items: TodoItem[] = parsed.todos.map((t: any) => ({
-          content: t.content || '',
-          status: t.status || 'pending',
-          activeForm: t.activeForm,
-        }))
-        const state: TodoState = {
-          items,
-          summary: parsed.summary || '',
-          pct: parsed.pct ?? 0,
-        }
-        const newMap = new Map(todoStates.value)
-        newMap.set(sessionId, state)
-        todoStates.value = newMap
-      }
+      parsed = JSON.parse(resultJson)
     } catch {
       // ignore parse errors — result might not be valid JSON
+      return
     }
+
+    // Defensive: todos must be an array, otherwise silently ignore
+    if (!Array.isArray(parsed.todos)) return
+
+    const items: TodoItem[] = parsed.todos.map((t: any) => ({
+      content: t.content || '',
+      status: VALID_STATUSES.has(t.status) ? t.status : 'pending',
+      activeForm: t.activeForm,
+    }))
+    const state: TodoState = {
+      items,
+      summary: parsed.summary || '',
+      pct: parsed.pct ?? 0,
+    }
+    const newMap = new Map(todoStates.value)
+    newMap.set(sessionId, state)
+    todoStates.value = newMap
   }
 
   /** Scan persisted messages for the last todo_write tool result. */
