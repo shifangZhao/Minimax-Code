@@ -70,8 +70,9 @@ function formatSize(bytes: number): string {
 <style scoped>
 .bookmark-panel {
   position: absolute;
-  top: 40px;
-  right: 12px;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
   width: 280px;
   max-height: 360px;
   overflow-y: auto;

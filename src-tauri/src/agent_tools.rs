@@ -47,6 +47,40 @@ pub(crate) fn truncate_tool_result(output: String) -> String {
     )
 }
 
+/// Parse a command string into (program, args) respecting shell-style quoting.
+/// The LLM is free to choose the shell (cmd /c ..., powershell -Command ..., sh -c ...)
+/// or just pass raw commands like `git status`.
+fn parse_command(command: &str) -> (String, Vec<String>) {
+    let chars: Vec<char> = command.chars().collect();
+    let mut parts: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            ' ' | '\t' if !in_single && !in_double => {
+                if !current.is_empty() {
+                    parts.push(current.clone());
+                    current.clear();
+                }
+            }
+            c => current.push(c),
+        }
+        i += 1;
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    if parts.is_empty() {
+        return (String::new(), vec![]);
+    }
+    let program = parts.remove(0);
+    (program, parts)
+}
+
 // ========== Agent Communication ==========
 
 pub(crate) async fn tool_send_to_agent(
@@ -333,15 +367,16 @@ pub(crate) async fn tool_read_file(params: &serde_json::Value) -> String {
         }
         // Large file: outline mode
         if meta.len() > MAX_SIZE && offset == 0 && limit == 0 {
+            let line_count = count_lines(&path);
             return format!(
                 "文件过大: {} MB, {} 行，超过 {} MB 限制，内容已截断。\n\
                  使用 offset/limit 参数分段读取其余部分。\n\
                  例如: {{\"path\": \"...\", \"offset\": 301, \"limit\": 300}}\n\n\
                  === 前 300 行 (共 {} 行) ===\n{}",
                 meta.len() / 1024 / 1024,
-                count_lines(&path),
+                line_count,
                 MAX_SIZE / 1024 / 1024,
-                count_lines(&path),
+                line_count,
                 read_line_range(&path, 1, 300)
             );
         }
@@ -361,7 +396,7 @@ pub(crate) async fn tool_read_file(params: &serde_json::Value) -> String {
         let content = std::fs::read_to_string(&path)
             .map_err(|e| format!("Error: {}", e))
             .unwrap_or_else(|e| e);
-        let total = count_lines(&path);
+        let total = content.lines().count();
         format!("[{} lines, {} KB — FULL CONTENT]\n{}", total, meta.len() / 1024, content)
     })
     .await
@@ -445,170 +480,6 @@ pub(crate) async fn tool_read_files(params: &serde_json::Value) -> String {
     }
 }
 
-pub(crate) async fn tool_git_status(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    tokio::task::spawn_blocking(move || {
-        match hidden_cmd("git")
-            .args(["-C", &path, "status", "--porcelain"])
-            .output()
-        {
-            Ok(o) => {
-                if o.status.success() {
-                    String::from_utf8_lossy(&o.stdout).to_string()
-                } else {
-                    String::from_utf8_lossy(&o.stderr).to_string()
-                }
-            }
-            Err(e) => format!("Error: {}", e),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-pub(crate) async fn tool_git_log(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    let count = params["count"].as_i64().unwrap_or(20) as usize;
-    let path = path.to_string();
-    tokio::task::spawn_blocking(move || {
-        match hidden_cmd("git")
-            .args(["-C", &path, "log", "--oneline", &format!("-{}", count)])
-            .output()
-        {
-            Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
-            Err(e) => format!("Error: {}", e),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-pub(crate) async fn tool_git_diff(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    let target = params["target"].as_str().unwrap_or("HEAD");
-    let path = path.to_string();
-    let target = target.to_string();
-    tokio::task::spawn_blocking(move || {
-        match hidden_cmd("git")
-            .args(["-C", &path, "diff", &target])
-            .output()
-        {
-            Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
-            Err(e) => format!("Error: {}", e),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-pub(crate) async fn tool_git_commit(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    let message = params["message"].as_str().unwrap_or("");
-    let path = path.to_string();
-    let message = message.to_string();
-    tokio::task::spawn_blocking(move || {
-        match hidden_cmd("git")
-            .args(["-C", &path, "commit", "-m", &message])
-            .output()
-        {
-            Ok(o) => {
-                if o.status.success() {
-                    String::from_utf8_lossy(&o.stdout).to_string()
-                } else {
-                    String::from_utf8_lossy(&o.stderr).to_string()
-                }
-            }
-            Err(e) => format!("Error: {}", e),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-pub(crate) async fn tool_git_branch(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    let path = path.to_string();
-    tokio::task::spawn_blocking(move || {
-        match hidden_cmd("git")
-            .args(["-C", &path, "branch", "-v"])
-            .output()
-        {
-            Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
-            Err(e) => format!("Error: {}", e),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-pub(crate) async fn tool_git_checkout(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    let branch = params["branch"].as_str().unwrap_or("");
-    let path = path.to_string();
-    let branch = branch.to_string();
-    tokio::task::spawn_blocking(move || {
-        match hidden_cmd("git")
-            .args(["-C", &path, "checkout", &branch])
-            .output()
-        {
-            Ok(o) => {
-                if o.status.success() {
-                    String::from_utf8_lossy(&o.stdout).to_string()
-                } else {
-                    String::from_utf8_lossy(&o.stderr).to_string()
-                }
-            }
-            Err(e) => format!("Error: {}", e),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-pub(crate) async fn tool_git_stash(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    let path = path.to_string();
-    tokio::task::spawn_blocking(move || {
-        match hidden_cmd("git")
-            .args(["-C", &path, "stash", "push", "-m", "auto-stash"])
-            .output()
-        {
-            Ok(o) => {
-                if o.status.success() {
-                    String::from_utf8_lossy(&o.stdout).to_string()
-                } else {
-                    String::from_utf8_lossy(&o.stderr).to_string()
-                }
-            }
-            Err(e) => format!("Error: {}", e),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
-pub(crate) async fn tool_git_stash_pop(params: &serde_json::Value) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    let path = path.to_string();
-    tokio::task::spawn_blocking(move || {
-        match hidden_cmd("git")
-            .args(["-C", &path, "stash", "pop"])
-            .output()
-        {
-            Ok(o) => {
-                if o.status.success() {
-                    String::from_utf8_lossy(&o.stdout).to_string()
-                } else {
-                    String::from_utf8_lossy(&o.stderr).to_string()
-                }
-            }
-            Err(e) => format!("Error: {}", e),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
 pub(crate) async fn tool_search_in_dir(params: &serde_json::Value) -> String {
     let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     let pattern = params["pattern"].as_str().unwrap_or("").to_lowercase();
@@ -655,17 +526,17 @@ pub(crate) async fn tool_analyze_project_structure(params: &serde_json::Value) -
 pub(crate) async fn tool_run_command(params: &serde_json::Value, session_id: i64, running_pids: Option<Arc<StdMutex<HashMap<i64, u32>>>>) -> String {
     let command = params["command"].as_str().unwrap_or("").to_string();
     let cwd = params["path"].as_str().map(normalize_file_path);
-    let timeout_secs = params["timeout"].as_u64().unwrap_or(300);
+    let timeout_secs = params["timeout"].as_u64().unwrap_or(120);
+    if command.is_empty() {
+        return "Error: command is required".to_string();
+    }
     tokio::task::spawn_blocking(move || {
-        let mut cmd = if cfg!(windows) {
-            let mut c = hidden_cmd("cmd");
-            c.args(["/d", "/s", "/c", &command]);
-            c
-        } else {
-            let mut c = hidden_cmd("sh");
-            c.args(["-c", &command]);
-            c
-        };
+        let (program, args) = parse_command(&command);
+        if program.is_empty() {
+            return "Error: could not parse command".to_string();
+        }
+        let mut cmd = hidden_cmd(&program);
+        cmd.args(&args);
         if let Some(dir) = &cwd {
             cmd.current_dir(dir);
         }
@@ -866,14 +737,16 @@ pub(crate) async fn tool_glob(params: &serde_json::Value) -> String {
     tokio::task::spawn_blocking(move || {
         let mut results = Vec::new();
         let skip_dirs = |name: &str| name.starts_with('.') || matches!(name, "node_modules" | "target" | ".git" | "dist" | "build" | ".next" | ".venv" | "__pycache__");
-        glob_recursive(&base_path, &pattern, &skip_dirs, &mut results, limit);
+        let glob_re = if pattern.contains('*') || pattern.contains('?') {
+            regex::Regex::new(&glob_to_regex(&pattern)).ok()
+        } else {
+            None
+        };
+        glob_recursive(&base_path, &glob_re, &pattern, &skip_dirs, &mut results, limit);
         let total = results.len();
         let hit_limit = total >= limit;
-        results.sort_by(|a, b| {
-            let ma = std::fs::metadata(a).and_then(|m| m.modified()).ok();
-            let mb = std::fs::metadata(b).and_then(|m| m.modified()).ok();
-            mb.cmp(&ma)
-        });
+        // Sort by path name only — skip per-file metadata syscalls
+        results.sort_by(|a, b| a.cmp(b));
         let listing = results.iter().map(|p| p.strip_prefix(&base_path).unwrap_or(p).to_string()).collect::<Vec<_>>().join("\n");
         if hit_limit {
             format!("{}\n\n... {} results (limit reached — use narrower pattern or increase limit)", listing, total)
@@ -887,7 +760,7 @@ pub(crate) async fn tool_glob(params: &serde_json::Value) -> String {
     .unwrap_or_else(|_| "Task cancelled".to_string())
 }
 
-pub(crate) fn glob_recursive(dir: &str, pattern: &str, skip_dirs: &dyn Fn(&str) -> bool, results: &mut Vec<String>, limit: usize) {
+pub(crate) fn glob_recursive(dir: &str, glob_re: &Option<regex::Regex>, raw_pattern: &str, skip_dirs: &dyn Fn(&str) -> bool, results: &mut Vec<String>, limit: usize) {
     if results.len() >= limit { return; }
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e.filter_map(|e| e.ok()).collect::<Vec<_>>(),
@@ -896,17 +769,16 @@ pub(crate) fn glob_recursive(dir: &str, pattern: &str, skip_dirs: &dyn Fn(&str) 
     for entry in entries {
         if results.len() >= limit { break; }
         let name = entry.file_name().to_string_lossy().to_string();
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let ft = entry.file_type().ok();
+        let is_dir = ft.as_ref().map(|t| t.is_dir()).unwrap_or(false);
         if is_dir {
             if skip_dirs(&name) { continue; }
             let path_str = entry.path().to_string_lossy().to_string();
-            glob_recursive(&path_str, pattern, skip_dirs, results, limit);
+            glob_recursive(&path_str, glob_re, raw_pattern, skip_dirs, results, limit);
         } else {
-            let matches = if pattern.contains('*') || pattern.contains('?') {
-                let re = glob_to_regex(pattern);
-                regex::Regex::new(&re).map(|r| r.is_match(&name)).unwrap_or(false)
-            } else {
-                name.to_lowercase().contains(&pattern.to_lowercase())
+            let matches = match glob_re {
+                Some(re) => re.is_match(&name),
+                None => name.to_lowercase().contains(&raw_pattern.to_lowercase()),
             };
             if matches {
                 results.push(entry.path().to_string_lossy().to_string());
@@ -1178,12 +1050,10 @@ pub(crate) async fn tool_multi_edit(params: &serde_json::Value) -> String {
             validated.push((path, search, replace, content));
         }
 
-        // Phase 2: Apply all edits
+        // Phase 2: Apply all edits (reuse content from Phase 1)
         let mut results = Vec::new();
         let mut original_contents: Vec<(String, String)> = Vec::new();
-        for (path, search, replace, _) in &validated {
-            let content = std::fs::read_to_string(path)
-                .unwrap_or_default();
+        for (path, search, replace, content) in &validated {
             original_contents.push((path.clone(), content.clone()));
             let new_content = content.replacen(search, replace, 1);
             match std::fs::write(path, &new_content) {
@@ -1299,20 +1169,25 @@ pub(crate) async fn tool_web_fetch(params: serde_json::Value) -> String {
     }
     let url = url.to_string();
     tokio::task::spawn_blocking(move || {
-        match reqwest::blocking::get(&url) {
-            Ok(resp) => {
-                match resp.text() {
-                    Ok(html) => {
-                        let text = html_to_text(&html);
-                        if text.len() > 32000 {
-                            format!("{}...\n[truncated at 32K chars]", &text[..32000])
-                        } else {
-                            text
-                        }
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(crate::SEARCH_TIMEOUT_SECS))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => return format!("Error building client: {}", e),
+        };
+        match client.get(&url).send() {
+            Ok(resp) => match resp.text() {
+                Ok(html) => {
+                    let text = html_to_text(&html);
+                    if text.len() > 32000 {
+                        format!("{}...\n[truncated at 32K chars]", &text[..32000])
+                    } else {
+                        text
                     }
-                    Err(e) => format!("Error reading response: {}", e),
                 }
-            }
+                Err(e) => format!("Error reading response: {}", e),
+            },
             Err(e) => format!("Error fetching URL: {}", e),
         }
     })
@@ -1321,38 +1196,50 @@ pub(crate) async fn tool_web_fetch(params: serde_json::Value) -> String {
 }
 
 pub(crate) fn html_to_text(html: &str) -> String {
-    // Strip script and style tags
-    let mut text = html.to_string();
-    while let Some(start) = text.find("<script") {
-        if let Some(end) = text[start..].find("</script>") {
-            text.replace_range(start..start + end + 9, " ");
-        } else { break; }
-    }
-    while let Some(start) = text.find("<style") {
-        if let Some(end) = text[start..].find("</style>") {
-            text.replace_range(start..start + end + 8, " ");
-        } else { break; }
-    }
-    // Strip all HTML tags
-    let mut result = String::new();
+    // Single-pass byte-level strip: no clone, no O(n²) string mutation
+    let bytes = html.as_bytes();
+    let len = bytes.len();
+    let mut result = String::with_capacity(len);
     let mut in_tag = false;
-    for ch in text.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => result.push(ch),
+    let mut i = 0;
+    while i < len {
+        // Check for <script or <style block start
+        if !in_tag && i + 7 < len && &bytes[i..i+7] == b"<script" {
+            // Skip until </script>
+            i += 7;
+            while i + 8 < len {
+                if &bytes[i..i+9] == b"</script>" { i += 9; break; }
+                i += 1;
+            }
+            continue;
+        }
+        if !in_tag && i + 6 < len && &bytes[i..i+6] == b"<style" {
+            i += 6;
+            while i + 7 < len {
+                if &bytes[i..i+8] == b"</style>" { i += 8; break; }
+                i += 1;
+            }
+            continue;
+        }
+        match bytes[i] {
+            b'<' => in_tag = true,
+            b'>' => in_tag = false,
+            b if !in_tag && !result.is_empty() || b != b' ' || result.ends_with(' ') => {
+                // Don't lead with space
+                if b != b'\n' || !result.ends_with('\n') {
+                    result.push(b as char);
+                }
+            }
             _ => {}
         }
+        i += 1;
     }
-    // Collapse whitespace
-    let lines: Vec<&str> = result.lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
-        .collect();
-    lines.join("\n")
+    // Trim and collapse blank lines
+    let out: Vec<&str> = result.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    out.join("\n")
 }
 
-pub(crate) async fn tool_run_background(params: &serde_json::Value) -> String {
+pub(crate) async fn tool_run_background(params: &serde_json::Value, session_id: i64) -> String {
     let command = params["command"].as_str().unwrap_or("");
     let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
     let wait_sec = params["wait_sec"].as_i64().unwrap_or(3) as u64;
@@ -1372,15 +1259,12 @@ pub(crate) async fn tool_run_background(params: &serde_json::Value) -> String {
     let out_file_clone = out_file.clone();
     let err_file_clone = err_file.clone();
 
-    let mut cmd = if cfg!(windows) {
-        let mut c = hidden_cmd("cmd");
-        c.args(["/C", command]);
-        c
-    } else {
-        let mut c = hidden_cmd("sh");
-        c.args(["-c", command]);
-        c
-    };
+    let (program, args) = parse_command(&command);
+    if program.is_empty() {
+        return "Error: could not parse command".to_string();
+    }
+    let mut cmd = hidden_cmd(&program);
+    cmd.args(&args);
     cmd.current_dir(path);
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
@@ -1389,6 +1273,13 @@ pub(crate) async fn tool_run_background(params: &serde_json::Value) -> String {
             let pid = child.id();
             let child_stdout = child.stdout.take();
             let child_stderr = child.stderr.take();
+
+            // Register in background task registry for frontend visualization
+            let task_id = crate::background_tasks::register_task(
+                session_id, pid, &command,
+                &out_file_clone.to_string_lossy(),
+                &err_file_clone.to_string_lossy(),
+            );
 
             // Spawn threads to capture output to files in real-time
             if let Some(stdout) = child_stdout {
@@ -1430,15 +1321,18 @@ pub(crate) async fn tool_run_background(params: &serde_json::Value) -> String {
             let out_reap = out_file_clone.clone();
             std::thread::spawn(move || {
                 let status = child.wait(); // blocks until process exits
+                let exit_code = status.as_ref().ok().and_then(|s| s.code());
                 if let Ok(ref f) = std::fs::OpenOptions::new().append(true).open(&out_reap) {
                     use std::io::Write;
                     let mut f_ref = f;
-                    let _ = writeln!(f_ref, "\n--- 进程退出码: {:?} ---", status.as_ref().ok().and_then(|s| s.code()));
+                    let _ = writeln!(f_ref, "\n--- 进程退出码: {:?} ---", exit_code);
                 }
+                crate::background_tasks::task_done(task_id, exit_code);
             });
 
             json!({
                 "success": true,
+                "task_id": task_id,
                 "pid": pid,
                 "out_file": out_file.to_string_lossy().to_string(),
                 "err_file": err_file.to_string_lossy().to_string(),
@@ -1559,45 +1453,21 @@ pub(crate) async fn tool_list_jobs(_params: &serde_json::Value) -> String {
     }
 }
 
-pub(crate) async fn tool_run_tests(params: &serde_json::Value, session_id: i64, running_pids: Option<Arc<StdMutex<HashMap<i64, u32>>>>) -> String {
-    let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    let framework = params["test_framework"].as_str().unwrap_or("npm");
-    let path = path.to_string();
-    let framework = framework.to_string();
-    tokio::task::spawn_blocking(move || {
-        let (cmd, args) = match framework.as_str() {
-            "jest" => ("npm", vec!["test", "--", "--coverage=false"]),
-            "pytest" => ("python", vec!["-m", "pytest", "--tb=short", "-q"]),
-            "cargo" => ("cargo", vec!["test", "--", "--nocapture"]),
-            "npm" => ("npm", vec!["test", "--", "--coverage=false"]),
-            _ => return format!("Unknown test framework: {}", framework),
-        };
-        let mut process = hidden_cmd(cmd);
-        if framework == "pytest" || framework == "cargo" {
-            process.current_dir(&path);
-        }
-        process.args(&args);
-        output_with_timeout(&mut process, 300, session_id, running_pids.as_ref())
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
-}
-
 pub(crate) async fn tool_spawn_process(params: &serde_json::Value) -> String {
     let command = params["command"].as_str().unwrap_or("");
     let cwd = params.get("path").and_then(|p| p.as_str());
+    if command.is_empty() {
+        return "Error: command is required".to_string();
+    }
     let command = command.to_string();
     let cwd = cwd.map(|s| s.to_string());
     tokio::task::spawn_blocking(move || {
-        let mut cmd = if cfg!(windows) {
-            let mut c = hidden_cmd("cmd");
-            c.args(["/C", "start", "/B", &command]);
-            c
-        } else {
-            let mut c = hidden_cmd("sh");
-            c.args(["-c", &format!("{} &", command)]);
-            c
-        };
+        let (program, args) = parse_command(&command);
+        if program.is_empty() {
+            return "Error: could not parse command".to_string();
+        }
+        let mut cmd = hidden_cmd(&program);
+        cmd.args(&args);
         if let Some(dir) = &cwd {
             cmd.current_dir(dir);
         }
@@ -2035,6 +1905,7 @@ pub(crate) fn search_recursive(path: &str, pattern: &str, depth: usize, max_dept
         if file_path.is_dir() {
             search_recursive(&file_path.to_string_lossy(), pattern, depth + 1, max_depth, results);
         } else if file_path.is_file() {
+            if entry.metadata().map(|m| m.len() > 1_048_576).unwrap_or(false) { continue; }
             if let Ok(content) = std::fs::read_to_string(&file_path) {
                 for (i, line) in content.lines().enumerate() {
                     if line.to_lowercase().contains(pattern) {
@@ -2302,7 +2173,7 @@ pub(crate) fn find_project_root(start: &std::path::Path, markers: &[&str]) -> st
 
 pub(crate) fn tool_reason(tool: &str, file: Option<&str>, cmd: Option<&str>) -> String {
     match tool {
-        "run_command" | "run_tests" | "run_background" => {
+        "run_command" | "run_background" => {
             format!("Run: {}", cmd.unwrap_or("unknown command"))
         }
         "write_file" | "write_files" | "edit_file" => {
@@ -2311,7 +2182,6 @@ pub(crate) fn tool_reason(tool: &str, file: Option<&str>, cmd: Option<&str>) -> 
         "delete_file" => {
             format!("Delete: {}", file.unwrap_or("unknown file"))
         }
-        "git_commit" => "Git commit".to_string(),
         "send_to_agent" => "Send message to agent".to_string(),
         _ => format!("Execute: {}", tool),
     }
@@ -2320,27 +2190,18 @@ pub(crate) fn tool_reason(tool: &str, file: Option<&str>, cmd: Option<&str>) -> 
 pub(crate) fn is_parallel_safe(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        // Read-only file inspection
         "read_file" | "read_files" | "list_dir" | "directory_tree" | "get_file_info"
-        // Search & analysis
         | "search_in_dir" | "search_files" | "glob" | "analyze_project_structure"
-        // Git read-only
-        | "git_status" | "git_log" | "git_diff"
-        // Web
         | "web_search" | "web_fetch"
-        // Knowledge read
         | "read_knowledge"
-        // Skill inspection
         | "list_builtin_skills" | "list_user_skills" | "match_skills"
         | "mcp_reload"
-        // Job inspection
         | "job_output" | "list_jobs"
-        // Env
         | "get_env_info"
-        // Background spawn (returns immediately)
         | "run_background" | "spawn_process"
-        // LSP inspection
         | "read_lints"
+        | "run_command" // parallel-safe: each command runs in its own process;
+                         // concurrency guard is the session PIDs registry
     ) || is_mcp_tool(tool_name)
 }
 
@@ -2506,7 +2367,7 @@ pub(crate) async fn tool_ask_choice(
     app_handle: AppHandle,
 ) -> String {
     let questions: serde_json::Value = params.get("questions").cloned().unwrap_or(json!([]));
-    let ask_id = format!("ask_{}", std::time::SystemTime::now()
+    let ask_id = format!("ask_{}_{}", session_id, std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos());
@@ -2521,9 +2382,20 @@ pub(crate) async fn tool_ask_choice(
         "questions": questions
     }));
 
-    match rx.await {
-        Ok(answers) => answers,
-        Err(_) => json!({"cancelled": true}).to_string(),
+    // Wait up to 10 minutes for user response, then emit a timeout/expired event
+    // so the frontend can dismiss the dialog gracefully.
+    match tokio::time::timeout(std::time::Duration::from_secs(600), rx).await {
+        Ok(Ok(answers)) => answers,
+        Ok(Err(_)) => {
+            // sender dropped = dialog closed / cancelled by frontend
+            json!({"cancelled": true}).to_string()
+        }
+        Err(_) => {
+            // 10-minute timeout: remove the stale sender so respond_ask can't crash on it
+            pending_asks.lock().unwrap().remove(&ask_id);
+            let _ = app_handle.emit("ask_choice_timeout", json!({"id": ask_id}));
+            json!({"timeout": true, "message": "用户未在 10 分钟内回应，已超时"}).to_string()
+        }
     }
 }
 

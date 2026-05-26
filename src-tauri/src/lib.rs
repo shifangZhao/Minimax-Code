@@ -1,6 +1,7 @@
 mod agent_service;
 mod agent_tools;
 use agent_service::restore_snapshot_file;
+mod background_tasks;
 mod context_compressor;
 mod lsp_client;
 mod lsp_manager;
@@ -1311,6 +1312,45 @@ fn kill_process(pid: i32) -> Result<(), String> {
     Ok(())
 }
 
+// ========== Background Task Management ==========
+
+#[derive(Debug, Clone, Serialize)]
+struct BgTaskInfo {
+    id: u64,
+    pid: u32,
+    command: String,
+    out_file: String,
+    start_time: u64,
+    running: bool,
+    exit_code: Option<i32>,
+}
+
+#[tauri::command]
+fn list_bg_tasks(session_id: i64) -> Vec<BgTaskInfo> {
+    background_tasks::list_tasks(session_id)
+        .into_iter()
+        .map(|t| BgTaskInfo {
+            id: t.id,
+            pid: t.pid,
+            command: t.command,
+            out_file: t.out_file,
+            start_time: t.start_time,
+            running: t.running,
+            exit_code: t.exit_code,
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn kill_bg_task(task_id: u64) -> Result<(), String> {
+    background_tasks::kill_task(task_id)
+}
+
+#[tauri::command]
+fn read_bg_output(out_file: String, tail_lines: Option<usize>) -> String {
+    background_tasks::read_output(&out_file, tail_lines.unwrap_or(200))
+}
+
 // ========== Multi-file Find & Replace ==========
 
 #[tauri::command]
@@ -1664,6 +1704,29 @@ async fn agent_chat_stream(
     eprintln!("[agent_chat_stream] API: {}, model: {}, key len: {}", api_url, model, api_key.len());
     if api_key.is_empty() {
         return Err("API key not configured".to_string());
+    }
+
+    // Auto-abort any existing stream for this session (graceful before creating new one)
+    {
+        if let Ok(mut registry) = state.cancel_registry.lock() {
+            if let Some(tx) = registry.remove(&session_id) {
+                let _ = tx.send(true);
+                eprintln!("[agent_chat_stream] Aborted previous stream for session {}", session_id);
+            }
+        }
+        if let Ok(mut pids) = state.running_command_pids.lock() {
+            if let Some(pid) = pids.remove(&session_id) {
+                #[cfg(windows)]
+                { let _ = std::process::Command::new("taskkill").args(["/F", "/T", "/PID", &pid.to_string()]).output(); }
+                #[cfg(not(windows))]
+                { let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).output(); }
+            }
+        }
+        // Drain stale pending-asks for this session
+        if let Ok(mut asks) = state.pending_asks.lock() {
+            let prefix = format!("ask_{}_", session_id);
+            asks.retain(|k, _| !k.starts_with(&prefix));
+        }
     }
 
     // Create agent service
@@ -2620,7 +2683,10 @@ pub fn run() {
             cancel_registry: Arc::new(Mutex::new(HashMap::new())),
             running_command_pids: Arc::new(Mutex::new(HashMap::new())),
         })
-        .setup(move |_app| {
+        .setup(move |app| {
+            // Start background task poller for frontend visualization
+            background_tasks::start_poller(app.handle().clone());
+
             // Set builtin skills root - use directory relative to executable
             let exe_dir = std::env::current_exe()
                 .ok()
@@ -2710,6 +2776,9 @@ pub fn run() {
             write_files,
             spawn_process,
             kill_process,
+            list_bg_tasks,
+            kill_bg_task,
+            read_bg_output,
             find_replace_in_files,
             apply_patch,
             create_patch,

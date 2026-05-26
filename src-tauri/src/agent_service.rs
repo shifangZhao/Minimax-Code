@@ -830,7 +830,10 @@ impl AgentService {
                 let est = estimate_request_tokens(&api_messages, &system_json, &tools_json);
                 eprintln!("[stream_chat] Model: {}, Ctx: {}K, Messages: {}, EstTokens: {}", self.model, self.context_window / 1000, api_messages.len(), est);
 
-                let client = Client::new();
+                let client = Client::builder()
+                    .timeout(std::time::Duration::from_secs(300))
+                    .build()
+                    .unwrap_or_else(|_| Client::new());
                 let resp = match client
                     .post(format!("{}{}", self.api_url, self.messages_path))
                     .header("Authorization", format!("Bearer {}", api_key))
@@ -1447,7 +1450,22 @@ async fn process_sse_stream(
                 })
             }).collect();
 
-            let results = join_all(futs).await;
+            // Race: tool execution vs cancel check (polled every 30s)
+            let results = {
+                let cancel = cancel_rx.clone();
+                tokio::select! {
+                    r = join_all(futs) => r,
+                    _ = async {
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                            if *cancel.borrow() { break; }
+                        }
+                    } => {
+                        eprintln!("[tool_dispatch] Cancelled during tool execution for session {}", session_id);
+                        Vec::new()
+                    }
+                }
+            };
 
             // Emit tool_end in declared order
             for (idx, r) in results.into_iter().enumerate() {
@@ -1577,6 +1595,11 @@ async fn execute_tool(
 ) -> String {
     let params: serde_json::Value = serde_json::from_str(input).unwrap_or(json!({}));
 
+    // Global cancel check — honored by every tool before doing work
+    if *cancel_rx.borrow() {
+        return json!({"error": "cancelled"}).to_string();
+    }
+
     // --- Permission Check ---
     {
         let file_path = params["path"].as_str()
@@ -1617,13 +1640,19 @@ async fn execute_tool(
                     reason: reason.clone(),
                 };
                 let _ = app_handle.emit("permission_asked", &req);
-                match rx.await {
-                    Ok(PermissionAction::Allow) => {
+                match tokio::time::timeout(std::time::Duration::from_secs(600), rx).await {
+                    Ok(Ok(PermissionAction::Allow)) => {
                         eprintln!("[perm] {} allowed by user", tool_name);
                     }
-                    Ok(PermissionAction::Deny) | Err(_) => {
+                    Ok(Ok(PermissionAction::Deny)) | Ok(Err(_)) => {
                         eprintln!("[perm] {} denied", tool_name);
+                        let _ = permission_service.lock().map(|mut ps| ps.resolve_pending(&perm_id, tool_name, PermissionAction::Deny, false));
                         return format!("Permission denied: {}", reason);
+                    }
+                    Err(_) => {
+                        eprintln!("[perm] {} timed out after 10min", tool_name);
+                        let _ = permission_service.lock().map(|mut ps| ps.resolve_pending(&perm_id, tool_name, PermissionAction::Deny, false));
+                        return format!("Permission timed out: {}", reason);
                     }
                 }
             }
@@ -1701,7 +1730,7 @@ async fn execute_tool(
                 save_file_snapshot(&db, session_id, &np);
             }
         }
-        "run_command" | "run_tests" | "run_background" => {
+        "run_command" | "run_background" => {
             // Snapshot workspace files before command execution
             if let Some(ref cwd) = params["cwd"].as_str().map(|s| s.to_string())
                 .or_else(|| params["path"].as_str().map(|s| s.to_string()))
@@ -1716,14 +1745,6 @@ async fn execute_tool(
         "list_dir" => tool_list_dir(&params).await,
         "read_file" => tool_read_file(&params).await,
         "read_files" => tool_read_files(&params).await,
-        "git_status" => tool_git_status(&params).await,
-        "git_log" => tool_git_log(&params).await,
-        "git_diff" => tool_git_diff(&params).await,
-        "git_commit" => tool_git_commit(&params).await,
-        "git_branch" => tool_git_branch(&params).await,
-        "git_checkout" => tool_git_checkout(&params).await,
-        "git_stash" => tool_git_stash(&params).await,
-        "git_stash_pop" => tool_git_stash_pop(&params).await,
         "search_in_dir" => tool_search_in_dir(&params).await,
         "get_env_info" => tool_get_env_info(&params).await,
         "analyze_project_structure" => tool_analyze_project_structure(&params).await,
@@ -1744,10 +1765,9 @@ async fn execute_tool(
         "delete_file" => tool_delete_file(&params).await,
         "copy_file" => tool_copy_file_fn(&params).await,
         "web_fetch" => tool_web_fetch(params.clone()).await,
-        "run_background" => tool_run_background(&params).await,
+        "run_background" => tool_run_background(&params, session_id).await,
         "job_output" => tool_job_output(&params).await,
         "list_jobs" => tool_list_jobs(&params).await,
-        "run_tests" => tool_run_tests(&params, session_id, Some(running_command_pids.clone())).await,
         "spawn_process" => tool_spawn_process(&params).await,
         "kill_process" => tool_kill_process(&params).await,
         "web_search" => tool_web_search(params.clone(), api_key.clone(), api_url.clone(), provider.clone()).await,
@@ -1791,6 +1811,20 @@ async fn execute_tool(
 }
 
 fn get_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
+    use std::sync::OnceLock;
+    use std::collections::HashMap;
+    static CACHE: OnceLock<HashMap<String, Vec<serde_json::Value>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| {
+        let mut map = HashMap::new();
+        for at in &["front", "plan", "explore", "review", "work", "ace", "default"] {
+            map.insert(at.to_string(), build_agent_tools(at));
+        }
+        map
+    });
+    cache.get(agent_type).cloned().unwrap_or_else(|| build_agent_tools(agent_type))
+}
+
+fn build_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
     let mut tools = Vec::new();
 
     // ===== TOOL GROUP DEFINITIONS =====
@@ -1812,13 +1846,6 @@ fn get_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
         ("analyze_project_structure", "分析项目顶层结构", schema_obj(json!({"path": {"type": "string"}}), &["path"])),
     ];
 
-    // Git read-only (plan / explore / work / review)
-    let git_read: &[(&str, &str, serde_json::Value)] = &[
-        ("git_status", "获取Git仓库状态", schema_obj(json!({"path": {"type": "string"}}), &["path"])),
-        ("git_log", "获取Git提交历史", schema_obj(json!({"path": {"type": "string"}, "count": {"type": "integer"}}), &["path"])),
-        ("git_diff", "获取Git diff", schema_obj(json!({"path": {"type": "string"}, "target": {"type": "string"}}), &["path"])),
-    ];
-
     // Write/edit tools (work only)
     let write_tools: &[(&str, &str, serde_json::Value)] = &[
         ("write_file", "创建或覆盖文件（含父目录）", schema_obj(json!({"path": {"type": "string"}, "content": {"type": "string"}}), &["path", "content"])),
@@ -1832,22 +1859,12 @@ fn get_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
         ("copy_file", "复制文件或目录（递归）", schema_obj(json!({"source": {"type": "string"}, "destination": {"type": "string"}}), &["source", "destination"])),
     ];
 
-    // Git write (work only)
-    let _git_write: &[(&str, &str, serde_json::Value)] = &[
-        ("git_commit", "创建Git提交", schema_obj(json!({"path": {"type": "string"}, "message": {"type": "string"}}), &["path", "message"])),
-        ("git_branch", "列出Git分支", schema_obj(json!({"path": {"type": "string"}}), &["path"])),
-        ("git_checkout", "切换Git分支", schema_obj(json!({"path": {"type": "string"}, "branch": {"type": "string"}}), &["path", "branch"])),
-        ("git_stash", "暂存Git更改", schema_obj(json!({"path": {"type": "string"}}), &["path"])),
-        ("git_stash_pop", "恢复暂存的Git更改", schema_obj(json!({"path": {"type": "string"}}), &["path"])),
-    ];
-
     // Command execution (work only)
     let command_tools: &[(&str, &str, serde_json::Value)] = &[
-        ("run_command", "执行命令行指令", schema_obj(json!({"command": {"type": "string"}, "path": {"type": "string"}}), &["command"])),
-        ("run_tests", "运行测试框架", schema_obj(json!({"path": {"type": "string"}, "test_framework": {"type": "string"}}), &["path", "test_framework"])),
-        ("run_background", "后台运行长时间进程（dev server/build），返回PID和输出文件路径(out_file)。用job_output(out_file)读取实时输出", schema_obj(json!({"command": {"type": "string"}, "path": {"type": "string"}, "wait_sec": {"type": "integer"}}), &["command"])),
+        ("run_command", "执行命令（阻塞等完成）。直接用要执行的命令，自由选择 shell：如 git status、cmd /c dir、powershell -Command \"...\"、sh -c \"...\"。智能体会根据输出报错自行调整", schema_obj(json!({"command": {"type": "string"}, "path": {"type": "string"}, "timeout": {"type": "integer"}}), &["command"])),
+        ("run_background", "后台运行长进程（dev server/build）立即返回。命令自由选择 shell。返回 task_id/pid/out_file，前端面板实时看输出", schema_obj(json!({"command": {"type": "string"}, "path": {"type": "string"}, "wait_sec": {"type": "integer"}}), &["command"])),
         ("kill_process", "按PID终止进程", schema_obj(json!({"pid": {"type": "number"}}), &["pid"])),
-        ("job_output", "查询后台进程输出。out_file: run_background 返回的输出文件路径（推荐）；job_id: PID（旧方式）。tail_lines: 返回最后N行，默认200", schema_obj(json!({"job_id": {"type": "integer"}, "out_file": {"type": "string"}, "tail_lines": {"type": "integer"}}), &[])),
+        ("job_output", "查询后台进程输出。out_file: run_background 返回的输出文件路径。tail_lines: 返回最后N行，默认200", schema_obj(json!({"job_id": {"type": "integer"}, "out_file": {"type": "string"}, "tail_lines": {"type": "integer"}}), &[])),
         ("list_jobs", "列出当前会话后台任务", schema_obj(json!({}), &[])),
     ];
 
@@ -1906,9 +1923,8 @@ fn get_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
         "front" => {
             add_tools(&mut tools, read_only_files);
             add_tools(&mut tools, search_tools);
-            add_tools(&mut tools, git_read);
-            tools.push(make_tool("run_command", "执行命令行指令", schema_obj(json!({"command": {"type": "string"}, "path": {"type": "string"}}), &["command"])));
-            tools.push(make_tool("run_background", "后台运行长时间进程，返回PID和输出文件路径。用job_output读取实时输出", schema_obj(json!({"command": {"type": "string"}, "path": {"type": "string"}, "wait_sec": {"type": "integer"}}), &["command"])));
+            tools.push(make_tool("run_command", "执行命令（阻塞等完成）。自由选择 shell：git status、cmd /c dir、powershell -Command \"...\" 等。智能体会根据输出自行调整", schema_obj(json!({"command": {"type": "string"}, "path": {"type": "string"}, "timeout": {"type": "integer"}}), &["command"])));
+            tools.push(make_tool("run_background", "后台运行长进程，立即返回。命令自由选择 shell。前端面板实时看输出", schema_obj(json!({"command": {"type": "string"}, "path": {"type": "string"}, "wait_sec": {"type": "integer"}}), &["command"])));
             tools.push(make_tool("job_output", "查询后台进程输出。用run_background返回的out_file参数读取", schema_obj(json!({"out_file": {"type": "string"}, "tail_lines": {"type": "integer"}}), &[])));
             add_tools(&mut tools, web_tools);
             add_tools(&mut tools, env_tools);
@@ -1921,7 +1937,6 @@ fn get_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
         "plan" => {
             add_tools(&mut tools, read_only_files);
             add_tools(&mut tools, search_tools);
-            add_tools(&mut tools, git_read);
             add_tools(&mut tools, web_tools);
             add_tools(&mut tools, env_tools);
             add_tools(&mut tools, knowledge_read);
@@ -1933,20 +1948,15 @@ fn get_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
         "explore" => {
             add_tools(&mut tools, read_only_files);
             add_tools(&mut tools, search_tools);
-            add_tools(&mut tools, git_read);
             add_tools(&mut tools, web_tools);
             add_tools(&mut tools, env_tools);
             add_tools(&mut tools, knowledge_read);
             tools.push(make_tool(kw.0, kw.1, kw.2.clone()));
             add_tools(&mut tools, comm_tools);
-            // Explore gets build + sync + read tools
         }
         "review" => {
             add_tools(&mut tools, read_only_files);
             add_tools(&mut tools, search_tools);
-            add_tools(&mut tools, git_read);
-            // Review can commit after passing
-            tools.push(make_tool("git_commit", "审查通过后提交代码", schema_obj(json!({"path": {"type": "string"}, "message": {"type": "string"}}), &["path", "message"])));
             tools.push(make_tool(lint.0, lint.1, lint.2.clone()));
             add_tools(&mut tools, web_tools);
             add_tools(&mut tools, env_tools);
@@ -1958,8 +1968,6 @@ fn get_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
             add_tools(&mut tools, read_only_files);
             add_tools(&mut tools, search_tools);
             add_tools(&mut tools, write_tools);
-            add_tools(&mut tools, git_read);
-            // Work keeps only git read-only (git_commit done by review)
             add_tools(&mut tools, command_tools);
             tools.push(make_tool(lint.0, lint.1, lint.2.clone()));
             add_tools(&mut tools, web_tools);
@@ -1971,27 +1979,22 @@ fn get_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
             tools.push(make_tool(todo_tool.0, todo_tool.1, todo_tool.2.clone()));
         }
         "ace" => {
-            // Ace: all tools from all agents, minus send_to_agent
             add_tools(&mut tools, read_only_files);
             add_tools(&mut tools, search_tools);
             add_tools(&mut tools, write_tools);
-            add_tools(&mut tools, git_read);
-            add_tools(&mut tools, _git_write);       // git_commit, branch, checkout, stash, stash_pop
             add_tools(&mut tools, command_tools);
             tools.push(make_tool(lint.0, lint.1, lint.2.clone()));
             add_tools(&mut tools, web_tools);
             add_tools(&mut tools, env_tools);
             add_tools(&mut tools, knowledge_read);
             tools.push(make_tool(kw.0, kw.1, kw.2.clone()));
-            tools.push(make_tool(ask_tool.0, ask_tool.1, ask_tool.2.clone()));  // ask_choice
+            tools.push(make_tool(ask_tool.0, ask_tool.1, ask_tool.2.clone()));
             add_tools(&mut tools, skill_tools);
             tools.push(make_tool(todo_tool.0, todo_tool.1, todo_tool.2.clone()));
         }
         _ => {
-            // Fallback: same as front
             add_tools(&mut tools, read_only_files);
             add_tools(&mut tools, search_tools);
-            add_tools(&mut tools, git_read);
             add_tools(&mut tools, web_tools);
             add_tools(&mut tools, env_tools);
             add_tools(&mut tools, knowledge_read);

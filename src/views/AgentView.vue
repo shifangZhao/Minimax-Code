@@ -34,17 +34,17 @@
         <span v-if="cacheUsage.ratio > 0" class="cache-badge" :title="`缓存命中: ${cacheUsage.hit} tokens / 未命中: ${cacheUsage.miss} tokens`">
           ⚡{{ cacheUsage.hit }}/{{ cacheUsage.hit + cacheUsage.miss }} {{ cacheUsage.ratio.toFixed(2) }}%
         </span>
+        <BookmarkPanel
+          :visible="showBookmarkPanel"
+          :items="bookmarks"
+          :showInput="showSaveInput"
+          @save="(name: string) => { bookmarkName = name; sessionId && saveBookmark(sessionId, workspace); }"
+          @restore="(bm) => { showRestoreConfirmBm = bm }"
+          @delete="(id: number) => { sessionId && deleteBookmark(id, sessionId) }"
+          @toggleInput="showSaveInput = !showSaveInput"
+        />
       </div>
     </div>
-    <BookmarkPanel
-      :visible="showBookmarkPanel"
-      :items="bookmarks"
-      :showInput="showSaveInput"
-      @save="(name: string) => { bookmarkName = name; sessionId && saveBookmark(sessionId, workspace); }"
-      @restore="(bm) => { showRestoreConfirmBm = bm }"
-      @delete="(id: number) => { sessionId && deleteBookmark(id, sessionId) }"
-      @toggleInput="showSaveInput = !showSaveInput"
-    />
     <ConfirmDialog
       :visible="showRestoreConfirmBm !== null"
       title="恢复快照"
@@ -68,6 +68,7 @@
       <span class="context-label">{{ formatTokens(tokenUsage.estimated_tokens) }} / {{ formatTokens(tokenUsage.context_window) }}</span>
     </div>
     <TodoPanel :sessionId="sessionId" />
+    <BackgroundTaskPanel :sessionId="sessionId" />
     <div class="messages" ref="messagesEl" @scroll="saveScrollPos">
       <div v-if="hasMoreOlder" class="load-earlier-wrap">
         <button class="load-earlier-btn" :disabled="loadingMore" @click="loadMoreMessages()">
@@ -253,6 +254,8 @@ import AttachmentPreview from '../components/AttachmentPreview.vue'
 import CommandPopup from '../components/CommandPopup.vue'
 import PermissionCard from '../components/PermissionCard.vue'
 import TodoPanel from '../components/TodoPanel.vue'
+import BackgroundTaskPanel from '../components/BackgroundTaskPanel.vue'
+import { useBackgroundTasks } from '../composables/useBackgroundTasks'
 import { useUndoHistory } from '../composables/useUndoHistory'
 import { useBookmarks } from '../composables/useBookmarks'
 
@@ -296,6 +299,7 @@ const { sessions } = useGlobalStreaming()
 const { permRequests, respond: respondPerm } = usePermissions()
 const { recentEdits, lastUndone, showUndoToast, loadEdits, undoLast } = useUndoHistory()
 const { bookmarks, showBookmarkPanel, showSaveInput, bookmarkName, loadBookmarks, saveBookmark, restoreBookmark, deleteBookmark } = useBookmarks()
+const { startListener: startBgListener, stopListener: stopBgListener, refreshTasks: refreshBgTasks } = useBackgroundTasks()
 
 const messagesEl = ref<HTMLElement>()
 const inputEl = ref<HTMLTextAreaElement>()
@@ -1000,6 +1004,8 @@ watch(inputText, () => {
 })
 
 onMounted(() => {
+  startBgListener(sessionId.value ?? undefined)
+  if (sessionId.value) refreshBgTasks(sessionId.value)
   nextTick(() => {
     if (messagesEl.value) {
       const pos = scrollCache.get(agentScrollKey.value)
@@ -1010,6 +1016,8 @@ onMounted(() => {
 })
 
 onActivated(() => {
+  startBgListener(sessionId.value ?? undefined)
+  if (sessionId.value) refreshBgTasks(sessionId.value)
   nextTick(() => {
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
@@ -1025,6 +1033,7 @@ onActivated(() => {
 
 onDeactivated(() => {
   saveScrollPos()
+  stopBgListener()
 })
 </script>
 
@@ -2005,6 +2014,7 @@ onDeactivated(() => {
   display: flex;
   gap: 6px;
   align-items: center;
+  position: relative;
 }
 
 .header-btn {
