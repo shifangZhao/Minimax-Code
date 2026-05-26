@@ -252,10 +252,10 @@ export function useAgentConversation(agentType: string) {
             name: p.tool_name,
             input: (() => { try { return JSON.parse(p.tool_input || '{}') } catch { return {} } })()
           }
-          case 'tool_result': return { type: 'tool_result', tool_use_id: p.tool_use_id, content: p.content }
+          case 'tool_result': return p.tool_use_id ? { type: 'tool_result', tool_use_id: p.tool_use_id, content: p.content } : null
           default: return { type: 'text', text: p.content }
         }
-      })
+      }).filter(Boolean)
       return JSON.stringify(blocks)
     }
 

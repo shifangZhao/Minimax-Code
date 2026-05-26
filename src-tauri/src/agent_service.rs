@@ -168,7 +168,10 @@ fn save_api_message(db: &Arc<StdMutex<Connection>>, session_id: i64, message: &s
                     "tool_use" => String::new(),
                     _ => b["text"].as_str().unwrap_or("").to_string(),
                 };
-                let tuid = b["id"].as_str().map(|s| s.to_string());
+                let tuid = match ptype.as_str() {
+                    "tool_result" => b["tool_use_id"].as_str().map(|s| s.to_string()),
+                    _ => b["id"].as_str().map(|s| s.to_string()),
+                };
                 let tname = b["name"].as_str().map(|s| s.to_string());
                 let tinput = if ptype == "tool_use" {
                     Some(serde_json::to_string(&b["input"]).unwrap_or_default())
