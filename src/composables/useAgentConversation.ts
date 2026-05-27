@@ -7,6 +7,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { useGlobalStreaming, activeFrontendSessions } from './useGlobalStreaming'
 import { useTodoStore } from './useTodoStore'
+import type { AskQuestion } from '../types/api'
 
 export interface ToolEvent {
   type: 'tool_start' | 'tool_end'
@@ -22,7 +23,7 @@ export interface AskPayload {
   session_id: number
   agent_type?: string
   question?: string
-  questions?: Array<{ id: string; question: string; options?: string[]; multi_select?: boolean }>
+  questions?: AskQuestion[]
   options?: string[]
 }
 
@@ -30,6 +31,7 @@ export interface AgentInvokedPayload {
   target_agent: string
   session_id: number
   group_chat_id?: number
+  message?: string
 }
 
 // 完整的 assistant 响应结构（用于多轮对话）
@@ -57,6 +59,7 @@ export interface TokenUsage {
 // survives tab switches. This enables multi-session parallel execution —
 // each session's messages and token counts live independently.
 const sessionTokenUsage = new Map<number, TokenUsage>()
+const sessionCacheUsage = new Map<number, { hit: number; miss: number; ratio: number }>()
 const sessionMessages = new Map<number, ChatMessage[]>()
 const sessionMeta = new Map<number, { count: number }>()
 
@@ -99,8 +102,6 @@ export function useAgentConversation(agentType: string) {
       // Skip if already on this session (prevents duplicate DB load)
       if (sessionId.value === session_id) return
 
-      console.log('[agent_invoked]', agentType, 'invoked, switching to session:', session_id, 'group:', group_chat_id)
-
       currentGroupChatId.value = group_chat_id ?? null
       sessionId.value = session_id
 
@@ -125,12 +126,16 @@ export function useAgentConversation(agentType: string) {
   async function initSession(groupChatId: number) {
     if (groupChatId < 0) {
       // Save current messages before switching to temp chat
-      if (sessionId.value) sessionMessages.set(sessionId.value, [...messages.value])
+      if (sessionId.value) {
+        sessionMessages.set(sessionId.value, [...messages.value])
+        sessionCacheUsage.set(sessionId.value, { ...cacheUsage.value })
+      }
       currentGroupChatId.value = groupChatId
       sessionId.value = null
       messages.value = []
       hasMoreOlder.value = false
       tokenUsage.value = { estimated_tokens: 0, context_window: 204800, usage_pct: 0 }
+      cacheUsage.value = { hit: 0, miss: 0, ratio: 0 }
       loading.value = false
       return
     }
@@ -143,9 +148,10 @@ export function useAgentConversation(agentType: string) {
 
     const newSessionId = session ? session.id : await db.createAgentSession(groupChatId, agentType)
 
-    // Cache current messages and token usage before switching
+    // Cache current messages, token usage and cache usage before switching
     if (prevSessionId !== null && prevSessionId !== newSessionId) {
       sessionMessages.set(prevSessionId, [...messages.value])
+      sessionCacheUsage.set(prevSessionId, { ...cacheUsage.value })
       // Keep the old stream listener alive — background sessions continue running
     }
 
@@ -157,6 +163,8 @@ export function useAgentConversation(agentType: string) {
       messages.value = cached
       const tu = sessionTokenUsage.get(newSessionId)
       if (tu) tokenUsage.value = tu
+      const cu = sessionCacheUsage.get(newSessionId)
+      cacheUsage.value = cu ?? { hit: 0, miss: 0, ratio: 0 }
       loading.value = loadingSessions.has(newSessionId)
       hasMoreOlder.value = (sessionMeta.get(newSessionId)?.count ?? 0) > cached.length
     } else {
@@ -193,6 +201,9 @@ export function useAgentConversation(agentType: string) {
       } else {
         tokenUsage.value = { estimated_tokens: 0, context_window: 204800, usage_pct: 0 }
       }
+      // Restore per-session cache usage
+      const cu = sessionCacheUsage.get(sid)
+      cacheUsage.value = cu ?? { hit: 0, miss: 0, ratio: 0 }
     }
     // Always update token cache for the loaded session
     const tu = sessionTokenUsage.get(sid)
@@ -289,25 +300,17 @@ export function useAgentConversation(agentType: string) {
   }
 
   async function sendMessage(content: string, attachments?: string, displayContent?: string, skipUserSave?: boolean) {
-    console.log('[sendMessage] Starting with:', { agentType, currentGroupChatId: currentGroupChatId.value, sessionId: sessionId.value })
-
     // Handle temporary chat - create real chat in DB when first message is sent
     if (!currentGroupChatId.value || currentGroupChatId.value < 0) {
-      const mode = agentType === 'ace' ? 'ace' : 'team'
-      const chatName = content.slice(0, 10).replace(/[^一-龥a-zA-Z0-9]/g, '') || (mode === 'ace' ? 'Ace 对话' : '新群聊')
-      console.log('[sendMessage] Creating new group chat:', chatName, 'mode:', mode)
-      const realId = await db.createGroupChat(chatName, mode)
+      const chatName = content.slice(0, 10).replace(/[^一-龥a-zA-Z0-9]/g, '') || 'Ace 对话'
+      const realId = await db.createGroupChat(chatName, 'ace')
       currentGroupChatId.value = realId
-      console.log('[sendMessage] Group chat created:', realId)
     }
     if (!sessionId.value) {
-      console.log('[sendMessage] Creating new agent session for:', currentGroupChatId.value, agentType)
       sessionId.value = await db.createAgentSession(currentGroupChatId.value, agentType)
-      console.log('[sendMessage] Agent session created:', sessionId.value)
     }
 
     const finalSessionId = sessionId.value
-    console.log('[sendMessage] Final sessionId:', finalSessionId)
 
     // Save user message (skip if already saved by image flow)
     const display = displayContent || content
@@ -327,8 +330,6 @@ export function useAgentConversation(agentType: string) {
     loadingSessions.add(finalSessionId)
     toolEvents.value = []
     cacheUsage.value = { hit: 0, miss: 0, ratio: 0 }
-
-    console.log('[sendMessage] Loading set to true, setting up event listener for:', `agent_stream_${finalSessionId}`)
 
     // Get workspace
     let workspace: string | null = null
@@ -350,7 +351,6 @@ export function useAgentConversation(agentType: string) {
         }
       }
     }
-    console.log('[sendMessage] history:', JSON.stringify(history, null, 2))
 
     // 添加工具结果到历史消息（tool_result 需要紧跟 assistant 消息后）
     if (toolEvents.value.length > 0) {
@@ -372,7 +372,6 @@ export function useAgentConversation(agentType: string) {
       done: false,
       toolEvents: [],
       abort: async () => {
-        console.log('[abort] Aborting stream for session:', finalSessionId)
         try {
           await invoke('abort_stream', { sessionId: finalSessionId })
         } catch (e) {
@@ -384,7 +383,7 @@ export function useAgentConversation(agentType: string) {
     let fullText = ''
     let fullThinking = ''
     let toolCallCount = 0
-    const streamToolEvents: Array<{ type: 'tool_start' | 'tool_end'; tool: string; tool_id: string; input?: Record<string, any>; result?: string }> = []
+    const streamToolEvents: Array<{ type: 'tool_start' | 'tool_end'; tool: string; tool_id: string; input?: Record<string, unknown>; result?: string }> = []
     // 收集 tool_calls 信息
     const collectedToolCalls: Array<{
       id: string
@@ -397,10 +396,8 @@ export function useAgentConversation(agentType: string) {
     const streamComplete = new Promise<void>(r => { resolveStream = r })
 
     // Set up event listener for real-time streaming (managed by useGlobalStreaming)
-    console.log('[sendMessage] Setting up event listener for:', `agent_stream_${finalSessionId}`)
     activeFrontendSessions.add(finalSessionId)
     await setupListener(finalSessionId, (event) => {
-      console.log('[sendMessage] Received event:', event.payload.type)
       const ev = event.payload
       switch (ev.type) {
         case 'content_block_delta':
@@ -442,6 +439,12 @@ export function useAgentConversation(agentType: string) {
               useTodoStore().updateFromResult(finalSessionId, ev.result)
             }
           }
+          break
+        case 'abort_acknowledged':
+          // Backend acknowledged abort — freeze display immediately
+          updateStreamState(finalSessionId, {
+            text: fullText, thinking: fullThinking, done: true, toolCallCount
+          })
           break
         case 'done':
           resolveStream?.()
@@ -490,7 +493,6 @@ export function useAgentConversation(agentType: string) {
 
     try {
       // Call Rust agent service
-      console.log('[sendMessage] Invoking agent_chat_stream with:', { agentType, historyLength: history.length, sessionId: finalSessionId })
       await invoke('agent_chat_stream', {
         agentType,
         messages: JSON.stringify(history),
@@ -498,10 +500,8 @@ export function useAgentConversation(agentType: string) {
         workspace,
         sessionId: finalSessionId
       })
-      console.log('[sendMessage] invoke completed')
 
       // Wait for stream to complete (event-driven, no polling)
-      console.log('[sendMessage] Waiting for stream...')
       await streamComplete
 
       // Build fallback message from stream buffer FIRST, before touching
@@ -566,9 +566,9 @@ export function useAgentConversation(agentType: string) {
 
       toolEvents.value = []
 
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error('Agent error:', e)
-      const errorMsg = `Error: ${e.toString()}`
+      const errorMsg = `Error: ${e instanceof Error ? e.message : String(e)}`
       updateStreamState(finalSessionId, {
         text: errorMsg,
         done: true,
@@ -643,6 +643,7 @@ export function useAgentConversation(agentType: string) {
     if (sid === null) return
     sessionMessages.delete(sid)
     sessionTokenUsage.delete(sid)
+    sessionCacheUsage.delete(sid)
     sessionMeta.delete(sid)
     useTodoStore().clearState(sid)
   }
@@ -656,6 +657,7 @@ export function useAgentConversation(agentType: string) {
       clearSessionCache(sessionId.value)
       toolEvents.value = []
       tokenUsage.value = { estimated_tokens: 0, context_window: 204800, usage_pct: 0 }
+      cacheUsage.value = { hit: 0, miss: 0, ratio: 0 }
       showClearConfirm.value = false
     } catch (e) {
       console.error('Clear failed:', e)
@@ -718,7 +720,7 @@ export function useAgentConversation(agentType: string) {
             }
             const tcId = p.tool_use_id || ''
             result.push({
-              id: `tool-${tcId}` as unknown as number,
+              id: `tool-${tcId}`,
               session_id: m.session_id,
               role: 'tool' as const,
               content: toolResults.get(tcId) || '',

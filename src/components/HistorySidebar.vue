@@ -41,12 +41,10 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, nextTick, watch } from 'vue'
-import { useRoute } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
 import { db } from '../services/db'
 
-const route = useRoute()
-const currentMode = computed(() => route.path.startsWith('/ace') ? 'ace' : 'team')
+const currentMode = computed(() => 'ace')
 
 interface GroupChat {
   id: number

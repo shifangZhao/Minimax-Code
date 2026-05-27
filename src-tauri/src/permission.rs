@@ -361,7 +361,7 @@ fn is_read_only_tool(tool: &str) -> bool {
             | "job_output" | "list_jobs" | "get_env_info"
             | "analyze_project_structure" | "read_lints"
             // Communication (no file mutation)
-            | "send_to_agent" | "ask_choice"
+            | "ask_choice"
     )
 }
 
@@ -452,4 +452,282 @@ fn uuid_v4() -> String {
         .unwrap()
         .as_nanos();
     format!("perm_{:x}", ts)
+}
+
+// ==================== Tests ====================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- Mode defaults ---
+
+    #[test]
+    fn default_mode_is_normal() {
+        let ps = PermissionService::new();
+        assert_eq!(ps.mode, PermissionMode::Normal);
+    }
+
+    #[test]
+    fn set_mode_works() {
+        let mut ps = PermissionService::new();
+        ps.set_mode(PermissionMode::Full);
+        assert_eq!(ps.mode, PermissionMode::Full);
+        ps.set_mode(PermissionMode::Guarded);
+        assert_eq!(ps.mode, PermissionMode::Guarded);
+    }
+
+    // --- Full mode: everything auto-allowed ---
+
+    #[test]
+    fn full_mode_allows_write_tool() {
+        let ps = PermissionService::new();
+        let mut ps_full = ps;
+        ps_full.set_mode(PermissionMode::Full);
+        let result = ps_full.evaluate("write_file", Some("/tmp/test.txt"), None);
+        assert_eq!(result, Some(Ok(())));
+    }
+
+    #[test]
+    fn full_mode_allows_run_command() {
+        let mut ps = PermissionService::new();
+        ps.set_mode(PermissionMode::Full);
+        let result = ps.evaluate("run_command", None, Some("npm install"));
+        assert_eq!(result, Some(Ok(())));
+    }
+
+    #[test]
+    fn full_mode_blocks_always_denied() {
+        let mut ps = PermissionService::new();
+        ps.set_mode(PermissionMode::Full);
+        // rm -rf / should be always denied
+        let result = ps.evaluate("run_command", None, Some("rm -rf /"));
+        assert!(result.is_some());
+        assert!(result.unwrap().is_err());
+    }
+
+    // --- Normal mode: read-only auto, writes ask ---
+
+    #[test]
+    fn normal_mode_allows_read_tools() {
+        let ps = PermissionService::new(); // defaults to Normal
+        assert_eq!(ps.evaluate("read_file", Some("src/main.rs"), None), Some(Ok(())));
+        assert_eq!(ps.evaluate("list_dir", Some("."), None), Some(Ok(())));
+        assert_eq!(ps.evaluate("search_in_dir", None, None), Some(Ok(())));
+    }
+
+    #[test]
+    fn normal_mode_safe_commands_auto_allow() {
+        let ps = PermissionService::new();
+        assert_eq!(ps.evaluate("run_command", None, Some("git status")), Some(Ok(())));
+        assert_eq!(ps.evaluate("run_command", None, Some("cargo check")), Some(Ok(())));
+        assert_eq!(ps.evaluate("run_command", None, Some("npm test")), Some(Ok(())));
+    }
+
+    #[test]
+    fn normal_mode_dangerous_args_ask() {
+        let ps = PermissionService::new();
+        // --force triggers ask
+        let result = ps.evaluate("run_command", None, Some("git push --force"));
+        assert_eq!(result, None); // None = needs confirmation
+    }
+
+    #[test]
+    fn normal_mode_unknown_command_ask() {
+        let ps = PermissionService::new();
+        let result = ps.evaluate("run_command", None, Some("some-unknown-tool --flag"));
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn normal_mode_write_tool_inside_project_allow() {
+        let ps = PermissionService::new();
+        // Path without "/etc", "/root", "c:/windows" etc is considered inside-project
+        let result = ps.evaluate("write_file", Some("src/components/App.vue"), None);
+        assert_eq!(result, Some(Ok(())));
+    }
+
+    #[test]
+    fn normal_mode_write_tool_sensitive_path_block() {
+        let ps = PermissionService::new();
+        let result = ps.evaluate("write_file", Some("/etc/shadow"), None);
+        assert!(result.is_some());
+        assert!(result.unwrap().is_err());
+    }
+
+    // --- Session allow ---
+
+    #[test]
+    fn session_allow_star_matches_all() {
+        let mut ps = PermissionService::new();
+        ps.record_allow("write_file", "*");
+        assert!(ps.is_session_allowed("write_file", "anything"));
+        assert!(ps.is_session_allowed("write_file", "src/main.rs"));
+    }
+
+    #[test]
+    fn session_allow_specific_path() {
+        let mut ps = PermissionService::new();
+        ps.record_allow("write_file", "src/main.rs");
+        assert!(ps.is_session_allowed("write_file", "src/main.rs"));
+        assert!(!ps.is_session_allowed("write_file", "src/other.rs"));
+    }
+
+    #[test]
+    fn session_allow_affects_evaluate() {
+        let mut ps = PermissionService::new();
+        ps.record_allow("run_command", "*");
+        // Now unknown commands should be auto-allowed
+        let result = ps.evaluate("run_command", None, Some("custom-tool"));
+        assert_eq!(result, Some(Ok(())));
+    }
+
+    // --- Guarded mode ---
+
+    #[test]
+    fn guarded_mode_allows_read_tools() {
+        let mut ps = PermissionService::new();
+        ps.set_mode(PermissionMode::Guarded);
+        assert_eq!(ps.evaluate("read_file", Some("src/main.rs"), None), Some(Ok(())));
+    }
+
+    #[test]
+    fn guarded_mode_asks_for_write_tools() {
+        let mut ps = PermissionService::new();
+        ps.set_mode(PermissionMode::Guarded);
+        // write_file in Normal would be auto-allowed inside project,
+        // but in Guarded it should ask
+        let result = ps.evaluate("write_file", Some("src/main.rs"), None);
+        assert_eq!(result, None); // needs confirmation
+    }
+
+    #[test]
+    fn guarded_mode_sensitive_path_blocked() {
+        let mut ps = PermissionService::new();
+        ps.set_mode(PermissionMode::Guarded);
+        let result = ps.evaluate("delete_file", Some("/etc/passwd"), None);
+        assert!(result.is_some());
+        assert!(result.unwrap().is_err());
+    }
+
+    // --- register / resolve pending ---
+
+    #[test]
+    fn register_and_resolve_pending() {
+        let mut ps = PermissionService::new();
+        let (id, _rx) = ps.register_pending().unwrap();
+        assert!(!id.is_empty());
+
+        let resolved = ps.resolve_pending(&id, "test_tool", PermissionAction::Allow, false);
+        assert!(resolved);
+    }
+
+    #[test]
+    fn resolve_nonexistent_pending() {
+        let mut ps = PermissionService::new();
+        let resolved = ps.resolve_pending("nonexistent", "test", PermissionAction::Allow, false);
+        assert!(!resolved);
+    }
+
+    #[test]
+    fn resolve_with_always_records_session_allow() {
+        let mut ps = PermissionService::new();
+        let (id, _rx) = ps.register_pending().unwrap();
+        let resolved = ps.resolve_pending(&id, "write_file", PermissionAction::Allow, true);
+        assert!(resolved);
+        assert!(ps.is_session_allowed("write_file", "*"));
+    }
+
+    #[test]
+    fn resolve_deny_does_not_record_session() {
+        let mut ps = PermissionService::new();
+        let (id, _rx) = ps.register_pending().unwrap();
+        let resolved = ps.resolve_pending(&id, "write_file", PermissionAction::Deny, true);
+        assert!(resolved);
+        assert!(!ps.is_session_allowed("write_file", "*"));
+    }
+
+    // --- Helper functions ---
+
+    #[test]
+    fn is_read_only_tool_list() {
+        assert!(is_read_only_tool("read_file"));
+        assert!(is_read_only_tool("list_dir"));
+        assert!(is_read_only_tool("search_files"));
+        assert!(is_read_only_tool("glob"));
+        assert!(!is_read_only_tool("write_file"));
+        assert!(!is_read_only_tool("run_command"));
+    }
+
+    #[test]
+    fn is_write_tool_list() {
+        assert!(is_write_tool("write_file"));
+        assert!(is_write_tool("edit_file"));
+        assert!(is_write_tool("delete_file"));
+        assert!(is_write_tool("multi_edit"));
+        assert!(!is_write_tool("read_file"));
+        // run_command is write-tool (can modify files), not read_only
+        assert!(is_write_tool("run_command"));
+    }
+
+    #[test]
+    fn is_safe_command_list() {
+        assert!(is_safe_command("git status"));
+        assert!(is_safe_command("ls"));
+        assert!(is_safe_command("npm run build"));
+        assert!(is_safe_command("cargo check"));
+        assert!(!is_safe_command("git push --force origin main"));
+        assert!(!is_safe_command("rm -rf /tmp/build"));
+    }
+
+    #[test]
+    fn has_dangerous_args_detection() {
+        let ps = PermissionService::new();
+        assert!(ps.has_dangerous_args("git push --force"));
+        assert!(ps.has_dangerous_args("rm -rf build"));
+        assert!(ps.has_dangerous_args("git reset --hard"));
+        assert!(ps.has_dangerous_args("sudo systemctl restart"));
+        assert!(!ps.has_dangerous_args("git log"));
+        assert!(!ps.has_dangerous_args("npm test"));
+    }
+
+    #[test]
+    fn is_sensitive_path_detection() {
+        // Patterns with wildcards work (e.g. "*.env", "*/.ssh/id_*")
+        assert!(is_sensitive_path("/root/.ssh/id_rsa"));
+        assert!(is_sensitive_path("/home/user/.aws/credentials"));
+        assert!(!is_sensitive_path("src/main.rs"));
+        assert!(!is_sensitive_path("package.json"));
+        // Windows sensitive paths
+        assert!(is_sensitive_path("c:/windows/system32/config/sam"));
+        // .env files
+        assert!(is_sensitive_path(".env"));
+        assert!(is_sensitive_path("project/.env.production"));
+    }
+
+    #[test]
+    fn always_denied_blocks_destructive_commands() {
+        // rm -rf with sensitive paths
+        assert!(always_denied("run_command", Some("/"), Some("rm -rf /")).is_some());
+        // Force push to main/master
+        assert!(always_denied("run_command", None, Some("git push --force origin main")).is_some());
+        assert!(always_denied("run_command", None, Some("git push -f origin master")).is_some());
+        // Safe commands not blocked
+        assert!(always_denied("run_command", None, Some("git status")).is_none());
+    }
+
+    #[test]
+    fn is_outside_project_detection() {
+        #[cfg(windows)]
+        {
+            // On Windows, the heuristic is: path contains ":\Users\" and not ":\project"
+            assert!(is_outside_project("C:\\Users\\Admin\\Documents\\other.txt"));
+            assert!(!is_outside_project("C:\\project\\src\\main.rs"));
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(is_outside_project("/etc/passwd"));
+            assert!(is_outside_project("/tmp/other/file.txt"));
+        }
+    }
 }

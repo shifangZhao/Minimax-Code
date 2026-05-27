@@ -447,7 +447,7 @@ impl McpService {
         std::path::PathBuf::from(workspace).join(".minimaxcode")
     }
 
-    fn load_config_at(dir: &std::path::PathBuf) -> McpConfig {
+    fn load_config_at(dir: &std::path::Path) -> McpConfig {
         let path = dir.join("mcp.json");
         if !path.exists() {
             return McpConfig { mcp_servers: HashMap::new() };

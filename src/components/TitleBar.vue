@@ -11,7 +11,6 @@
       </button>
     </div>
     <div class="window-controls">
-      <ModeSwitcher class="inline-mode-switcher" />
       <div class="theme-picker">
         <button class="control-btn theme" @click="themeOpen = !themeOpen" @mouseenter="openTheme" @mouseleave="scheduleClose" title="主题">
           <svg v-if="theme === 'dark'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
@@ -50,7 +49,6 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import ModeSwitcher from './ModeSwitcher.vue'
 
 defineEmits<{
   (e: 'openSettings'): void
@@ -184,20 +182,6 @@ if (theme.value !== 'dark') {
 .control-btn.close:hover {
   background-color: #e81123;
   color: white;
-}
-
-.inline-mode-switcher {
-  margin: 0 4px;
-}
-
-.inline-mode-switcher :deep(.mode-switcher) {
-  margin: 0;
-  padding: 2px;
-}
-
-.inline-mode-switcher :deep(.mode-btn) {
-  padding: 4px 10px;
-  font-size: 12px;
 }
 
 .theme-picker {

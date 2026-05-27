@@ -11,6 +11,7 @@ export interface AgentSession {
   id: number
   group_chat_id: number
   agent_type: string
+  worktree_path?: string
   created_at: string
 }
 
@@ -30,7 +31,7 @@ export interface MessagePart {
 }
 
 export interface ChatMessage {
-  id: number
+  id: number | string
   session_id: number
   role: MessageRole
   content: string
@@ -265,5 +266,13 @@ export const db = {
 
   async modifyFiles(files: Array<{ path: string; new_content?: string; replacements: Array<{ find: string; replace: string }> }>): Promise<Array<{ path: string; success: boolean; error?: string }>> {
     return invoke('modify_files', { files })
+  },
+
+  async createWorktree(groupChatId: number, agentSessionId: number, branchName: string, baseDir: string): Promise<string> {
+    return invoke('create_worktree', { groupChatId, agentSessionId, branchName, baseDir })
+  },
+
+  async mergeWorktree(agentSessionId: number, worktreePath: string, message: string, baseDir: string): Promise<string> {
+    return invoke('merge_worktree', { agentSessionId, worktreePath, message, baseDir })
   },
 }

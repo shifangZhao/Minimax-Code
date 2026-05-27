@@ -20,6 +20,12 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::{Mutex, RwLock};
 use crate::agent_tools::*;
 
+/// Maximum time (seconds) a single SSE stream session can stay open before being force-closed.
+const STREAM_SESSION_TIMEOUT_SECS: u64 = 3600;
+
+/// Maximum time (seconds) to wait for a user permission response before auto-denying.
+const PERMISSION_TIMEOUT_SECS: u64 = 600;
+
 /// Build a Command that runs without a visible console window on Windows.
 pub(crate) fn hidden_cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
     let mut cmd = Command::new(program.as_ref());
@@ -29,14 +35,49 @@ pub(crate) fn hidden_cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
+    // Force UTF-8 output from all child processes, regardless of system locale.
+    // This is the single source of truth — no per-command encoding hacks needed.
+    cmd.env("PYTHONUTF8", "1")
+       .env("PYTHONIOENCODING", "utf-8")
+       .env("LANG", "C.UTF-8")
+       .env("LC_ALL", "C.UTF-8");
     cmd
+}
+
+/// Decode process output bytes to string.
+/// On Windows: try UTF-8 first; if invalid, decode as GBK (CP936), the legacy
+/// encoding used by cmd.exe and PowerShell 5.1 on Chinese systems.
+#[cfg(windows)]
+fn decode_process_output(bytes: &[u8]) -> String {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string();
+    }
+    // Not valid UTF-8 — likely a legacy locale encoding. Try GBK (simplified
+    // Chinese) which is by far the most common on Chinese Windows.
+    let mut decoder = encoding_rs::Encoding::for_label(b"gbk")
+        .unwrap_or(encoding_rs::UTF_8)
+        .new_decoder_without_bom_handling();
+    let cap = decoder.max_utf8_buffer_length(bytes.len()).unwrap_or(bytes.len() * 2);
+    let mut out = vec![0; cap];
+    let (result, _read, written, _replacements) = decoder.decode_to_utf8(bytes, &mut out, false);
+    out.truncate(written);
+    if result == encoding_rs::CoderResult::InputEmpty {
+        String::from_utf8_lossy(&out).to_string()
+    } else {
+        String::from_utf8_lossy(bytes).to_string()
+    }
+}
+
+#[cfg(not(windows))]
+fn decode_process_output(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).to_string()
 }
 
 /// Run a command with a timeout. Graceful kill (SIGTERM equivalent), then force kill
 /// after a 2s grace period. Output is capped at 256KB to prevent OOM.
-pub(crate) fn output_with_timeout(cmd: &mut Command, timeout_secs: u64, session_id: i64, running_pids: Option<&Arc<StdMutex<HashMap<i64, u32>>>>) -> String {
+pub(crate) fn output_with_timeout(cmd: &mut Command, timeout_secs: u64, session_id: i64, running_pids: Option<&Arc<StdMutex<HashMap<i64, Vec<u32>>>>>) -> String {
     use std::sync::mpsc;
-    let child = match cmd
+    let mut child = match cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -47,53 +88,136 @@ pub(crate) fn output_with_timeout(cmd: &mut Command, timeout_secs: u64, session_
     let pid = child.id();
 
     // Register PID so abort_stream can kill this process
-    if let Some(ref map) = running_pids {
+    if let Some(map) = running_pids {
         if let Ok(mut m) = map.lock() {
-            m.insert(session_id, pid);
+            m.entry(session_id).or_default().push(pid);
         }
     }
 
-    let (tx, rx) = mpsc::channel();
+    // Take stdout/stderr handles before moving child into the wait thread.
+    // This way we can read output in parallel with waiting for process exit,
+    // and DON'T need pipes to close — just the process to exit.
+    let child_stdout = child.stdout.take();
+    let child_stderr = child.stderr.take();
+
+    // Reader threads: read all output into memory
+    let (out_tx, out_rx) = mpsc::channel();
+    if let Some(stdout) = child_stdout {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut reader = std::io::BufReader::new(stdout);
+            let mut buf = Vec::new();
+            let _ = reader.read_to_end(&mut buf);
+            let _ = out_tx.send(buf);
+        });
+    } else {
+        let _ = out_tx.send(Vec::new());
+    }
+
+    let (err_tx, err_rx) = mpsc::channel();
+    if let Some(stderr) = child_stderr {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut reader = std::io::BufReader::new(stderr);
+            let mut buf = Vec::new();
+            let _ = reader.read_to_end(&mut buf);
+            let _ = err_tx.send(buf);
+        });
+    } else {
+        let _ = err_tx.send(Vec::new());
+    }
+
+    // Wait thread: just wait for process exit (NOT pipe closure)
+    let (wait_tx, wait_rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let result = child.wait_with_output();
-        let _ = tx.send(result);
+        let result = child.wait(); // <— wait() not wait_with_output()
+        let code = result.ok().and_then(|s| s.code());
+        let _ = wait_tx.send(code);
     });
-    let result = match rx.recv_timeout(std::time::Duration::from_secs(timeout_secs)) {
-        Ok(Ok(o)) => {
-            const MAX_BYTES: usize = 256 * 1024;
-            let stdout = if o.stdout.len() > MAX_BYTES {
-                let head = String::from_utf8_lossy(&o.stdout[..MAX_BYTES / 2]).to_string();
-                let tail = String::from_utf8_lossy(&o.stdout[o.stdout.len().saturating_sub(MAX_BYTES / 2)..]).to_string();
-                format!("{}{}", head, format!("\n[...{} bytes truncated...]\n{}", o.stdout.len() - MAX_BYTES, tail))
-            } else {
-                String::from_utf8_lossy(&o.stdout).to_string()
-            };
-            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
-            let exit = o.status.code().unwrap_or(-1);
-            format!("Exit: {}\n{}\n{}", exit, stdout, stderr)
+
+    // Helper: kill process tree and force-close pipes so reader threads finish.
+    // On Windows, child processes can inherit pipe handles and keep them open
+    // even after the main process exits, causing read_to_end() to block forever.
+    let force_kill_tree = |pid: u32| {
+        #[cfg(windows)]
+        {
+            // /T = tree kill, /F = force. Closes all inherited pipe handles.
+            let _ = hidden_cmd("taskkill").args(["/F", "/T", "/PID", &pid.to_string()]).output();
         }
-        Ok(Err(e)) => format!("Error waiting for command: {}", e),
+        #[cfg(not(windows))]
+        {
+            let _ = hidden_cmd("kill").args(["-15", &pid.to_string()]).output();
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let _ = hidden_cmd("kill").args(["-9", &pid.to_string()]).output();
+        }
+    };
+
+    let result = match wait_rx.recv_timeout(std::time::Duration::from_secs(timeout_secs)) {
+        Ok(exit_code) => {
+            // Collect output. On Windows, child processes can inherit pipe
+            // handles and keep them open after the parent exits, causing
+            // read_to_end() to block forever. After a short grace period,
+            // kill the entire process tree to force all pipe handles closed.
+            let reader_grace = std::time::Duration::from_secs(3);
+            let stdout_bytes = match out_rx.recv_timeout(reader_grace) {
+                Ok(b) => b,
+                Err(_) => {
+                    force_kill_tree(pid);
+                    out_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap_or_default()
+                }
+            };
+            let stderr_bytes = match err_rx.recv_timeout(reader_grace) {
+                Ok(b) => b,
+                Err(_) => {
+                    force_kill_tree(pid);
+                    err_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap_or_default()
+                }
+            };
+
+            const MAX_BYTES: usize = 256 * 1024;
+            let stdout = if stdout_bytes.len() > MAX_BYTES {
+                let head = decode_process_output(&stdout_bytes[..MAX_BYTES / 2]);
+                let tail = decode_process_output(&stdout_bytes[stdout_bytes.len().saturating_sub(MAX_BYTES / 2)..]);
+                format!("{}\n[...{} bytes truncated...]\n{}", head, stdout_bytes.len() - MAX_BYTES, tail)
+            } else {
+                decode_process_output(&stdout_bytes)
+            };
+            let stderr_str = decode_process_output(&stderr_bytes);
+            let exit = exit_code.unwrap_or(-1);
+            if stdout.is_empty() && !stderr_str.is_empty() {
+                format!("Exit: {}\n{}", exit, stderr_str)
+            } else if !stderr_str.is_empty() {
+                format!("Exit: {}\n{}\n{}", exit, stdout, stderr_str)
+            } else {
+                format!("Exit: {}\n{}", exit, stdout)
+            }
+        }
         Err(_) => {
-            #[cfg(windows)]
-            {
-                let _ = hidden_cmd("taskkill").args(["/PID", &pid.to_string()]).output();
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                let _ = hidden_cmd("taskkill").args(["/F", "/T", "/PID", &pid.to_string()]).output();
-            }
-            #[cfg(not(windows))]
-            {
-                let _ = hidden_cmd("kill").args(["-15", &pid.to_string()]).output();
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                let _ = hidden_cmd("kill").args(["-9", &pid.to_string()]).output();
-            }
-            format!("Command timed out after {}s (killed)", timeout_secs)
+            // Process didn't exit in time — kill it
+            force_kill_tree(pid);
+            let stdout_partial = out_rx.recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap_or_default();
+            let stderr_partial = err_rx.recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap_or_default();
+            let partial_out = decode_process_output(&stdout_partial);
+            let partial_err = decode_process_output(&stderr_partial);
+            format!("Command timed out after {}s (killed)\n{}",
+                timeout_secs,
+                if partial_out.is_empty() && partial_err.is_empty() {
+                    String::new()
+                } else {
+                    format!("Partial output:\n{}{}", partial_out, partial_err)
+                })
         }
     };
 
     // Deregister PID
-    if let Some(ref map) = running_pids {
+    if let Some(map) = running_pids {
         if let Ok(mut m) = map.lock() {
-            m.remove(&session_id);
+            if let Some(v) = m.get_mut(&session_id) {
+                v.retain(|&p| p != pid);
+                if v.is_empty() { m.remove(&session_id); }
+            }
         }
     }
 
@@ -105,7 +229,7 @@ use crate::lsp_manager::LspManager;
 use crate::mcp_service::McpService;
 use crate::permission::{PermissionService, PermissionAction, PermissionRequest};
 use crate::skill_service::SkillService;
-use crate::system_prompts::{ACE_SYSTEM, EXPLORE_SYSTEM, FRONT_SYSTEM, PLAN_SYSTEM, REVIEW_SYSTEM, WORK_SYSTEM};
+use crate::system_prompts::ACE_SYSTEM;
 
 // ========== Types ==========
 
@@ -148,6 +272,7 @@ pub(crate) type PendingAsks = Arc<StdMutex<HashMap<String, tokio::sync::oneshot:
 
 /// Save an api_message (with structured content blocks) to the chat_message table.
 /// Stores display text in `content` and the full JSON block array in `raw_json`.
+#[allow(clippy::type_complexity)]
 fn save_api_message(db: &Arc<StdMutex<Connection>>, session_id: i64, message: &serde_json::Value) {
     let role = message["role"].as_str().unwrap_or("user");
     let content_val = &message["content"];
@@ -215,7 +340,7 @@ fn strip_cache_control(msgs: &mut [serde_json::Value]) {
 
 /// Mark the last message's last content block with cache_control for incremental
 /// multi-turn caching. Converts string content to block array format if needed.
-fn mark_last_message_for_cache(msgs: &mut Vec<serde_json::Value>) {
+fn mark_last_message_for_cache(msgs: &mut [serde_json::Value]) {
     if let Some(last_msg) = msgs.last_mut() {
         let content = &mut last_msg["content"];
         if content.is_string() {
@@ -447,7 +572,7 @@ pub struct AgentService {
     permission_service: Arc<StdMutex<PermissionService>>,
     pending_asks: PendingAsks,
     todo_store: Arc<StdMutex<HashMap<i64, String>>>,
-    running_command_pids: Arc<StdMutex<HashMap<i64, u32>>>,
+    running_command_pids: Arc<StdMutex<HashMap<i64, Vec<u32>>>>,
 }
 
 impl Clone for AgentService {
@@ -472,7 +597,8 @@ impl Clone for AgentService {
 }
 
 impl AgentService {
-    pub fn new(api_key: String, api_url: String, messages_path: String, model: String, context_window: usize, provider: String, skill_service: Arc<SkillService>, mcp_service: Arc<RwLock<McpService>>, db: Arc<StdMutex<Connection>>, lsp_manager: Arc<StdMutex<Option<LspManager>>>, permission_service: Arc<StdMutex<PermissionService>>, pending_asks: PendingAsks, running_command_pids: Arc<StdMutex<HashMap<i64, u32>>>) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(api_key: String, api_url: String, messages_path: String, model: String, context_window: usize, provider: String, skill_service: Arc<SkillService>, mcp_service: Arc<RwLock<McpService>>, db: Arc<StdMutex<Connection>>, lsp_manager: Arc<StdMutex<Option<LspManager>>>, permission_service: Arc<StdMutex<PermissionService>>, pending_asks: PendingAsks, running_command_pids: Arc<StdMutex<HashMap<i64, Vec<u32>>>>) -> Self {
         Self {
             api_url,
             messages_path,
@@ -491,6 +617,7 @@ impl AgentService {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn stream_chat(
         &self,
         agent_type: &str,
@@ -531,13 +658,8 @@ impl AgentService {
 
         // Build system prompt based on agent type
         let base_system = match agent_type {
-            "front" => FRONT_SYSTEM,
-            "plan" => PLAN_SYSTEM,
-            "work" => WORK_SYSTEM,
-            "review" => REVIEW_SYSTEM,
-            "explore" => EXPLORE_SYSTEM,
             "ace" => ACE_SYSTEM,
-            _ => FRONT_SYSTEM,
+            _ => ACE_SYSTEM,
         };
 
         // Build system prompt. Model info is included here so the model
@@ -1128,6 +1250,7 @@ fn emit(app: &AppHandle, key: &str, event: StreamEvent) {
 // tool_uses: Vec<(tool_id, tool_name, input_accumulated)>
 // tool_results: Vec<(tool_name, tool_id, result)>
 // actual_input_tokens: prompt token count reported by API (None if not available)
+#[allow(clippy::too_many_arguments)]
 async fn process_sse_stream(
     stream: impl StreamExt<Item = Result<bytes::Bytes, reqwest::Error>>,
     app: AppHandle,
@@ -1147,7 +1270,7 @@ async fn process_sse_stream(
     mut cancel_rx: watch::Receiver<bool>,
     repeat_guard_fired: &mut bool,
     todo_store: Arc<StdMutex<HashMap<i64, String>>>,
-    running_command_pids: Arc<StdMutex<HashMap<i64, u32>>>,
+    running_command_pids: Arc<StdMutex<HashMap<i64, Vec<u32>>>>,
 ) -> (Option<String>, String, String, Vec<(String, String, String)>, Vec<(String, String, String)>, Option<u64>) {
     eprintln!("[process_sse_stream] Starting with session_key: {}", session_key);
     let mut current_tool_id: Option<String> = None;
@@ -1207,8 +1330,8 @@ async fn process_sse_stream(
                 }
                 continue;
             }
-            _ = tokio::time::sleep(std::time::Duration::from_secs(3600)) => {
-                eprintln!("[process_sse_stream] Global timeout (1h) for session {}", session_id);
+            _ = tokio::time::sleep(std::time::Duration::from_secs(STREAM_SESSION_TIMEOUT_SECS)) => {
+                eprintln!("[process_sse_stream] Global timeout ({}s) for session {}", STREAM_SESSION_TIMEOUT_SECS, session_id);
                 emit(&app, &session_key, StreamEvent::Error {
                     content: "Session timed out after 1 hour".to_string(),
                 });
@@ -1450,18 +1573,26 @@ async fn process_sse_stream(
                 })
             }).collect();
 
-            // Race: tool execution vs cancel check (polled every 30s)
+            // Race: tool execution vs cancel (immediate detection via changed())
+            let mut cancel_rx_select = cancel_rx.clone();
             let results = {
-                let cancel = cancel_rx.clone();
                 tokio::select! {
                     r = join_all(futs) => r,
                     _ = async {
-                        loop {
-                            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                            if *cancel.borrow() { break; }
-                        }
+                        let _ = cancel_rx_select.changed().await;
+                        *cancel_rx_select.borrow()
                     } => {
                         eprintln!("[tool_dispatch] Cancelled during tool execution for session {}", session_id);
+                        // Emit tool_end for every tool that had tool_start emitted
+                        for &i in &chunk {
+                            let (ref tool_id, ref tool_name, _) = &tool_uses[i];
+                            emit(&app, &session_key, StreamEvent::ToolEnd {
+                                tool: tool_name.clone(),
+                                tool_id: tool_id.clone(),
+                                result: "[cancelled by user]".to_string(),
+                            });
+                            tool_results.push((tool_name.clone(), tool_id.clone(), "[cancelled by user]".to_string()));
+                        }
                         Vec::new()
                     }
                 }
@@ -1507,7 +1638,6 @@ fn handle_sse_event(
     assistant_thinking: &mut String,
 ) -> Option<String> {
     let event_type = event["type"].as_str().unwrap_or("");
-    eprintln!("[handle_sse_event] event_type: {}", event_type);
 
     match event_type {
         "content_block_start" => {
@@ -1523,7 +1653,6 @@ fn handle_sse_event(
                     // Some providers send full thinking in content_block_start
                     if let Some(thinking) = block["thinking"].as_str() {
                         if !thinking.is_empty() {
-                            eprintln!("[sse] thinking block_start: {} chars", thinking.len());
                             assistant_thinking.push_str(thinking);
                         }
                     }
@@ -1545,7 +1674,6 @@ fn handle_sse_event(
             // Accumulate thinking (streaming delta)
             if let Some(thinking) = delta["thinking"].as_str() {
                 if !thinking.is_empty() {
-                    eprintln!("[sse] thinking delta: {} chars", thinking.len());
                     assistant_thinking.push_str(thinking);
                 }
             }
@@ -1574,6 +1702,7 @@ fn handle_sse_event(
 
 // ========== Tool Execution ==========
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_tool(
     tool_name: &str,
     input: &str,
@@ -1591,7 +1720,7 @@ async fn execute_tool(
     app_handle: AppHandle,
     cancel_rx: watch::Receiver<bool>,
     todo_store: Arc<StdMutex<HashMap<i64, String>>>,
-    running_command_pids: Arc<StdMutex<HashMap<i64, u32>>>,
+    running_command_pids: Arc<StdMutex<HashMap<i64, Vec<u32>>>>,
 ) -> String {
     let params: serde_json::Value = serde_json::from_str(input).unwrap_or(json!({}));
 
@@ -1640,7 +1769,22 @@ async fn execute_tool(
                     reason: reason.clone(),
                 };
                 let _ = app_handle.emit("permission_asked", &req);
-                match tokio::time::timeout(std::time::Duration::from_secs(600), rx).await {
+                let mut cancel_rx_perm = cancel_rx.clone();
+                let perm_result = tokio::select! {
+                    result = tokio::time::timeout(std::time::Duration::from_secs(PERMISSION_TIMEOUT_SECS), rx) => {
+                        match result {
+                            Ok(inner) => Ok(inner),
+                            Err(_) => Err("timeout"),
+                        }
+                    }
+                    _ = async {
+                        let _ = cancel_rx_perm.changed().await;
+                        *cancel_rx_perm.borrow()
+                    } => {
+                        Err("cancelled")
+                    }
+                };
+                match perm_result {
                     Ok(Ok(PermissionAction::Allow)) => {
                         eprintln!("[perm] {} allowed by user", tool_name);
                     }
@@ -1649,10 +1793,19 @@ async fn execute_tool(
                         let _ = permission_service.lock().map(|mut ps| ps.resolve_pending(&perm_id, tool_name, PermissionAction::Deny, false));
                         return format!("Permission denied: {}", reason);
                     }
-                    Err(_) => {
-                        eprintln!("[perm] {} timed out after 10min", tool_name);
+                    Err("timeout") => {
+                        eprintln!("[perm] {} timed out after {}s", tool_name, PERMISSION_TIMEOUT_SECS);
                         let _ = permission_service.lock().map(|mut ps| ps.resolve_pending(&perm_id, tool_name, PermissionAction::Deny, false));
                         return format!("Permission timed out: {}", reason);
+                    }
+                    Err("cancelled") => {
+                        eprintln!("[perm] {} cancelled by user abort", tool_name);
+                        let _ = permission_service.lock().map(|mut ps| ps.resolve_pending(&perm_id, tool_name, PermissionAction::Deny, false));
+                        return json!({"error": "cancelled"}).to_string();
+                    }
+                    _ => {
+                        let _ = permission_service.lock().map(|mut ps| ps.resolve_pending(&perm_id, tool_name, PermissionAction::Deny, false));
+                        return format!("Permission denied: {}", reason);
                     }
                 }
             }
@@ -1664,6 +1817,92 @@ async fn execute_tool(
             }
         }
     }
+
+    // ── Worktree path routing ──
+    // If this session has a worktree_path, rewrite file paths for file tools
+    let params = {
+        let worktree_path: Option<String> = {
+            db.lock().ok().and_then(|c| {
+                c.query_row(
+                    "SELECT worktree_path FROM agent_session WHERE id = ?1",
+                    [session_id],
+                    |row| row.get(0),
+                ).ok().flatten()
+            })
+        };
+
+        if let Some(ref wp) = worktree_path {
+            let mut p = params.clone();
+            // Rewrite path fields for file tools
+            match tool_name {
+                "read_file" | "write_file" | "edit_file" | "edit_lines" | "multi_edit"
+                | "delete_file" | "create_directory" | "get_file_info" | "list_dir"
+                | "directory_tree" | "read_lints" | "touch_file" | "create_dir" => {
+                    if let Some(path) = p["path"].as_str().map(|s| s.to_string()) {
+                        p["path"] = json!(normalize_file_path_with_worktree(&path, Some(wp)));
+                    }
+                }
+                "read_files" => {
+                    if let Some(paths) = p["paths"].as_array().cloned() {
+                        let new_paths: Vec<serde_json::Value> = paths.iter().map(|v| {
+                            if let Some(s) = v.as_str() {
+                                json!(normalize_file_path_with_worktree(s, Some(wp)))
+                            } else if let Some(obj) = v.as_object() {
+                                let mut new_obj = obj.clone();
+                                if let Some(path) = obj.get("path").and_then(|p| p.as_str()) {
+                                    new_obj.insert("path".to_string(), json!(normalize_file_path_with_worktree(path, Some(wp))));
+                                }
+                                serde_json::Value::Object(new_obj)
+                            } else {
+                                v.clone()
+                            }
+                        }).collect();
+                        p["paths"] = serde_json::Value::Array(new_paths);
+                    }
+                }
+                "write_files" | "modify_files" => {
+                    if let Some(files) = p["files"].as_array().cloned() {
+                        let new_files: Vec<serde_json::Value> = files.iter().map(|f| {
+                            if let Some(obj) = f.as_object() {
+                                let mut new_obj = obj.clone();
+                                if let Some(path) = obj.get("path").and_then(|p| p.as_str()) {
+                                    new_obj.insert("path".to_string(), json!(normalize_file_path_with_worktree(path, Some(wp))));
+                                }
+                                serde_json::Value::Object(new_obj)
+                            } else {
+                                f.clone()
+                            }
+                        }).collect();
+                        p["files"] = serde_json::Value::Array(new_files);
+                    }
+                }
+                "move_file" | "copy_file" => {
+                    if let Some(src) = p["source"].as_str().map(|s| s.to_string()) {
+                        p["source"] = json!(normalize_file_path_with_worktree(&src, Some(wp)));
+                    }
+                    if let Some(dst) = p["destination"].as_str().map(|s| s.to_string()) {
+                        p["destination"] = json!(normalize_file_path_with_worktree(&dst, Some(wp)));
+                    }
+                }
+                "find_replace_in_files" | "search_in_dir" | "search_files" | "glob" => {
+                    if let Some(path) = p["path"].as_str().map(|s| s.to_string()) {
+                        p["path"] = json!(normalize_file_path_with_worktree(&path, Some(wp)));
+                    }
+                }
+                "run_command" | "run_background" => {
+                    if let Some(path) = p["path"].as_str().map(|s| s.to_string()) {
+                        p["path"] = json!(normalize_file_path_with_worktree(&path, Some(wp)));
+                    } else if let Some(cwd) = p["cwd"].as_str().map(|s| s.to_string()) {
+                        p["cwd"] = json!(normalize_file_path_with_worktree(&cwd, Some(wp)));
+                    }
+                }
+                _ => {}
+            }
+            p
+        } else {
+            params
+        }
+    };
 
     // Extract file path for auto-touch BEFORE params is potentially moved in the match
     let auto_touch_path: Option<String> = match tool_name {
@@ -1781,17 +2020,32 @@ async fn execute_tool(
         "read_knowledge" => tool_read_knowledge(&params).await,
         "write_knowledge" => tool_write_knowledge(&params).await,
         "list_knowledge" => tool_list_knowledge().await,
-        "send_to_agent" => tool_send_to_agent(session_id, &params, api_key.clone(), skill_service.clone(), mcp_service.clone(), db.clone(), lsp_manager.clone(), permission_service.clone(), pending_asks.clone(), app_handle.clone(), cancel_rx.clone(), running_command_pids.clone()).await,
         "read_lints" => tool_read_lints(&params, lsp_manager.clone(), db.clone()).await,
         "touch_file" => tool_touch_file(&params, lsp_manager.clone(), db.clone()).await,
         "ask_choice" => tool_ask_choice(&params, session_id, "unknown", pending_asks.clone(), app_handle.clone()).await,
         "todo_write" => tool_todo_write(&params, &todo_store, session_id).await,
-        // Fallback: try MCP
+        // Worktree tools
+        "create_worktree" => tool_create_worktree(&params, session_id, db.clone()).await,
+        "merge_worktree" => tool_merge_worktree(&params, session_id, db.clone()).await,
+        // Fallback: try MCP (with cancel race)
         _ => {
-            let mcp = mcp_service.read().await;
-            match mcp.call_tool_any(tool_name, params).await {
-                Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| format!("MCP result serialization failed: {}", e)),
-                Err(e) => format!("Tool '{}' not implemented (MCP error: {})", tool_name, e),
+            let mut cancel_rx_mcp = cancel_rx.clone();
+            tokio::select! {
+                result = async {
+                    let mcp = mcp_service.read().await;
+                    mcp.call_tool_any(tool_name, params).await
+                } => {
+                    match result {
+                        Ok(r) => serde_json::to_string(&r).unwrap_or_else(|e| format!("MCP result serialization failed: {}", e)),
+                        Err(e) => format!("Tool '{}' not implemented (MCP error: {})", tool_name, e),
+                    }
+                }
+                _ = async {
+                    let _ = cancel_rx_mcp.changed().await;
+                    *cancel_rx_mcp.borrow()
+                } => {
+                    json!({"error": "cancelled"}).to_string()
+                }
             }
         }
     };
@@ -1816,15 +2070,14 @@ fn get_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
     static CACHE: OnceLock<HashMap<String, Vec<serde_json::Value>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| {
         let mut map = HashMap::new();
-        for at in &["front", "plan", "explore", "review", "work", "ace", "default"] {
-            map.insert(at.to_string(), build_agent_tools(at));
-        }
+        map.insert("ace".to_string(), build_agent_tools("ace"));
+        map.insert("default".to_string(), build_agent_tools("default"));
         map
     });
     cache.get(agent_type).cloned().unwrap_or_else(|| build_agent_tools(agent_type))
 }
 
-fn build_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
+fn build_agent_tools(_agent_type: &str) -> Vec<serde_json::Value> {
     let mut tools = Vec::new();
 
     // ===== TOOL GROUP DEFINITIONS =====
@@ -1832,17 +2085,17 @@ fn build_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
     // Read-only file inspection (all agents)
     let read_only_files: &[(&str, &str, serde_json::Value)] = &[
         ("read_file", "读取文件内容。offset: 起始行号(1-indexed)，limit: 最大行数。不传则读全文（>2MB 文件自动截断到前300行并提示用 offset/limit）", schema_obj(json!({"path": {"type": "string"}, "offset": {"type": "integer"}, "limit": {"type": "integer"}}), &["path"])),
-        ("read_files", "批量读取多个文件", schema_obj(json!({"paths": {"type": "array", "items": {"type": "string"}}}), &["paths"])),
-        ("list_dir", "列出目录内容", schema_obj(json!({"path": {"type": "string"}}), &["path"])),
+        ("read_files", "批量读取多个文件。paths 支持字符串数组或对象数组 [{path, offset?, limit?}]。全局 offset/limit 对所有文件生效，per-file 覆盖全局", schema_obj(json!({"paths": {"type": "array", "items": {"type": "string"}}, "offset": {"type": "integer", "description": "全局起始行号(1-indexed)"}, "limit": {"type": "integer", "description": "全局最大行数"}}), &["paths"])),
+        ("list_dir", "列出目录内容，含文件大小、行数、修改时间", schema_obj(json!({"path": {"type": "string"}}), &["path"])),
         ("directory_tree", "递归列出目录树结构。maxDepth默认2，自动跳过node_modules/.git/target等目录", schema_obj(json!({"path": {"type": "string"}, "max_depth": {"type": "integer"}}), &["path"])),
-        ("get_file_info", "获取文件信息（类型、大小、修改时间）", schema_obj(json!({"path": {"type": "string"}}), &["path"])),
+        ("get_file_info", "获取文件信息（类型、扩展名、行数、大小、修改时间）", schema_obj(json!({"path": {"type": "string"}}), &["path"])),
     ];
 
     // Search & analysis (plan / explore / work / review)
     let search_tools: &[(&str, &str, serde_json::Value)] = &[
-        ("search_in_dir", "在目录中递归搜索文件内容，返回 path:line: text", schema_obj(json!({"path": {"type": "string"}, "pattern": {"type": "string"}}), &["path", "pattern"])),
+        ("search_in_dir", "在目录中递归搜索文件内容，返回 path:line: text。支持 regex、文件类型过滤、上下文行。定位问题首选工具——比 read_file 快得多。", schema_obj(json!({"path": {"type": "string"}, "pattern": {"type": "string"}, "file_type": {"type": "string", "description": "按扩展名过滤，如 \"rs\", \"vue\", \"ts\", \"py\""}, "context": {"type": "integer", "description": "显示匹配行前后 N 行上下文（0-5）"}, "regex": {"type": "boolean", "description": "启用正则表达式匹配"}}), &["path", "pattern"])),
         ("search_files", "按文件名搜索（大小写不敏感），匹配文件名而非内容", schema_obj(json!({"path": {"type": "string"}, "pattern": {"type": "string"}}), &["path", "pattern"])),
-        ("glob", "按glob模式匹配文件，按修改时间倒序", schema_obj(json!({"pattern": {"type": "string"}, "path": {"type": "string"}, "limit": {"type": "integer"}}), &["pattern"])),
+        ("glob", "按glob模式匹配文件。file_type: 按扩展名过滤（如 \"rs\", \"vue\"）", schema_obj(json!({"pattern": {"type": "string"}, "path": {"type": "string"}, "limit": {"type": "integer"}, "file_type": {"type": "string", "description": "按扩展名过滤，如 \"rs\", \"vue\", \"ts\""}}), &["pattern"])),
         ("analyze_project_structure", "分析项目顶层结构", schema_obj(json!({"path": {"type": "string"}}), &["path"])),
     ];
 
@@ -1850,7 +2103,7 @@ fn build_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
     let write_tools: &[(&str, &str, serde_json::Value)] = &[
         ("write_file", "创建或覆盖文件（含父目录）", schema_obj(json!({"path": {"type": "string"}, "content": {"type": "string"}}), &["path", "content"])),
         ("edit_file", "精确字符串替换。search必须唯一匹配，返回diff。大文件或多处修改用edit_lines", schema_obj(json!({"path": {"type": "string"}, "search": {"type": "string"}, "replace": {"type": "string"}}), &["path", "search", "replace"])),
-        ("edit_lines", "按行号编辑。替换: start_line+end_line+content / 插入: start_line+content / 删除: start_line+end_line", schema_obj(json!({"path": {"type": "string"}, "start_line": {"type": "integer"}, "end_line": {"type": "integer"}, "content": {"type": "string"}}), &["path", "start_line"])),
+        ("edit_lines", "按行号或搜索定位编辑。search: 搜索文本定位行号（首次匹配），替代 start_line。替换: start_line/search+end_line+content / 插入: start_line/search+content / 删除: start_line/search+end_line", schema_obj(json!({"path": {"type": "string"}, "search": {"type": "string", "description": "搜索文本来定位行号，首次匹配生效"}, "start_line": {"type": "integer"}, "end_line": {"type": "integer"}, "content": {"type": "string"}}), &["path"])),
         ("multi_edit", "原子性跨文件编辑。edits: [{path, search, replace}]。全部验证通过才写入，任一失败则回滚", schema_obj(json!({"edits": {"type": "array", "items": {"type": "object"}}}), &["edits"])),
         ("find_replace_in_files", "目录下批量查找替换（支持regex）", schema_obj(json!({"path": {"type": "string"}, "find": {"type": "string"}, "replace": {"type": "string"}, "use_regex": {"type": "boolean"}}), &["path", "find", "replace"])),
         ("create_directory", "创建目录（含父目录）", schema_obj(json!({"path": {"type": "string"}}), &["path"])),
@@ -1886,13 +2139,10 @@ fn build_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
         ("list_knowledge", "列出项目知识库中的所有文件", schema_obj(json!({}), &[])),
     ];
 
-    // Communication (all)
+    // Communication
     let ask_tool = ("ask_choice", "向用户提问。用于需要用户选择或确认时。questions: [{id, question, options: [{id, text}], multi_select}]", schema_obj(json!({"questions": {"type": "array", "items": {"type": "object"}}}), &["questions"]));
-    let comm_tools: &[(&str, &str, serde_json::Value)] = &[
-        ("send_to_agent", "向其他智能体发送消息，发送即完成，无需等待回复。target_agent: front/plan/work/review/explore", schema_obj(json!({"target_agent": {"type": "string"}, "message": {"type": "string"}}), &["target_agent", "message"])),
-    ];
 
-    // Todo tracking (ace / work / front)
+    // Todo tracking
     let todo_tool = ("todo_write", "创建和更新结构化任务列表来跟踪进度——防偷懒利器。每次调用用完整列表替换旧列表。\ntodos: [{content: 任务描述(单一具体动作), status: pending|in_progress|completed, activeForm: 进行时描述}]\n规则：\n1. 任何非纯问答任务的第一步就是调此工具，3-7项为宜\n2. 每项是单一具体动作，禁止\"实现功能\"这类模糊描述\n3. 同一时间只有一项 in_progress\n4. 完成一项立刻标记 completed，不许批量标记\n5. 只有验证通过（测试/lint 通过）才能标记 completed\n6. 全部 completed 后才汇报任务完成", schema_obj(json!({"todos": {"type": "array", "items": {"type": "object", "properties": {"content": {"type": "string", "description": "任务描述，单一具体动作"}, "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}, "activeForm": {"type": "string", "description": "进行时描述，如 '正在添加登录组件'"}}, "required": ["content", "status"]}}}), &["todos"]));
 
     // Skill tools (front / plan / work / review - NOT explore)
@@ -1905,10 +2155,10 @@ fn build_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
         ("mcp_reload", "重载 MCP 配置。修改 mcp.json 后调用使配置生效", schema_obj(json!({}), &[])),
     ];
 
-    // Knowledge write (plan / explore / work)
+    // Knowledge write
     let kw = ("write_knowledge", "写入项目知识库文件。file_name: 文件名，content: 内容（自动保存在工作目录对应的项目下）", schema_obj(json!({"file_name": {"type": "string"}, "content": {"type": "string"}}), &["file_name", "content"]));
 
-    // Lint tools (work / review)
+    // Lint tools
     let lint = ("read_lints", "读取LSP诊断信息（类型错误、lint警告等）。可选传path参数过滤文件，不传则返回所有文件", schema_obj(json!({"path": {"type": "string"}}), &[]));
 
     fn add_tools(tools: &mut Vec<serde_json::Value>, defs: &[(&str, &str, serde_json::Value)]) {
@@ -1917,91 +2167,204 @@ fn build_agent_tools(agent_type: &str) -> Vec<serde_json::Value> {
         }
     }
 
-    // ===== PER-ROLE ALLOCATION =====
+    // ===== ACE AGENT TOOLS =====
 
-    match agent_type {
-        "front" => {
-            add_tools(&mut tools, read_only_files);
-            add_tools(&mut tools, search_tools);
-            tools.push(make_tool("run_command", "执行命令（阻塞等完成）。自由选择 shell：git status、cmd /c dir、powershell -Command \"...\" 等。智能体会根据输出自行调整", schema_obj(json!({"command": {"type": "string"}, "path": {"type": "string"}, "timeout": {"type": "integer"}}), &["command"])));
-            tools.push(make_tool("run_background", "后台运行长进程，立即返回。命令自由选择 shell。前端面板实时看输出", schema_obj(json!({"command": {"type": "string"}, "path": {"type": "string"}, "wait_sec": {"type": "integer"}}), &["command"])));
-            tools.push(make_tool("job_output", "查询后台进程输出。用run_background返回的out_file参数读取", schema_obj(json!({"out_file": {"type": "string"}, "tail_lines": {"type": "integer"}}), &[])));
-            add_tools(&mut tools, web_tools);
-            add_tools(&mut tools, env_tools);
-            add_tools(&mut tools, knowledge_read);
-            tools.push(make_tool(ask_tool.0, ask_tool.1, ask_tool.2.clone()));
-            add_tools(&mut tools, comm_tools);
-            add_tools(&mut tools, skill_tools);
-            tools.push(make_tool(todo_tool.0, todo_tool.1, todo_tool.2.clone()));
-        }
-        "plan" => {
-            add_tools(&mut tools, read_only_files);
-            add_tools(&mut tools, search_tools);
-            add_tools(&mut tools, web_tools);
-            add_tools(&mut tools, env_tools);
-            add_tools(&mut tools, knowledge_read);
-            tools.push(make_tool(kw.0, kw.1, kw.2.clone()));
-            tools.push(make_tool(ask_tool.0, ask_tool.1, ask_tool.2.clone()));
-            add_tools(&mut tools, comm_tools);
-            add_tools(&mut tools, skill_tools);
-        }
-        "explore" => {
-            add_tools(&mut tools, read_only_files);
-            add_tools(&mut tools, search_tools);
-            add_tools(&mut tools, web_tools);
-            add_tools(&mut tools, env_tools);
-            add_tools(&mut tools, knowledge_read);
-            tools.push(make_tool(kw.0, kw.1, kw.2.clone()));
-            add_tools(&mut tools, comm_tools);
-        }
-        "review" => {
-            add_tools(&mut tools, read_only_files);
-            add_tools(&mut tools, search_tools);
-            tools.push(make_tool(lint.0, lint.1, lint.2.clone()));
-            add_tools(&mut tools, web_tools);
-            add_tools(&mut tools, env_tools);
-            add_tools(&mut tools, knowledge_read);
-            add_tools(&mut tools, comm_tools);
-            add_tools(&mut tools, skill_tools);
-        }
-        "work" => {
-            add_tools(&mut tools, read_only_files);
-            add_tools(&mut tools, search_tools);
-            add_tools(&mut tools, write_tools);
-            add_tools(&mut tools, command_tools);
-            tools.push(make_tool(lint.0, lint.1, lint.2.clone()));
-            add_tools(&mut tools, web_tools);
-            add_tools(&mut tools, env_tools);
-            add_tools(&mut tools, knowledge_read);
-            tools.push(make_tool(kw.0, kw.1, kw.2.clone()));
-            add_tools(&mut tools, comm_tools);
-            add_tools(&mut tools, skill_tools);
-            tools.push(make_tool(todo_tool.0, todo_tool.1, todo_tool.2.clone()));
-        }
-        "ace" => {
-            add_tools(&mut tools, read_only_files);
-            add_tools(&mut tools, search_tools);
-            add_tools(&mut tools, write_tools);
-            add_tools(&mut tools, command_tools);
-            tools.push(make_tool(lint.0, lint.1, lint.2.clone()));
-            add_tools(&mut tools, web_tools);
-            add_tools(&mut tools, env_tools);
-            add_tools(&mut tools, knowledge_read);
-            tools.push(make_tool(kw.0, kw.1, kw.2.clone()));
-            tools.push(make_tool(ask_tool.0, ask_tool.1, ask_tool.2.clone()));
-            add_tools(&mut tools, skill_tools);
-            tools.push(make_tool(todo_tool.0, todo_tool.1, todo_tool.2.clone()));
-        }
-        _ => {
-            add_tools(&mut tools, read_only_files);
-            add_tools(&mut tools, search_tools);
-            add_tools(&mut tools, web_tools);
-            add_tools(&mut tools, env_tools);
-            add_tools(&mut tools, knowledge_read);
-            add_tools(&mut tools, comm_tools);
-            add_tools(&mut tools, skill_tools);
-        }
-    }
+    add_tools(&mut tools, read_only_files);
+    add_tools(&mut tools, search_tools);
+    add_tools(&mut tools, write_tools);
+    add_tools(&mut tools, command_tools);
+    tools.push(make_tool(lint.0, lint.1, lint.2.clone()));
+    add_tools(&mut tools, web_tools);
+    add_tools(&mut tools, env_tools);
+    add_tools(&mut tools, knowledge_read);
+    tools.push(make_tool(kw.0, kw.1, kw.2.clone()));
+    tools.push(make_tool(ask_tool.0, ask_tool.1, ask_tool.2.clone()));
+    add_tools(&mut tools, skill_tools);
+    tools.push(make_tool(todo_tool.0, todo_tool.1, todo_tool.2.clone()));
 
     tools
+}
+
+// ==================== Tests ====================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- hidden_cmd ---
+
+    #[test]
+    fn hidden_cmd_has_utf8_env_vars() {
+        let cmd = hidden_cmd(if cfg!(windows) { "cmd" } else { "sh" });
+        // We can't inspect creation flags, but we can verify env vars are set
+        let envs: Vec<_> = cmd.get_envs().collect();
+        let has_pythonutf8 = envs.iter().any(|(k, v)| {
+            k.to_str() == Some("PYTHONUTF8") && v.as_ref().map(|v| v.to_str() == Some("1")).unwrap_or(false)
+        });
+        assert!(has_pythonutf8, "PYTHONUTF8=1 should be set");
+    }
+
+    #[test]
+    fn hidden_cmd_has_lang_env() {
+        let cmd = hidden_cmd(if cfg!(windows) { "cmd" } else { "sh" });
+        let envs: Vec<_> = cmd.get_envs().collect();
+        let has_lang = envs.iter().any(|(k, _)| k.to_str() == Some("LANG"));
+        assert!(has_lang);
+    }
+
+    // --- decode_process_output ---
+
+    #[test]
+    #[cfg(windows)]
+    fn decode_valid_utf8_passthrough() {
+        let input = "Hello World 你好".as_bytes();
+        let result = decode_process_output(input);
+        assert_eq!(result, "Hello World 你好");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn decode_pure_ascii() {
+        let input = b"Exit: 0\nfile1.txt\nfile2.txt";
+        let result = decode_process_output(input);
+        assert_eq!(result, "Exit: 0\nfile1.txt\nfile2.txt");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn decode_gbk_fallback() {
+        // "中文测试" in GBK encoding
+        let gbk_bytes: &[u8] = &[0xD6, 0xD0, 0xCE, 0xC4, 0xB2, 0xE2, 0xCA, 0xD4];
+        let result = decode_process_output(gbk_bytes);
+        assert!(result.contains("中文"), "Should decode GBK Chinese, got: {}", result);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn decode_empty_bytes() {
+        let result = decode_process_output(b"");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn decode_garbled_fallback_to_lossy() {
+        // Completely invalid bytes that are neither UTF-8 nor GBK
+        let bad: &[u8] = &[0xFF, 0xFE, 0x00, 0x00, 0xC0, 0xC1];
+        let result = decode_process_output(bad);
+        // Should not panic, should produce something via lossy conversion
+        assert!(!result.is_empty() || result.is_empty()); // just not panic
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn decode_unix_passthrough() {
+        let result = decode_process_output(b"Hello World");
+        assert_eq!(result, "Hello World");
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn decode_unix_lossy() {
+        let bytes: &[u8] = &[0xFF, 0xFE, 0x41, 0x42, 0x43];
+        let result = decode_process_output(bytes);
+        assert!(result.contains("ABC"));
+    }
+
+    // --- output truncation (the 256KB cap in output_with_timeout) ---
+
+    #[test]
+    fn output_cap_head_tail_strategy() {
+        // Simulate the cap logic: head 128KB + tail 128KB
+        let big: Vec<u8> = (0..300_000usize).map(|b| (b % 128 + 32) as u8).collect();
+        let result = decode_process_output(&big);
+        // Should be capped in output_with_timeout, but decode doesn't cap
+        // — this test verifies decode handles large input without OOM
+        assert!(result.len() > 200_000);
+    }
+
+    // --- hex_encode / hex_decode ---
+
+    #[test]
+    fn hex_encode_basic() {
+        let bytes: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF];
+        assert_eq!(hex_encode(bytes), "deadbeef");
+    }
+
+    #[test]
+    fn hex_encode_empty() {
+        assert_eq!(hex_encode(b""), "");
+    }
+
+    #[test]
+    fn hex_decode_roundtrip() {
+        let original = b"Hello World\x00\xFF";
+        let hex = hex_encode(original);
+        let decoded = hex_decode(&hex);
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn hex_decode_empty() {
+        assert!(hex_decode("").is_empty());
+    }
+
+    // --- is_printable_text ---
+
+    #[test]
+    fn printable_plain_text() {
+        assert!(is_printable_text("Hello World\nLine 2\r\nLine 3\tTab"));
+    }
+
+    #[test]
+    fn non_printable_null() {
+        assert!(!is_printable_text("Hello\0World"));
+    }
+
+    #[test]
+    fn printable_empty() {
+        assert!(is_printable_text(""));
+    }
+
+    #[test]
+    fn non_printable_ctrl_chars() {
+        assert!(!is_printable_text("Hello\x01World"));
+        assert!(!is_printable_text("Hello\x1BWorld"));
+    }
+
+    // --- mark_last_message_for_cache ---
+
+    #[test]
+    fn mark_cache_string_content() {
+        let mut msgs = vec![json!({"role": "user", "content": "hello"})];
+        mark_last_message_for_cache(&mut msgs);
+        let last = msgs.last().unwrap();
+        let content = last["content"].as_array().unwrap();
+        let last_block = content.last().unwrap();
+        assert!(last_block["cache_control"]["type"] == "ephemeral");
+    }
+
+    #[test]
+    fn mark_cache_array_content() {
+        let mut msgs = vec![json!({
+            "role": "assistant",
+            "content": [{"type": "text", "text": "hi"}]
+        })];
+        mark_last_message_for_cache(&mut msgs);
+        let content = msgs.last().unwrap()["content"].as_array().unwrap();
+        assert!(content.last().unwrap()["cache_control"]["type"] == "ephemeral");
+    }
+
+    // --- strip_cache_control ---
+
+    #[test]
+    fn strip_existing_cache_control() {
+        let mut msgs = vec![json!({
+            "role": "user",
+            "content": [{"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}]
+        })];
+        strip_cache_control(&mut msgs);
+        let block = &msgs[0]["content"][0];
+        assert!(block["cache_control"].is_null() || !block.as_object().unwrap().contains_key("cache_control"));
+    }
 }

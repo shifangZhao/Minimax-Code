@@ -26,7 +26,7 @@ export function useTodoStore() {
 
   /** Parse a todo_write tool_end result and update state. */
   function updateFromResult(sessionId: number, resultJson: string) {
-    let parsed: any
+    let parsed: { todos?: unknown[]; summary?: string; pct?: number }
     try {
       parsed = JSON.parse(resultJson)
     } catch {
@@ -37,11 +37,14 @@ export function useTodoStore() {
     // Defensive: todos must be an array, otherwise silently ignore
     if (!Array.isArray(parsed.todos)) return
 
-    const items: TodoItem[] = parsed.todos.map((t: any) => ({
-      content: t.content || '',
-      status: VALID_STATUSES.has(t.status) ? t.status : 'pending',
-      activeForm: t.activeForm,
-    }))
+    const items: TodoItem[] = parsed.todos.map((t) => {
+      const obj = t as Record<string, unknown>
+      return {
+        content: typeof obj.content === 'string' ? obj.content : '',
+        status: VALID_STATUSES.has(obj.status as string) ? (obj.status as TodoItem['status']) : 'pending',
+        activeForm: typeof obj.activeForm === 'string' ? obj.activeForm : undefined,
+      }
+    })
     const state: TodoState = {
       items,
       summary: parsed.summary || '',

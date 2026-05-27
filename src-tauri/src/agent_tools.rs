@@ -8,23 +8,58 @@ use serde_json::json;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::collections::HashMap;
 use tauri::{AppHandle, Emitter};
-use tokio::sync::{RwLock, watch};
+use tokio::sync::RwLock;
 
 use crate::lsp_types::format_diagnostics;
 use crate::{DEFAULT_API_URL, SEARCH_TIMEOUT_SECS, VLM_TIMEOUT_SECS};
 
-use crate::agent_service::{AgentService, Message, PendingAsks, hidden_cmd, output_with_timeout};
+use crate::agent_service::{PendingAsks, hidden_cmd, output_with_timeout};
 use crate::lsp_manager::LspManager;
 use crate::mcp_service::McpService;
-use crate::permission::PermissionService;
 use crate::skill_service::SkillService;
+
+// ── Tool output limits ──
+const TOOL_OUTPUT_MAX_BYTES: usize = 50 * 1024; // 50 KB
+const TOOL_OUTPUT_MAX_LINES: usize = 2000;
+const TOOL_OUTPUT_TAIL_FRACTION: f64 = 0.15;
+
+// ── File read limits ──
+const FILE_READ_MAX_SIZE: u64 = 2 * 1024 * 1024; // 2 MB
+const FILE_OUTLINE_THRESHOLD: u64 = 64 * 1024; // 64 KB
+const FILE_OUTLINE_PREVIEW_LINES: usize = 300;
+const FILE_DEFAULT_READ_LIMIT: usize = 200;
+const BINARY_DETECT_BUFFER_SIZE: usize = 8192;
+const MULTIFILE_MAX_LINES: usize = 500;
+const MULTIFILE_MAX_BYTES: usize = 100 * 1024; // 100 KB
+
+// ── Search limits ──
+const SEARCH_MAX_RESULTS: usize = 200;
+const SEARCH_SHOW_LIMIT: usize = 50;
+const SEARCH_RECURSE_DEPTH: usize = 10;
+const GLOB_DEFAULT_LIMIT: usize = 200;
+const FILE_SEARCH_RESULT_LIMIT: usize = 100;
+
+// ── Web fetch limits ──
+const WEB_FETCH_MAX_CHARS: usize = 32_000;
+
+// ── Process limits ──
+const PROCESS_LIST_MAX_LINES: usize = 50;
+
+// ── Vision API ──
+const VISION_MAX_TOKENS: u64 = 2048;
+const VISION_HTTP_TIMEOUT_SECS: u64 = 60;
+const IMAGE_MAX_SIZE_BYTES: u64 = 50 * 1024 * 1024; // 50 MB
+
+// ── Timeouts ──
+const COMMAND_TIMEOUT_SECS: u64 = 120;
+const ASK_CHOICE_TIMEOUT_SECS: u64 = 600;
 
 /// Truncate tool output to prevent context explosion.
 /// Caps at 50KB or 2000 lines, preserves head+tail, injects marker.
 pub(crate) fn truncate_tool_result(output: String) -> String {
-    const MAX_BYTES: usize = 50 * 1024;   // 50 KB
-    const MAX_LINES: usize = 2000;
-    const TAIL_FRACTION: f64 = 0.15;
+    const MAX_BYTES: usize = TOOL_OUTPUT_MAX_BYTES;
+    const MAX_LINES: usize = TOOL_OUTPUT_MAX_LINES;
+    const TAIL_FRACTION: f64 = TOOL_OUTPUT_TAIL_FRACTION;
 
     let bytes = output.len();
     let lines: Vec<&str> = output.lines().collect();
@@ -81,246 +116,60 @@ fn parse_command(command: &str) -> (String, Vec<String>) {
     (program, parts)
 }
 
-// ========== Agent Communication ==========
-
-pub(crate) async fn tool_send_to_agent(
-    caller_session_id: i64,
-    params: &serde_json::Value,
-    api_key: String,
-    skill_service: Arc<SkillService>,
-    mcp_service: Arc<RwLock<McpService>>,
-    db: Arc<StdMutex<Connection>>,
-    lsp_manager: Arc<StdMutex<Option<LspManager>>>,
-    permission_service: Arc<StdMutex<PermissionService>>,
-    pending_asks: PendingAsks,
-    app_handle: AppHandle,
-    cancel_rx: watch::Receiver<bool>,
-    running_command_pids: Arc<StdMutex<HashMap<i64, u32>>>,
-) -> String {
-    let target_agent = params["target_agent"].as_str().unwrap_or("");
-    let message = params["message"].as_str().unwrap_or("");
-
-    if target_agent.is_empty() || message.is_empty() {
-        return json!({"error": "target_agent and message are required"}).to_string();
-    }
-
-    // Check parent cancel before spawning sub-agent
-    if *cancel_rx.borrow() {
-        return json!({"error": "Parent agent was aborted"}).to_string();
-    }
-
-    // Look up caller's agent type first
-    let caller_agent: String = {
-        let conn = match db.lock() {
-            Ok(c) => c,
-            Err(e) => return json!({"error": format!("Database error: {}", e)}).to_string(),
-        };
-        conn.query_row(
-            "SELECT agent_type FROM agent_session WHERE id = ?1",
-            [caller_session_id],
-            |row| row.get(0),
-        ).unwrap_or_else(|_| "unknown".to_string())
-    };
-    let tagged_for_db = format!("[来自 {}]\n\n{}", caller_agent, message);
-
-    // DB operations in spawn_blocking
-    let db_clone = db.clone();
-    let target_agent_owned = target_agent.to_string();
-
-    let db_result = tokio::task::spawn_blocking(move || -> Result<(i64, i64, Vec<Message>), String> {
-        let conn = match db_clone.lock() {
-            Ok(c) => c,
-            Err(e) => return Err(format!("Database error (lock poisoned): {}", e)),
-        };
-        let group_chat_id: i64 = conn
-            .query_row(
-                "SELECT group_chat_id FROM agent_session WHERE id = ?1",
-                rusqlite::params![caller_session_id],
-                |row| row.get(0),
-            )
-            .map_err(|e| format!("Failed to find caller session: {}", e))?;
-
-        let target_session_id: i64 = match conn
-            .query_row(
-                "SELECT id FROM agent_session WHERE group_chat_id = ?1 AND agent_type = ?2",
-                rusqlite::params![group_chat_id, target_agent_owned],
-                |row| row.get(0),
-            )
-            .ok()
-        {
-            Some(id) => id,
-            None => {
-                conn.execute(
-                    "INSERT INTO agent_session (group_chat_id, agent_type) VALUES (?1, ?2)",
-                    rusqlite::params![group_chat_id, target_agent_owned],
-                )
-                .map_err(|e| format!("Failed to create agent session: {}", e))?;
-                conn.last_insert_rowid()
-            }
-        };
-
-        conn.execute(
-            "INSERT INTO chat_message (session_id, role, content) VALUES (?1, 'user', ?2)",
-            rusqlite::params![target_session_id, tagged_for_db],
-        )
-        .map_err(|e| format!("Failed to save message: {}", e))?;
-
-        // Load full conversation history with parts, reconstruct raw_json for API
-        let mut stmt = conn.prepare(
-            "SELECT id, role, content FROM chat_message WHERE session_id = ?1 ORDER BY id ASC"
-        ).map_err(|e| format!("Failed to prepare history query: {}", e))?;
-        let msgs: Vec<(i64, String, String)> = stmt.query_map(
-            rusqlite::params![target_session_id],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
-        ).map_err(|e| format!("Failed to query history: {}", e))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("Failed to collect history: {}", e))?;
-        drop(stmt);
-
-        // Load parts for all messages
-        let msg_ids: Vec<String> = msgs.iter().map(|m| m.0.to_string()).collect();
-        let parts_map: std::collections::HashMap<i64, Vec<(i64, String, String, Option<String>, Option<String>, Option<String>)>> = if !msg_ids.is_empty() {
-            let ph = msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            let psql = format!("SELECT message_id, part_order, part_type, content, tool_use_id, tool_name, tool_input FROM message_part WHERE message_id IN ({}) ORDER BY message_id, part_order", ph);
-            let mut pstmt = conn.prepare(&psql).map_err(|e| format!("Failed to prepare parts query: {}", e))?;
-            let params: Vec<&dyn rusqlite::types::ToSql> = msg_ids.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
-            let parts: Vec<(i64, i64, String, String, Option<String>, Option<String>, Option<String>)> = pstmt.query_map(params.as_slice(), |row| Ok((
-                row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?, row.get::<_, Option<String>>(6)?,
-            ))).map_err(|e| format!("Failed to query parts: {}", e))?.filter_map(|r| r.ok()).collect();
-            let mut map: std::collections::HashMap<i64, Vec<_>> = std::collections::HashMap::new();
-            for (mid, _order, ptype, pcontent, tuid, tname, tinput) in parts {
-                map.entry(mid).or_default().push((_order, ptype, pcontent, tuid, tname, tinput));
-            }
-            map
-        } else { std::collections::HashMap::new() };
-
-        let history: Vec<Message> = msgs.into_iter().map(|(id, role, content)| {
-            let raw_json = parts_map.get(&id).and_then(|plist| {
-                if plist.is_empty() { return None }
-                let blocks: Vec<serde_json::Value> = plist.iter().map(|(_order, ptype, pcontent, tuid, tname, tinput)| {
-                    match ptype.as_str() {
-                        "thinking" => json!({"type": "thinking", "thinking": pcontent}),
-                        "tool_use" => {
-                            let input_val: serde_json::Value = tinput.as_ref()
-                                .and_then(|s| serde_json::from_str(s).ok()).unwrap_or(json!({}));
-                            json!({"type": "tool_use", "id": tuid, "name": tname, "input": input_val})
-                        }
-                        "tool_result" => json!({"type": "tool_result", "tool_use_id": tuid, "content": pcontent}),
-                        _ => json!({"type": "text", "text": pcontent}),
-                    }
-                }).collect();
-                Some(serde_json::to_string(&blocks).unwrap_or_default())
-            });
-            // Reconstruct thinking from parts
-            let thinking = parts_map.get(&id).and_then(|plist| {
-                let t: String = plist.iter()
-                    .filter(|(_, ptype, _, _, _, _)| ptype == "thinking")
-                    .map(|(_, _, pcontent, _, _, _)| pcontent.clone())
-                    .collect::<Vec<_>>().join("");
-                if t.is_empty() { None } else { Some(t) }
-            });
-            Message { role, content, tool_calls: None, thinking, raw_json }
-        }).collect();
-
-        eprintln!("[send_to_agent] Loaded {} history messages for target session {}", history.len(), target_session_id);
-
-        Ok((group_chat_id, target_session_id, history))
-    })
-    .await;
-
-    match db_result {
-        Ok(Ok((group_chat_id, target_session_id, history))) => {
-            eprintln!("[send_to_agent] caller_session={}, target={}, target_session={}, group_chat={}, history_len={}",
-                caller_session_id, target_agent, target_session_id, group_chat_id, history.len());
-
-            // Emit agent_invoked FIRST so frontend can set up listeners before stream starts
-            let _ = app_handle.emit("agent_invoked", json!({
-                "target_agent": target_agent,
-                "session_id": target_session_id,
-                "group_chat_id": group_chat_id,
-                "message": message,
-            }));
-
-            // Small delay to let frontend listeners attach
-            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-
-            // Spawn the target agent stream in a dedicated thread
-            let agent_type = target_agent.to_string();
-            let app = app_handle.clone();
-            let handle = tokio::runtime::Handle::current();
-            let lm = lsp_manager.clone();
-            let pm = permission_service.clone();
-            let pa = pending_asks.clone();
-
-            // Read workspace + credentials (check per-agent config first)
-            let (workspace, api_url, messages_path, model, context_window, provider) = {
-                let conn = match db.lock() {
-                    Ok(c) => c,
-                    Err(e) => return json!({"error": format!("Database error: {}", e)}).to_string(),
-                };
-                let ws: Option<String> = conn.query_row("SELECT workspace FROM app_config", [], |row| row.get(0)).ok();
-
-                // Check per-agent config
-                let agent_cfg: Option<(String, String, usize)> = conn.query_row(
-                    "SELECT provider, model, context_window FROM agent_model_config WHERE agent_type = ?1",
-                    [&agent_type],
-                    |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,i64>(2)?.max(0) as usize)),
-                ).ok().filter(|(_, m, _)| !m.is_empty());
-
-                if let Some((ap, am, acw)) = agent_cfg {
-                    let (_key, url, path) = match ap.as_str() {
-                        "custom" => {
-                            let k: String = conn.query_row("SELECT custom_api_key FROM app_config", [], |row| row.get(0)).unwrap_or_default();
-                            let u: String = conn.query_row("SELECT custom_api_url FROM app_config", [], |row| row.get(0)).unwrap_or_default();
-                            (k, u, "/v1/messages".to_string())
-                        }
-                        _ => {
-                            let k: String = conn.query_row("SELECT api_key FROM minimax_api_key", [], |row| row.get(0)).unwrap_or_default();
-                            let u: String = conn.query_row("SELECT api_url FROM app_config", [], |row| row.get(0)).unwrap_or_else(|_| DEFAULT_API_URL.to_string());
-                            (k, u, "/anthropic/v1/messages".to_string())
-                        }
-                    };
-                    let cw = if acw > 0 { acw } else { 204800 };
-                    (ws, url, path, am, cw, ap)
-                } else {
-                    let p: String = conn.query_row("SELECT provider FROM app_config", [], |row| row.get(0)).unwrap_or_else(|_| "minimax".to_string());
-                    match p.as_str() {
-                        "custom" => {
-                            let u: String = conn.query_row("SELECT custom_api_url FROM app_config", [], |row| row.get(0)).unwrap_or_default();
-                            let m: String = conn.query_row("SELECT custom_model FROM app_config", [], |row| row.get(0)).unwrap_or_default();
-                            let c: i64 = conn.query_row("SELECT custom_context_window FROM app_config", [], |row| row.get(0)).unwrap_or(200000);
-                            (ws, u, "/v1/messages".to_string(), m, c.max(0) as usize, p)
-                        }
-                        _ => {
-                            let u: String = conn.query_row("SELECT api_url FROM app_config", [], |row| row.get(0)).unwrap_or_else(|_| DEFAULT_API_URL.to_string());
-                            let m: String = conn.query_row("SELECT model FROM app_config", [], |row| row.get(0)).unwrap_or_else(|_| "MiniMax-M2.7".to_string());
-                            let c: i64 = conn.query_row("SELECT context_window FROM app_config", [], |row| row.get(0)).unwrap_or(204800);
-                            (ws, u, "/anthropic/v1/messages".to_string(), m, c.max(0) as usize, p)
-                        }
-                    }
-                }
-            };
-
-            std::thread::spawn(move || {
-                handle.block_on(async move {
-                    let agent = AgentService::new(api_key, api_url, messages_path, model, context_window, provider, skill_service, mcp_service, db, lm, pm, pa, running_command_pids.clone());
-                    agent.stream_chat(&agent_type, history, None, workspace, app, target_session_id, cancel_rx).await;
-                });
-            });
-
-            json!({
-                "success": true,
-                "target_agent": target_agent,
-                "session_id": target_session_id,
-                "group_chat_id": group_chat_id,
-                "message": format!("已向 {} 发送消息", target_agent)
-            }).to_string()
+/// Check whether a command string contains unquoted shell metacharacters
+/// (pipes, redirects, chaining). These MUST be interpreted by a shell —
+/// direct CreateProcess/execvp will pass them as arguments, producing
+/// silently wrong output instead of an error.
+fn has_shell_metacharacters(command: &str) -> bool {
+    let chars: Vec<char> = command.chars().collect();
+    let len = chars.len();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut i = 0;
+    while i < len {
+        let ch = chars[i];
+        match ch {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            // Unambiguous shell operators — only significant outside quotes
+            '|' | '>' | '<' if !in_single && !in_double => return true,
+            '&' if !in_single && !in_double && i + 1 < len && chars[i + 1] == '&' => return true,
+            _ => {}
         }
-        Ok(Err(e)) => json!({"error": e}).to_string(),
-        Err(e) => json!({"error": format!("Task panicked: {}", e)}).to_string(),
+        i += 1;
     }
+    false
+}
+
+/// Returns true if the program name is a known shell executable.
+/// When the LLM explicitly chooses a shell, we execute directly without wrapping.
+fn is_shell_program(program: &str) -> bool {
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    let lower = name.to_lowercase();
+    let stem = lower.strip_suffix(".exe").unwrap_or(&lower);
+    matches!(stem, "cmd" | "powershell" | "pwsh" | "sh" | "bash" | "zsh" | "fish" | "wsl" | "dash")
+}
+
+/// Execute a command through the system default shell.
+/// Windows: `cmd /d /s /c` — /d skips autorun, /s handles quote stripping.
+/// Unix: `sh -c`.
+fn execute_via_shell(
+    command: &str,
+    cwd: Option<&str>,
+    timeout_secs: u64,
+    session_id: i64,
+    running_pids: Option<&Arc<StdMutex<HashMap<i64, Vec<u32>>>>>,
+) -> String {
+    let mut cmd = hidden_cmd(if cfg!(windows) { "cmd" } else { "sh" });
+    if cfg!(windows) {
+        cmd.args(["/d", "/s", "/c", command]);
+    } else {
+        cmd.args(["-c", command]);
+    }
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    output_with_timeout(&mut cmd, timeout_secs, session_id, running_pids)
 }
 
 // ========== Tool Implementations (Flat) ==========
@@ -331,15 +180,48 @@ pub(crate) async fn tool_list_dir(params: &serde_json::Value) -> String {
     tokio::task::spawn_blocking(move || {
         match std::fs::read_dir(&path) {
             Ok(entries) => {
-                let mut result: Vec<String> = entries
-                    .filter_map(|e| e.ok())
-                    .map(|e| {
-                        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                        let prefix = if is_dir { "[DIR]" } else { "[FILE]" };
-                        format!("{} {}", prefix, e.file_name().to_string_lossy())
-                    })
-                    .collect();
-                result.sort();
+                let mut dirs: Vec<String> = Vec::new();
+                let mut files: Vec<(String, u64, String, usize)> = Vec::new(); // (name, size, modified, lines)
+                for e in entries.filter_map(|e| e.ok()) {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                    if is_dir {
+                        dirs.push(format!("[DIR]  {}", name));
+                    } else {
+                        let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+                        let modified = e.metadata()
+                            .and_then(|m| m.modified())
+                            .map(|t| {
+                                let dur = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+                                let secs = dur.as_secs();
+                                // Convert to Y-M-D H:M
+                                let days = secs / 86400;
+                                let (y, m, d) = days_to_ymd(days);
+                                let time_of_day = secs % 86400;
+                                let h = time_of_day / 3600;
+                                let min = (time_of_day % 3600) / 60;
+                                format!("{:04}-{:02}-{:02} {:02}:{:02}", y, m, d, h, min)
+                            })
+                            .unwrap_or_else(|_| "?".to_string());
+                        let line_count = if size < 2_000_000 {
+                            std::fs::read_to_string(e.path())
+                                .map(|c| c.lines().count())
+                                .unwrap_or(0)
+                        } else { 0 };
+                        files.push((name, size, modified, line_count));
+                    }
+                }
+                dirs.sort();
+                files.sort_by(|a, b| a.0.cmp(&b.0));
+                let mut result = dirs;
+                for (name, size, modified, lines) in files {
+                    let size_str = format_size(size);
+                    if lines > 0 {
+                        result.push(format!("[FILE] {:>10}  {:>6} lines  {}  {}", size_str, lines, modified, name));
+                    } else {
+                        result.push(format!("[FILE] {:>10}  {:>13}  {}  {}", size_str, "", modified, name));
+                    }
+                }
                 result.join("\n")
             }
             Err(e) => format!("Error: Cannot read directory '{}'", e),
@@ -349,14 +231,47 @@ pub(crate) async fn tool_list_dir(params: &serde_json::Value) -> String {
     .unwrap_or_else(|_| "Task cancelled".to_string())
 }
 
+fn format_size(bytes: u64) -> String {
+    if bytes < 1024 { format!("{} B", bytes) }
+    else if bytes < 1024 * 1024 { format!("{:.1} KB", bytes as f64 / 1024.0) }
+    else { format!("{:.1} MB", bytes as f64 / 1048576.0) }
+}
+
+fn days_to_ymd(days: u64) -> (u64, u64, u64) {
+    // Simplified epoch-to-ymd (good enough for file timestamps)
+    let mut y = 1970u64;
+    let mut remaining = days;
+    loop {
+        let days_in_year = if is_leap(y) { 366 } else { 365 };
+        if remaining < days_in_year { break; }
+        remaining -= days_in_year;
+        y += 1;
+    }
+    let leap = is_leap(y);
+    let month_days: [u64; 12] = [
+        31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+    ];
+    let mut m = 1u64;
+    for &md in &month_days {
+        if remaining < md { break; }
+        remaining -= md;
+        m += 1;
+    }
+    (y, m, remaining + 1)
+}
+
+fn is_leap(y: u64) -> bool {
+    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
+}
+
 pub(crate) async fn tool_read_file(params: &serde_json::Value) -> String {
     let path = normalize_file_path(params["path"].as_str().unwrap_or(""));
     let offset = params["offset"].as_u64().unwrap_or(0) as usize;
     let limit = params["limit"].as_u64().unwrap_or(0) as usize;
 
     tokio::task::spawn_blocking(move || {
-        const MAX_SIZE: u64 = 2 * 1024 * 1024; // 2MB
-        const OUTLINE_SIZE: u64 = 64 * 1024; // 64KB
+        const MAX_SIZE: u64 = FILE_READ_MAX_SIZE;
+        const OUTLINE_SIZE: u64 = FILE_OUTLINE_THRESHOLD;
         let meta = match std::fs::metadata(&path) {
             Ok(m) => m,
             Err(e) => return format!("Error reading {}: {}", path, e),
@@ -372,18 +287,19 @@ pub(crate) async fn tool_read_file(params: &serde_json::Value) -> String {
                 "文件过大: {} MB, {} 行，超过 {} MB 限制，内容已截断。\n\
                  使用 offset/limit 参数分段读取其余部分。\n\
                  例如: {{\"path\": \"...\", \"offset\": 301, \"limit\": 300}}\n\n\
-                 === 前 300 行 (共 {} 行) ===\n{}",
+                 === 前 {} 行 (共 {} 行) ===\n{}",
                 meta.len() / 1024 / 1024,
                 line_count,
                 MAX_SIZE / 1024 / 1024,
+                FILE_OUTLINE_PREVIEW_LINES,
                 line_count,
-                read_line_range(&path, 1, 300)
+                read_line_range(&path, 1, FILE_OUTLINE_PREVIEW_LINES)
             );
         }
         // Read with offset/limit
         if offset > 0 || limit > 0 {
             let start = if offset > 0 { offset } else { 1 };
-            let end = if limit > 0 { start + limit - 1 } else { start + 200 };
+            let end = if limit > 0 { start + limit - 1 } else { start + FILE_DEFAULT_READ_LIMIT };
             let total = count_lines(&path);
             let prefix = if meta.len() > OUTLINE_SIZE {
                 format!("[lines {}-{} of {} — PARTIAL CONTENT, use offset/limit for more]\n", start, std::cmp::min(end, total), total)
@@ -406,7 +322,7 @@ pub(crate) async fn tool_read_file(params: &serde_json::Value) -> String {
 pub(crate) fn is_binary_file(path: &str) -> bool {
     use std::io::Read;
     if let Ok(mut f) = std::fs::File::open(path) {
-        let mut buf = [0u8; 8192];
+        let mut buf = [0u8; BINARY_DETECT_BUFFER_SIZE];
         if let Ok(n) = f.read(&mut buf) {
             buf[..n].contains(&0)
         } else {
@@ -447,29 +363,57 @@ pub(crate) fn read_line_range(path: &str, start: usize, end: usize) -> String {
 }
 
 pub(crate) async fn tool_read_files(params: &serde_json::Value) -> String {
-    const MAX_LINES: usize = 500;
-    const MAX_BYTES: usize = 100 * 1024;
+    const MAX_LINES: usize = MULTIFILE_MAX_LINES;
+    const MAX_BYTES: usize = MULTIFILE_MAX_BYTES;
     if let Some(paths) = params["paths"].as_array() {
+        let global_offset = params["offset"].as_u64().unwrap_or(0) as usize;
+        let global_limit = params["limit"].as_u64().unwrap_or(0) as usize;
         let total = paths.len();
         let results: Vec<String> = paths.iter()
-            .filter_map(|p| p.as_str())
-            .map(|path| {
-                let path = normalize_file_path(path);
-                match std::fs::read_to_string(&path) {
-                    Ok(c) => {
-                        let lines = c.lines().count();
-                        let bytes = c.len();
-                        if lines > MAX_LINES || bytes > MAX_BYTES {
-                            let display: String = c.lines().take(MAX_LINES).collect::<Vec<_>>().join("\n");
-                            format!(
-                                "[OK] {} — TRUNCATED ({} lines/{} KB total, showing first {} lines)\n---\n{}",
-                                path, lines, bytes / 1024, MAX_LINES, display
-                            )
-                        } else {
-                            format!("[OK] {} ({} lines, {} KB)\n---\n{}", path, lines, bytes / 1024, c)
-                        }
+            .map(|p| {
+                // Support both string paths and {path, offset, limit} objects
+                let (path, offset, limit) = if p.is_object() {
+                    let path = p["path"].as_str().unwrap_or("").to_string();
+                    let off = p["offset"].as_u64().map(|v| v as usize).unwrap_or(global_offset);
+                    let lim = p["limit"].as_u64().map(|v| v as usize).unwrap_or(global_limit);
+                    (path, off, lim)
+                } else {
+                    (p.as_str().unwrap_or("").to_string(), global_offset, global_limit)
+                };
+                let path = normalize_file_path(&path);
+                if path.is_empty() {
+                    return "[FAIL] empty path".to_string();
+                }
+                // If offset/limit specified, use line-range reading
+                if offset > 0 || limit > 0 {
+                    let total_lines = count_lines(&path);
+                    if total_lines == 0 {
+                        return format!("[FAIL] {} — empty or unreadable", path);
                     }
-                    Err(e) => format!("[FAIL] {} — {}", path, e),
+                    let start = if offset > 0 { offset } else { 1 };
+                    let end = if limit > 0 { start + limit - 1 } else { (start + MAX_LINES - 1).min(total_lines) };
+                    let content = read_line_range(&path, start, end);
+                    format!(
+                        "[OK] {} (lines {}-{} of {} — PARTIAL)\n---\n{}",
+                        path, start, end.min(total_lines), total_lines, content
+                    )
+                } else {
+                    match std::fs::read_to_string(&path) {
+                        Ok(c) => {
+                            let lines = c.lines().count();
+                            let bytes = c.len();
+                            if lines > MAX_LINES || bytes > MAX_BYTES {
+                                let display: String = c.lines().take(MAX_LINES).collect::<Vec<_>>().join("\n");
+                                format!(
+                                    "[OK] {} — TRUNCATED ({} lines/{} KB total, showing first {} lines. Use offset/limit for more)\n---\n{}",
+                                    path, lines, bytes / 1024, MAX_LINES, display
+                                )
+                            } else {
+                                format!("[OK] {} ({} lines, {} KB)\n---\n{}", path, lines, bytes / 1024, c)
+                            }
+                        }
+                        Err(e) => format!("[FAIL] {} — {}", path, e),
+                    }
                 }
             })
             .collect();
@@ -482,29 +426,149 @@ pub(crate) async fn tool_read_files(params: &serde_json::Value) -> String {
 
 pub(crate) async fn tool_search_in_dir(params: &serde_json::Value) -> String {
     let path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    let pattern = params["pattern"].as_str().unwrap_or("").to_lowercase();
+    let pattern = params["pattern"].as_str().unwrap_or("").to_string();
+    let file_type = params["file_type"].as_str().unwrap_or("").to_string();
+    let context = params["context"].as_u64().unwrap_or(0).min(5) as usize;
+    let use_regex = params.get("regex").and_then(|b| b.as_bool()).unwrap_or(false);
     let path = path.to_string();
     tokio::task::spawn_blocking(move || {
-        let mut matches = Vec::new();
-        search_recursive(&path, &pattern, 0, 10, &mut matches);
+        let max_results = SEARCH_MAX_RESULTS;
+        let show_limit = SEARCH_SHOW_LIMIT;
+        let mut matches: Vec<(String, i32, String)> = Vec::new();
+        if use_regex {
+            let re = match regex::Regex::new(&pattern) {
+                Ok(r) => r,
+                Err(e) => return format!("Error: invalid regex pattern — {}", e),
+            };
+            search_recursive_regex(&path, &re, &file_type, 0, SEARCH_RECURSE_DEPTH, &mut matches, max_results);
+        } else {
+            let lower = pattern.to_lowercase();
+            search_recursive_filtered(&path, &lower, &file_type, 0, SEARCH_RECURSE_DEPTH, &mut matches, max_results);
+        }
         let total = matches.len();
         if total == 0 {
-            "No matches found".to_string()
-        } else {
-            let shown = std::cmp::min(total, 10);
-            let suffix = if total > 10 { format!("\n\n... showing {} of {} matches (use narrower pattern to reduce results)", shown, total) } else { String::new() };
-            format!("{}{}",
-                matches.iter()
-                    .take(10)
-                    .map(|(file, line_num, line)| format!("{}:{}: {}", file, line_num, line))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                suffix
-            )
+            return "No matches found".to_string();
         }
+        // Build output with optional context lines
+        let mut output_lines: Vec<String> = Vec::new();
+        let shown = std::cmp::min(total, show_limit);
+        for (file, line_num, line) in matches.iter().take(shown) {
+            if context > 0 {
+                let ctx = read_context_lines(file, *line_num, context);
+                output_lines.push(format!("{}:{}: {}", file, line_num, line));
+                for (cn, cl) in ctx {
+                    output_lines.push(format!("{}-{}- {}", file, cn, cl));
+                }
+                output_lines.push("--".to_string());
+            } else {
+                output_lines.push(format!("{}:{}: {}", file, line_num, line));
+            }
+        }
+        let suffix = if total > show_limit {
+            format!("\n\n... showing {} of {} matches (use file_type to filter, e.g. \"rs\", \"vue\", \"ts\")", shown, total)
+        } else { String::new() };
+        format!("{}{}", output_lines.join("\n"), suffix)
     })
     .await
     .unwrap_or_else(|_| "Task cancelled".to_string())
+}
+
+/// Enhanced search: supports regex, file type filtering, higher limits
+fn search_recursive_regex(
+    path: &str, re: &regex::Regex, file_type: &str,
+    depth: usize, max_depth: usize, results: &mut Vec<(String, i32, String)>, limit: usize,
+) {
+    if depth > max_depth || results.len() >= limit { return; }
+    let entries = match std::fs::read_dir(path) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        if results.len() >= limit { break; }
+        let file_path = entry.path();
+        let file_name = file_path.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if file_name.starts_with('.') || matches!(file_name.as_str(), "node_modules" | "target" | ".git" | "dist" | "build" | ".next" | ".venv" | "__pycache__") {
+            continue;
+        }
+        if file_path.is_dir() {
+            search_recursive_regex(&file_path.to_string_lossy(), re, file_type, depth + 1, max_depth, results, limit);
+        } else if file_path.is_file() {
+            // Filter by file extension
+            if !file_type.is_empty() {
+                let ext = file_path.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
+                if ext.to_lowercase() != file_type.to_lowercase() { continue; }
+            }
+            if entry.metadata().map(|m| m.len() > 2_097_152).unwrap_or(false) { continue; }
+            if let Ok(content) = std::fs::read_to_string(&file_path) {
+                for (i, line) in content.lines().enumerate() {
+                    if re.is_match(line) {
+                        results.push((file_path.to_string_lossy().to_string(), (i + 1) as i32, line.trim().to_string()));
+                        if results.len() >= limit { return; }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Enhanced literal search: supports file type filtering, higher limits
+fn search_recursive_filtered(
+    path: &str, pattern: &str, file_type: &str,
+    depth: usize, max_depth: usize, results: &mut Vec<(String, i32, String)>, limit: usize,
+) {
+    if depth > max_depth || results.len() >= limit { return; }
+    let entries = match std::fs::read_dir(path) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        if results.len() >= limit { break; }
+        let file_path = entry.path();
+        let file_name = file_path.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if file_name.starts_with('.') || matches!(file_name.as_str(), "node_modules" | "target" | ".git" | "dist" | "build" | ".next" | ".venv" | "__pycache__") {
+            continue;
+        }
+        if file_path.is_dir() {
+            search_recursive_filtered(&file_path.to_string_lossy(), pattern, file_type, depth + 1, max_depth, results, limit);
+        } else if file_path.is_file() {
+            if !file_type.is_empty() {
+                let ext = file_path.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
+                if ext.to_lowercase() != file_type.to_lowercase() { continue; }
+            }
+            if entry.metadata().map(|m| m.len() > 2_097_152).unwrap_or(false) { continue; }
+            if let Ok(content) = std::fs::read_to_string(&file_path) {
+                for (i, line) in content.lines().enumerate() {
+                    if line.to_lowercase().contains(pattern) {
+                        results.push((file_path.to_string_lossy().to_string(), (i + 1) as i32, line.trim().to_string()));
+                        if results.len() >= limit { return; }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Read N lines of context around a match line
+fn read_context_lines(file: &str, line_num: i32, context: usize) -> Vec<(i32, String)> {
+    let content = match std::fs::read_to_string(file) {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+    let lines: Vec<&str> = content.lines().collect();
+    let idx = (line_num - 1).max(0) as usize;
+    let start = idx.saturating_sub(context);
+    let end = (idx + context + 1).min(lines.len());
+    let mut result = Vec::new();
+    for (i, line) in lines.iter().enumerate().take(end).skip(start) {
+        if i != idx {
+            result.push(((i + 1) as i32, line.trim().to_string()));
+        }
+    }
+    result
 }
 
 pub(crate) async fn tool_get_env_info(params: &serde_json::Value) -> String {
@@ -523,24 +587,69 @@ pub(crate) async fn tool_analyze_project_structure(params: &serde_json::Value) -
         .unwrap_or_else(|_| "Task cancelled".to_string())
 }
 
-pub(crate) async fn tool_run_command(params: &serde_json::Value, session_id: i64, running_pids: Option<Arc<StdMutex<HashMap<i64, u32>>>>) -> String {
+pub(crate) async fn tool_run_command(params: &serde_json::Value, session_id: i64, running_pids: Option<Arc<StdMutex<HashMap<i64, Vec<u32>>>>>) -> String {
     let command = params["command"].as_str().unwrap_or("").to_string();
     let cwd = params["path"].as_str().map(normalize_file_path);
-    let timeout_secs = params["timeout"].as_u64().unwrap_or(120);
+    let timeout_secs = params["timeout"].as_u64().unwrap_or(COMMAND_TIMEOUT_SECS);
     if command.is_empty() {
         return "Error: command is required".to_string();
     }
     tokio::task::spawn_blocking(move || {
+        // --- Shell routing strategy ---
+        //
+        // 1. Parse the command. If it contains unquoted shell metacharacters
+        //    (|, >, <, &&) AND the program is NOT already a shell, wrap in
+        //    the system shell. Direct execution would pass metacharacters as
+        //    arguments, silently producing wrong output.
+        // 2. If the program IS a known shell (cmd, powershell, sh, ...),
+        //    execute directly — the LLM explicitly chose how to run it.
+        //    Pipes/redirects inside its quoted arguments are the shell's job.
+        // 3. Simple command → try direct first, fall back to system shell on
+        //    spawn error (handles shell builtins like `echo`, `dir`).
+
         let (program, args) = parse_command(&command);
         if program.is_empty() {
             return "Error: could not parse command".to_string();
         }
+
+        let needs_shell = has_shell_metacharacters(&command);
+
+        if needs_shell && !is_shell_program(&program) {
+            // Path 1: has pipes/redirects but not already wrapped in shell
+            return execute_via_shell(
+                &command, cwd.as_deref(), timeout_secs, session_id, running_pids.as_ref(),
+            );
+        }
+
+        if is_shell_program(&program) {
+            // Path 2: LLM explicitly chose a shell — execute directly
+            let mut cmd = hidden_cmd(&program);
+            cmd.args(&args);
+            if let Some(ref dir) = cwd {
+                cmd.current_dir(dir);
+            }
+            return output_with_timeout(
+                &mut cmd, timeout_secs, session_id, running_pids.as_ref(),
+            );
+        }
+
+        // Path 3: simple command — try direct, fall back to shell on error
         let mut cmd = hidden_cmd(&program);
         cmd.args(&args);
-        if let Some(dir) = &cwd {
+        if let Some(ref dir) = cwd {
             cmd.current_dir(dir);
         }
-        output_with_timeout(&mut cmd, timeout_secs, session_id, running_pids.as_ref())
+        let result = output_with_timeout(
+            &mut cmd, timeout_secs, session_id, running_pids.as_ref(),
+        );
+        if !result.starts_with("Error spawning command:")
+            && !result.starts_with("Error waiting")
+        {
+            return result;
+        }
+
+        // Fallback to system shell
+        execute_via_shell(&command, cwd.as_deref(), timeout_secs, session_id, running_pids.as_ref())
     })
     .await
     .unwrap_or_else(|_| "Task cancelled".to_string())
@@ -609,7 +718,7 @@ pub(crate) async fn tool_find_replace_in_files(params: &serde_json::Value) -> St
     let replace = replace.to_string();
     tokio::task::spawn_blocking(move || {
         let mut count = 0;
-        find_replace_recursive(&path, &find, &replace, use_regex, &mut count, 0, 10);
+        find_replace_recursive(&path, &find, &replace, use_regex, &mut count, 0, SEARCH_RECURSE_DEPTH);
         format!("Modified {} files", count)
     })
     .await
@@ -669,11 +778,42 @@ pub(crate) async fn tool_get_file_info(params: &serde_json::Value) -> String {
             Ok(meta) => {
                 let is_dir = meta.is_dir();
                 let size = meta.len();
+                let ext = std::path::Path::new(&path)
+                    .extension()
+                    .map(|e| e.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "-".to_string());
                 let modified = meta.modified()
-                    .map(|t| format!("{:?}", t))
-                    .unwrap_or_else(|_| "unknown".to_string());
-                format!("Type: {}, Size: {} bytes, Modified: {}",
-                    if is_dir { "directory" } else { "file" }, size, modified)
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|dur| {
+                        let secs = dur.as_secs();
+                        let days = secs / 86400;
+                        let (y, m, d) = days_to_ymd(days);
+                        let time_of_day = secs % 86400;
+                        let h = time_of_day / 3600;
+                        let min = (time_of_day % 3600) / 60;
+                        let s = time_of_day % 60;
+                        format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, m, d, h, min, s)
+                    })
+                    .unwrap_or_else(|| "unknown".to_string());
+                if is_dir {
+                    let entry_count = std::fs::read_dir(&path)
+                        .map(|e| e.filter_map(|e| e.ok()).count())
+                        .unwrap_or(0);
+                    format!(
+                        "Type: directory\nEntries: {}\nSize: {} ({})\nModified: {}",
+                        entry_count, size, format_size(size), modified
+                    )
+                } else {
+                    let line_count = if size < 5_000_000 {
+                        count_lines(&path)
+                    } else { 0 };
+                    format!(
+                        "Type: file\nExtension: .{}\nLines: {}\nSize: {} ({})\nModified: {}",
+                        ext, if line_count > 0 { line_count.to_string() } else { "> 5MB, skipped".to_string() },
+                        size, format_size(size), modified
+                    )
+                }
             }
             Err(e) => format!("Error: {}", e),
         }
@@ -733,7 +873,8 @@ pub(crate) fn tree_recursive(dir: &std::path::Path, prefix: &str, max_depth: usi
 pub(crate) async fn tool_glob(params: &serde_json::Value) -> String {
     let pattern = params["pattern"].as_str().unwrap_or("*").to_string();
     let base_path = normalize_file_path(params["path"].as_str().unwrap_or("."));
-    let limit = params["limit"].as_i64().unwrap_or(200) as usize;
+    let limit = params["limit"].as_i64().unwrap_or(GLOB_DEFAULT_LIMIT as i64) as usize;
+    let file_type = params["file_type"].as_str().unwrap_or("").to_string();
     tokio::task::spawn_blocking(move || {
         let mut results = Vec::new();
         let skip_dirs = |name: &str| name.starts_with('.') || matches!(name, "node_modules" | "target" | ".git" | "dist" | "build" | ".next" | ".venv" | "__pycache__");
@@ -742,14 +883,13 @@ pub(crate) async fn tool_glob(params: &serde_json::Value) -> String {
         } else {
             None
         };
-        glob_recursive(&base_path, &glob_re, &pattern, &skip_dirs, &mut results, limit);
+        glob_recursive(&base_path, &glob_re, &pattern, &skip_dirs, &file_type, &mut results, limit);
         let total = results.len();
         let hit_limit = total >= limit;
-        // Sort by path name only — skip per-file metadata syscalls
-        results.sort_by(|a, b| a.cmp(b));
+        results.sort();
         let listing = results.iter().map(|p| p.strip_prefix(&base_path).unwrap_or(p).to_string()).collect::<Vec<_>>().join("\n");
         if hit_limit {
-            format!("{}\n\n... {} results (limit reached — use narrower pattern or increase limit)", listing, total)
+            format!("{}\n\n... {} results (limit reached — use narrower pattern, file_type, or increase limit)", listing, total)
         } else if listing.is_empty() {
             "No files found".to_string()
         } else {
@@ -760,7 +900,7 @@ pub(crate) async fn tool_glob(params: &serde_json::Value) -> String {
     .unwrap_or_else(|_| "Task cancelled".to_string())
 }
 
-pub(crate) fn glob_recursive(dir: &str, glob_re: &Option<regex::Regex>, raw_pattern: &str, skip_dirs: &dyn Fn(&str) -> bool, results: &mut Vec<String>, limit: usize) {
+pub(crate) fn glob_recursive(dir: &str, glob_re: &Option<regex::Regex>, raw_pattern: &str, skip_dirs: &dyn Fn(&str) -> bool, file_type: &str, results: &mut Vec<String>, limit: usize) {
     if results.len() >= limit { return; }
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e.filter_map(|e| e.ok()).collect::<Vec<_>>(),
@@ -774,8 +914,13 @@ pub(crate) fn glob_recursive(dir: &str, glob_re: &Option<regex::Regex>, raw_patt
         if is_dir {
             if skip_dirs(&name) { continue; }
             let path_str = entry.path().to_string_lossy().to_string();
-            glob_recursive(&path_str, glob_re, raw_pattern, skip_dirs, results, limit);
+            glob_recursive(&path_str, glob_re, raw_pattern, skip_dirs, file_type, results, limit);
         } else {
+            // Filter by file extension
+            if !file_type.is_empty() {
+                let ext = entry.path().extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
+                if ext.to_lowercase() != file_type.to_lowercase() { continue; }
+            }
             let matches = match glob_re {
                 Some(re) => re.is_match(&name),
                 None => name.to_lowercase().contains(&raw_pattern.to_lowercase()),
@@ -811,10 +956,10 @@ pub(crate) async fn tool_search_files(params: &serde_json::Value) -> String {
     let pattern = pattern.to_lowercase();
     tokio::task::spawn_blocking(move || {
         let mut results = Vec::new();
-        search_files_recursive(&path, &pattern, &mut results, 100);
+        search_files_recursive(&path, &pattern, &mut results, FILE_SEARCH_RESULT_LIMIT);
         let total = results.len();
         if total == 0 { "No files found".to_string() }
-        else if total >= 100 { format!("{}\n\n... {} results (limit reached — use narrower pattern)", results.join("\n"), total) }
+        else if total >= FILE_SEARCH_RESULT_LIMIT { format!("{}\n\n... {} results (limit reached — use narrower pattern)", results.join("\n"), total) }
         else { results.join("\n") }
     })
     .await
@@ -938,12 +1083,39 @@ pub(crate) fn truncate_str(s: &str, max: usize) -> String {
 
 pub(crate) async fn tool_edit_lines(params: &serde_json::Value) -> String {
     let path = normalize_file_path(params["path"].as_str().unwrap_or(""));
-    let start_line = params["start_line"].as_u64().unwrap_or(0) as usize;
+    let search = params["search"].as_str().map(|s| s.to_string());
+    let mut start_line = params["start_line"].as_u64().unwrap_or(0) as usize;
     let end_line = params["end_line"].as_u64().map(|v| v as usize);
     let content = params["content"].as_str().map(|s| s.to_string());
 
-    if path.is_empty() || start_line == 0 {
-        return "Error: path and start_line are required".to_string();
+    if path.is_empty() {
+        return "Error: path is required".to_string();
+    }
+
+    // If search is provided, resolve it to a line number
+    if let Some(ref needle) = search {
+        if start_line == 0 {
+            let file_content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(e) => return format!("Error reading {}: {}", path, e),
+            };
+            let found = file_content.lines().enumerate()
+                .find(|(_, line)| line.contains(needle))
+                .map(|(i, _)| i + 1);
+            match found {
+                Some(line_num) => {
+                    start_line = line_num;
+                }
+                None => return format!(
+                    "Error: search text not found in {}\nSearched: {}",
+                    path, truncate_str(needle, 200)
+                ),
+            }
+        }
+    }
+
+    if start_line == 0 {
+        return "Error: start_line or search is required".to_string();
     }
 
     tokio::task::spawn_blocking(move || {
@@ -1057,7 +1229,10 @@ pub(crate) async fn tool_multi_edit(params: &serde_json::Value) -> String {
             original_contents.push((path.clone(), content.clone()));
             let new_content = content.replacen(search, replace, 1);
             match std::fs::write(path, &new_content) {
-                Ok(_) => results.push(format!("{}: applied", path)),
+                Ok(_) => {
+                    let diff = compute_diff(content, &new_content);
+                    results.push(format!("{}: applied\n{}", path, diff));
+                },
                 Err(e) => {
                     // Rollback
                     for (rb_path, rb_content) in &original_contents {
@@ -1067,7 +1242,7 @@ pub(crate) async fn tool_multi_edit(params: &serde_json::Value) -> String {
                 }
             }
         }
-        format!("multi_edit: {} edits applied across {} files\n{}",
+        format!("multi_edit: {} edits applied across {} files\n\n{}",
             validated.len(),
             validated.iter().map(|(p,_,_,_)| p).collect::<std::collections::HashSet<_>>().len(),
             results.join("\n"))
@@ -1180,8 +1355,8 @@ pub(crate) async fn tool_web_fetch(params: serde_json::Value) -> String {
             Ok(resp) => match resp.text() {
                 Ok(html) => {
                     let text = html_to_text(&html);
-                    if text.len() > 32000 {
-                        format!("{}...\n[truncated at 32K chars]", &text[..32000])
+                    if text.len() > WEB_FETCH_MAX_CHARS {
+                        format!("{}...\n[truncated at 32K chars]", &text[..WEB_FETCH_MAX_CHARS])
                     } else {
                         text
                     }
@@ -1224,12 +1399,11 @@ pub(crate) fn html_to_text(html: &str) -> String {
         match bytes[i] {
             b'<' => in_tag = true,
             b'>' => in_tag = false,
-            b if !in_tag && !result.is_empty() || b != b' ' || result.ends_with(' ') => {
+            b if (!in_tag && !result.is_empty() || b != b' ' || result.ends_with(' '))
                 // Don't lead with space
-                if b != b'\n' || !result.ends_with('\n') {
+                && (b != b'\n' || !result.ends_with('\n')) => {
                     result.push(b as char);
                 }
-            }
             _ => {}
         }
         i += 1;
@@ -1256,92 +1430,144 @@ pub(crate) async fn tool_run_background(params: &serde_json::Value, session_id: 
     let err_file = tmp_dir.join(format!("bg_err_{}.txt", std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() + 1));
 
-    let out_file_clone = out_file.clone();
-    let err_file_clone = err_file.clone();
+    // --- Shell routing (same strategy as tool_run_command) ---
+    let needs_shell = has_shell_metacharacters(command);
 
-    let (program, args) = parse_command(&command);
+    // Build the command to spawn. For metacharacter commands, always wrap in shell.
+    // For simple commands, try direct first with fallback to shell on spawn error.
+    let make_cmd = |program: &str, args: &[String]| -> std::process::Command {
+        let mut c = hidden_cmd(program);
+        c.args(args);
+        c.current_dir(&path);
+        c.stdout(std::process::Stdio::piped());
+        c.stderr(std::process::Stdio::piped());
+        c
+    };
+
+    let (program, args): (String, Vec<String>) = if needs_shell {
+        if cfg!(windows) {
+            ("cmd".into(), vec!["/d".into(), "/s".into(), "/c".into(), command.to_string()])
+        } else {
+            ("sh".into(), vec!["-c".into(), command.to_string()])
+        }
+    } else {
+        let (p, a) = parse_command(command);
+        (p, a)
+    };
+
     if program.is_empty() {
         return "Error: could not parse command".to_string();
     }
-    let mut cmd = hidden_cmd(&program);
-    cmd.args(&args);
-    cmd.current_dir(path);
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-    match cmd.spawn() {
-        Ok(mut child) => {
-            let pid = child.id();
-            let child_stdout = child.stdout.take();
-            let child_stderr = child.stderr.take();
 
-            // Register in background task registry for frontend visualization
-            let task_id = crate::background_tasks::register_task(
-                session_id, pid, &command,
-                &out_file_clone.to_string_lossy(),
-                &err_file_clone.to_string_lossy(),
-            );
+    // Spawn helper: returns (task_id, pid) on success
+    let try_spawn = |prog: &str, args: &[String],
+                      out_clone: &std::path::PathBuf,
+                      err_clone: &std::path::PathBuf|
+     -> Result<(u64, u32), String>
+    {
+        let mut cmd = make_cmd(prog, args);
+        let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn: {}", e))?;
+        let pid = child.id();
+        let child_stdout = child.stdout.take();
+        let child_stderr = child.stderr.take();
 
-            // Spawn threads to capture output to files in real-time
-            if let Some(stdout) = child_stdout {
-                let out_path = out_file_clone.clone();
-                std::thread::spawn(move || {
-                    use std::io::{BufRead, BufReader, Write};
-                    let reader = BufReader::new(stdout);
-                    if let Ok(mut file) = std::fs::File::create(&out_path) {
-                        for line in reader.lines().map_while(|l| l.ok()) {
-                            let _ = writeln!(file, "{}", line);
-                            let _ = file.flush();
-                        }
-                    } else {
-                        eprintln!("[agent_tools] Failed to create stdout file: {}", out_path.display());
-                    }
-                });
-            }
-            if let Some(stderr) = child_stderr {
-                let err_path = err_file_clone;
-                std::thread::spawn(move || {
-                    use std::io::{BufRead, BufReader, Write};
-                    let reader = BufReader::new(stderr);
-                    if let Ok(mut file) = std::fs::File::create(&err_path) {
-                        for line in reader.lines().map_while(|l| l.ok()) {
-                            let _ = writeln!(file, "{}", line);
-                            let _ = file.flush();
-                        }
-                    } else {
-                        eprintln!("[agent_tools] Failed to create stderr file: {}", err_path.display());
-                    }
-                });
-            }
+        let task_id = crate::background_tasks::register_task(
+            session_id, pid, command,
+            &out_clone.to_string_lossy(),
+            &err_clone.to_string_lossy(),
+        );
 
-            // Small wait for initial output
-            std::thread::sleep(std::time::Duration::from_secs(wait_sec));
-            let startup = std::fs::read_to_string(&out_file_clone).unwrap_or_default();
-
-            // Spawn reaper to write exit status when process ends
-            let out_reap = out_file_clone.clone();
+        // Capture stdout → file in real-time
+        if let Some(stdout) = child_stdout {
+            let out_path = out_clone.clone();
             std::thread::spawn(move || {
-                let status = child.wait(); // blocks until process exits
-                let exit_code = status.as_ref().ok().and_then(|s| s.code());
-                if let Ok(ref f) = std::fs::OpenOptions::new().append(true).open(&out_reap) {
-                    use std::io::Write;
-                    let mut f_ref = f;
-                    let _ = writeln!(f_ref, "\n--- 进程退出码: {:?} ---", exit_code);
+                use std::io::{BufRead, BufReader, Write};
+                let mut reader = BufReader::new(stdout);
+                if let Ok(mut file) = std::fs::File::create(&out_path) {
+                    let mut buf = Vec::new();
+                    while reader.read_until(b'\n', &mut buf).unwrap_or(0) > 0 {
+                        let line = String::from_utf8_lossy(&buf);
+                        let _ = writeln!(file, "{}", line.trim_end());
+                        let _ = file.flush();
+                        buf.clear();
+                    }
+                    if !buf.is_empty() {
+                        let _ = writeln!(file, "{}", String::from_utf8_lossy(&buf).trim_end());
+                    }
                 }
-                crate::background_tasks::task_done(task_id, exit_code);
             });
-
-            json!({
-                "success": true,
-                "task_id": task_id,
-                "pid": pid,
-                "out_file": out_file.to_string_lossy().to_string(),
-                "err_file": err_file.to_string_lossy().to_string(),
-                "startup_output": startup,
-                "message": format!("后台进程已启动，PID: {}, 输出文件: {}", pid, out_file.to_string_lossy())
-            }).to_string()
         }
-        Err(e) => json!({"error": format!("Failed to spawn: {}", e)}).to_string(),
-    }
+
+        // Capture stderr → file in real-time
+        if let Some(stderr) = child_stderr {
+            let err_path = err_clone.clone();
+            std::thread::spawn(move || {
+                use std::io::{BufRead, BufReader, Write};
+                let mut reader = BufReader::new(stderr);
+                if let Ok(mut file) = std::fs::File::create(&err_path) {
+                    let mut buf = Vec::new();
+                    while reader.read_until(b'\n', &mut buf).unwrap_or(0) > 0 {
+                        let line = String::from_utf8_lossy(&buf);
+                        let _ = writeln!(file, "{}", line.trim_end());
+                        let _ = file.flush();
+                        buf.clear();
+                    }
+                    if !buf.is_empty() {
+                        let _ = writeln!(file, "{}", String::from_utf8_lossy(&buf).trim_end());
+                    }
+                }
+            });
+        }
+
+        // Reaper: wait for exit, write exit code, mark task done
+        let out_reap = out_clone.clone();
+        std::thread::spawn(move || {
+            let status = child.wait();
+            let exit_code = status.as_ref().ok().and_then(|s| s.code());
+            if let Ok(ref f) = std::fs::OpenOptions::new().append(true).open(&out_reap) {
+                use std::io::Write;
+                let _ = writeln!(&mut &*f, "\n--- process exit: {:?} ---", exit_code);
+            }
+            crate::background_tasks::task_done(task_id, exit_code);
+        });
+
+        Ok((task_id, pid))
+    };
+
+    let (task_id, pid) = match try_spawn(&program, &args, &out_file, &err_file) {
+        Ok(id) => id,
+        Err(_first_err) => {
+            // If direct spawn failed and we didn't already use shell, retry with shell
+            if !needs_shell && !is_shell_program(&program) {
+                let shell_prog = if cfg!(windows) { "cmd" } else { "sh" };
+                let shell_args: Vec<String> = if cfg!(windows) {
+                    vec!["/d".into(), "/s".into(), "/c".into(), command.to_string()]
+                } else {
+                    vec!["-c".into(), command.to_string()]
+                };
+                match try_spawn(shell_prog, &shell_args, &out_file, &err_file) {
+                    Ok(id) => id,
+                    Err(e) => return json!({"error": e}).to_string(),
+                }
+            } else {
+                return json!({"error": _first_err}).to_string();
+            }
+        }
+    };
+
+    // Small wait for initial output
+    tokio::time::sleep(std::time::Duration::from_secs(wait_sec)).await;
+    let startup = std::fs::read_to_string(&out_file).unwrap_or_default();
+
+    json!({
+        "success": true,
+        "task_id": task_id,
+        "pid": pid,
+        "out_file": out_file.to_string_lossy().to_string(),
+        "err_file": err_file.to_string_lossy().to_string(),
+        "startup_output": startup,
+        "message": format!("Background process started (PID {}), output: {}", pid, out_file.to_string_lossy())
+    }).to_string()
 }
 
 pub(crate) async fn tool_job_output(params: &serde_json::Value) -> String {
@@ -1433,7 +1659,7 @@ pub(crate) async fn tool_list_jobs(_params: &serde_json::Value) -> String {
                 if text.trim().is_empty() {
                     "No running processes detected.".to_string()
                 } else {
-                    format!("Running processes:\n{}", text.lines().take(50).collect::<Vec<_>>().join("\n"))
+                    format!("Running processes:\n{}", text.lines().take(PROCESS_LIST_MAX_LINES).collect::<Vec<_>>().join("\n"))
                 }
             }
             Err(e) => format!("Error: {}", e),
@@ -1445,7 +1671,7 @@ pub(crate) async fn tool_list_jobs(_params: &serde_json::Value) -> String {
                 if text.trim().is_empty() {
                     "No running processes detected.".to_string()
                 } else {
-                    format!("Running processes:\n{}", text.lines().take(50).collect::<Vec<_>>().join("\n"))
+                    format!("Running processes:\n{}", text.lines().take(PROCESS_LIST_MAX_LINES).collect::<Vec<_>>().join("\n"))
                 }
             }
             Err(e) => format!("Error: {}", e),
@@ -1485,7 +1711,7 @@ pub(crate) async fn tool_kill_process(params: &serde_json::Value) -> String {
     tokio::task::spawn_blocking(move || {
         let output = if cfg!(windows) {
             hidden_cmd("taskkill")
-                .args(["/F", "/PID", &pid.to_string()])
+                .args(["/F", "/T", "/PID", &pid.to_string()])
                 .output()
         } else {
             hidden_cmd("kill")
@@ -1516,7 +1742,7 @@ pub(crate) async fn vision_anthropic(prompt: &str, image_url: &str, api_key: &st
 
     let request_body = serde_json::json!({
         "model": model,
-        "max_tokens": 2048,
+        "max_tokens": VISION_MAX_TOKENS,
         "messages": [{
             "role": "user",
             "content": [
@@ -1543,7 +1769,7 @@ pub(crate) async fn vision_anthropic(prompt: &str, image_url: &str, api_key: &st
         .header("anthropic-version", "2023-06-01")
         .header("Content-Type", "application/json")
         .json(&request_body)
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(std::time::Duration::from_secs(VISION_HTTP_TIMEOUT_SECS))
         .send()
         .await
     {
@@ -1882,48 +2108,6 @@ pub(crate) async fn tool_list_knowledge() -> String {
 
 // ========== Helper Functions ==========
 
-pub(crate) fn search_recursive(path: &str, pattern: &str, depth: usize, max_depth: usize, results: &mut Vec<(String, i32, String)>) {
-    if depth > max_depth {
-        return;
-    }
-
-    let entries = match std::fs::read_dir(path) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-
-    for entry in entries.filter_map(|e| e.ok()) {
-        let file_path = entry.path();
-        let file_name = file_path.file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-
-        if file_name.starts_with('.') || file_name == "node_modules" || file_name == "target" {
-            continue;
-        }
-
-        if file_path.is_dir() {
-            search_recursive(&file_path.to_string_lossy(), pattern, depth + 1, max_depth, results);
-        } else if file_path.is_file() {
-            if entry.metadata().map(|m| m.len() > 1_048_576).unwrap_or(false) { continue; }
-            if let Ok(content) = std::fs::read_to_string(&file_path) {
-                for (i, line) in content.lines().enumerate() {
-                    if line.to_lowercase().contains(pattern) {
-                        results.push((
-                            file_path.to_string_lossy().to_string(),
-                            (i + 1) as i32,
-                            line.trim().to_string(),
-                        ));
-                        if results.len() >= 50 {
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 pub(crate) fn find_replace_recursive(path: &str, find: &str, replace: &str, use_regex: bool, count: &mut usize, depth: usize, max_depth: usize) {
     if depth > max_depth {
         return;
@@ -2024,7 +2208,7 @@ pub(crate) fn resolve_image(image_url: &str) -> String {
     let path = std::path::Path::new(image_url);
     if path.exists() {
         if let Ok(bytes) = std::fs::read(path) {
-            if bytes.len() > 50 * 1024 * 1024 {
+            if bytes.len() > IMAGE_MAX_SIZE_BYTES as usize {
                 return String::new(); // Too large (>50MB)
             }
             let ext = path.extension()
@@ -2045,7 +2229,7 @@ pub(crate) fn resolve_image(image_url: &str) -> String {
     if image_url.starts_with("http://") || image_url.starts_with("https://") {
         if let Ok(resp) = reqwest::blocking::get(image_url) {
             if let Ok(bytes) = resp.bytes() {
-                if bytes.len() > 50 * 1024 * 1024 {
+                if bytes.len() > IMAGE_MAX_SIZE_BYTES as usize {
                     return String::new();
                 }
                 let mime = "image/jpeg"; // default
@@ -2171,6 +2355,164 @@ pub(crate) fn find_project_root(start: &std::path::Path, markers: &[&str]) -> st
     if start.is_dir() { start.to_path_buf() } else { start.parent().map(|p| p.to_path_buf()).unwrap_or_default() }
 }
 
+// ========== Worktree Tools ==========
+
+pub(crate) async fn tool_create_worktree(
+    params: &serde_json::Value,
+    caller_session_id: i64,
+    db: Arc<StdMutex<Connection>>,
+) -> String {
+    let branch_name = params["branch_name"].as_str().unwrap_or("");
+    let base_dir = params["base_dir"].as_str().unwrap_or(".");
+
+    if branch_name.is_empty() {
+        return json!({"error": "branch_name is required"}).to_string();
+    }
+
+    let branch = branch_name.to_string();
+    let base = normalize_file_path(base_dir);
+    let db_clone = db.clone();
+
+    let result = tokio::task::spawn_blocking(move || {
+        let worktree_dir = format!("../work-{}", branch.replace('/', "-"));
+
+        let output = hidden_cmd("git")
+            .args(["worktree", "add", &worktree_dir, "-b", &branch])
+            .current_dir(&base)
+            .output()
+            .map_err(|e| format!("Failed to run git worktree: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("git worktree add failed: {}", stderr));
+        }
+
+        let abs_path = std::path::Path::new(&base)
+            .join(&worktree_dir)
+            .canonicalize()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| format!("{}/{}", base.trim_end_matches('/'), worktree_dir.trim_start_matches("../")));
+
+        // Store in DB
+        let conn = db_clone.lock().map_err(|e| format!("DB lock error: {}", e))?;
+        conn.execute(
+            "UPDATE agent_session SET worktree_path = ?1 WHERE id = ?2",
+            rusqlite::params![abs_path, caller_session_id],
+        ).map_err(|e| format!("Failed to update session: {}", e))?;
+
+        Ok(abs_path)
+    }).await;
+
+    match result {
+        Ok(Ok(path)) => json!({"success": true, "worktree_path": path}).to_string(),
+        Ok(Err(e)) => json!({"error": e}).to_string(),
+        Err(e) => json!({"error": format!("Task error: {}", e)}).to_string(),
+    }
+}
+
+pub(crate) async fn tool_merge_worktree(
+    params: &serde_json::Value,
+    caller_session_id: i64,
+    db: Arc<StdMutex<Connection>>,
+) -> String {
+    let worktree_path = params["worktree_path"].as_str().unwrap_or("");
+    let message = params["message"].as_str().unwrap_or("Merge worktree");
+
+    if worktree_path.is_empty() {
+        return json!({"error": "worktree_path is required"}).to_string();
+    }
+
+    let wt_path = worktree_path.to_string();
+    let msg = message.to_string();
+    let db_clone = db.clone();
+
+    let result = tokio::task::spawn_blocking(move || {
+        // git add -A
+        let add_out = hidden_cmd("git")
+            .args(["add", "-A"])
+            .current_dir(&wt_path)
+            .output()
+            .map_err(|e| format!("git add failed: {}", e))?;
+        if !add_out.status.success() {
+            return Err(format!("git add failed: {}", String::from_utf8_lossy(&add_out.stderr)));
+        }
+
+        // git commit
+        let commit_out = hidden_cmd("git")
+            .args(["commit", "-m", &msg])
+            .current_dir(&wt_path)
+            .output()
+            .map_err(|e| format!("git commit failed: {}", e))?;
+        if !commit_out.status.success() {
+            let stderr = String::from_utf8_lossy(&commit_out.stderr);
+            if !stderr.contains("nothing to commit") {
+                return Err(format!("git commit failed: {}", stderr));
+            }
+        }
+
+        // Get branch name
+        let branch_out = hidden_cmd("git")
+            .args(["branch", "--show-current"])
+            .current_dir(&wt_path)
+            .output()
+            .map_err(|e| format!("git branch failed: {}", e))?;
+        let branch = String::from_utf8_lossy(&branch_out.stdout).trim().to_string();
+
+        // Get base dir (parent of worktree)
+        let base_dir = std::path::Path::new(&wt_path)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| ".".to_string());
+
+        // checkout main and merge
+        let _ = hidden_cmd("git")
+            .args(["checkout", "main"])
+            .current_dir(&base_dir)
+            .output();
+
+        let merge_out = hidden_cmd("git")
+            .args(["merge", &branch])
+            .current_dir(&base_dir)
+            .output()
+            .map_err(|e| format!("git merge failed: {}", e))?;
+        if !merge_out.status.success() {
+            return Err(format!("git merge failed: {}", String::from_utf8_lossy(&merge_out.stderr)));
+        }
+
+        // Clear worktree_path
+        let conn = db_clone.lock().map_err(|e| format!("DB lock error: {}", e))?;
+        conn.execute(
+            "UPDATE agent_session SET worktree_path = NULL WHERE id = ?1",
+            [caller_session_id],
+        ).map_err(|e| format!("Failed to update session: {}", e))?;
+
+        Ok(format!("Merged branch '{}' into main", branch))
+    }).await;
+
+    match result {
+        Ok(Ok(msg)) => json!({"success": true, "message": msg}).to_string(),
+        Ok(Err(e)) => json!({"error": e}).to_string(),
+        Err(e) => json!({"error": format!("Task error: {}", e)}).to_string(),
+    }
+}
+
+/// Normalize a file path with optional worktree prefix.
+/// If worktree_path is Some, prepends it to the relative path.
+pub(crate) fn normalize_file_path_with_worktree(path: &str, worktree_path: Option<&str>) -> String {
+    match worktree_path {
+        Some(wp) if !wp.is_empty() => {
+            let normalized = normalize_file_path(path);
+            // Don't prefix if path is already absolute
+            if std::path::Path::new(&normalized).is_absolute() {
+                normalized
+            } else {
+                format!("{}/{}", wp.trim_end_matches('/'), normalized.trim_start_matches('/').trim_start_matches('\\'))
+            }
+        }
+        _ => normalize_file_path(path),
+    }
+}
+
 pub(crate) fn tool_reason(tool: &str, file: Option<&str>, cmd: Option<&str>) -> String {
     match tool {
         "run_command" | "run_background" => {
@@ -2182,7 +2524,6 @@ pub(crate) fn tool_reason(tool: &str, file: Option<&str>, cmd: Option<&str>) -> 
         "delete_file" => {
             format!("Delete: {}", file.unwrap_or("unknown file"))
         }
-        "send_to_agent" => "Send message to agent".to_string(),
         _ => format!("Execute: {}", tool),
     }
 }
@@ -2384,7 +2725,7 @@ pub(crate) async fn tool_ask_choice(
 
     // Wait up to 10 minutes for user response, then emit a timeout/expired event
     // so the frontend can dismiss the dialog gracefully.
-    match tokio::time::timeout(std::time::Duration::from_secs(600), rx).await {
+    match tokio::time::timeout(std::time::Duration::from_secs(ASK_CHOICE_TIMEOUT_SECS), rx).await {
         Ok(Ok(answers)) => answers,
         Ok(Err(_)) => {
             // sender dropped = dialog closed / cancelled by frontend
@@ -2662,5 +3003,432 @@ mod tests {
         std::fs::write(&path, "line1\nline2\nline3").unwrap();
         assert_eq!(count_lines(&path.to_string_lossy()), 3);
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+// ==================== Command execution tests ====================
+
+#[cfg(test)]
+mod cmd_tests {
+    use super::*;
+
+    // --- parse_command ---
+
+    #[test]
+    fn parse_simple_two_words() {
+        let (prog, args) = parse_command("git status");
+        assert_eq!(prog, "git");
+        assert_eq!(args, vec!["status"]);
+    }
+
+    #[test]
+    fn parse_single_program() {
+        let (prog, args) = parse_command("dir");
+        assert_eq!(prog, "dir");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn parse_with_double_quotes() {
+        let (prog, args) = parse_command(r#"cmd /c "echo hello world""#);
+        assert_eq!(prog, "cmd");
+        assert_eq!(args, vec!["/c", "echo hello world"]);
+    }
+
+    #[test]
+    fn parse_with_single_quotes() {
+        let (prog, args) = parse_command("echo 'hello world'");
+        assert_eq!(prog, "echo");
+        assert_eq!(args, vec!["hello world"]);
+    }
+
+    #[test]
+    fn parse_nested_quotes() {
+        let (prog, args) = parse_command(r#"node -e "console.log('hello > world')""#);
+        assert_eq!(prog, "node");
+        assert_eq!(args, vec!["-e", "console.log('hello > world')"]);
+    }
+
+    #[test]
+    fn parse_preserves_metacharacters_in_quotes() {
+        let (prog, args) = parse_command(r#"echo "hello | world""#);
+        assert_eq!(prog, "echo");
+        assert_eq!(args, vec!["hello | world"]);
+    }
+
+    #[test]
+    fn parse_empty_string() {
+        let (prog, args) = parse_command("");
+        assert!(prog.is_empty());
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn parse_whitespace_only() {
+        let (prog, _) = parse_command("   \t  ");
+        assert!(prog.is_empty());
+    }
+
+    #[test]
+    fn parse_multiple_flags() {
+        let (prog, args) = parse_command("cmd /d /s /c dir");
+        assert_eq!(prog, "cmd");
+        assert_eq!(args, vec!["/d", "/s", "/c", "dir"]);
+    }
+
+    #[test]
+    fn parse_powershell_command() {
+        let (prog, args) = parse_command(r#"powershell -Command "Get-Process | Sort-Object CPU""#);
+        assert_eq!(prog, "powershell");
+        assert_eq!(args, vec!["-Command", "Get-Process | Sort-Object CPU"]);
+    }
+
+    #[test]
+    fn parse_path_with_spaces_quoted() {
+        let (prog, args) = parse_command(r#""C:\Program Files\Git\bin\git.exe" status"#);
+        assert_eq!(prog, "C:\\Program Files\\Git\\bin\\git.exe");
+        assert_eq!(args, vec!["status"]);
+    }
+
+    #[test]
+    fn parse_unquoted_metacharacters_kept_as_args() {
+        let (prog, args) = parse_command("git diff > patch");
+        assert_eq!(prog, "git");
+        assert_eq!(args, vec!["diff", ">", "patch"]);
+    }
+
+    #[test]
+    fn parse_trailing_spaces() {
+        let (prog, args) = parse_command("echo hello   ");
+        assert_eq!(prog, "echo");
+        assert_eq!(args, vec!["hello"]);
+    }
+
+    #[test]
+    fn parse_leading_spaces() {
+        let (prog, args) = parse_command("   echo hello");
+        assert_eq!(prog, "echo");
+        assert_eq!(args, vec!["hello"]);
+    }
+
+    #[test]
+    fn parse_tab_separator() {
+        let (prog, args) = parse_command("git\tstatus");
+        assert_eq!(prog, "git");
+        assert_eq!(args, vec!["status"]);
+    }
+
+    // --- has_shell_metacharacters ---
+
+    #[test]
+    fn no_metacharacters_simple() {
+        assert!(!has_shell_metacharacters("git status"));
+        assert!(!has_shell_metacharacters("npm install"));
+        assert!(!has_shell_metacharacters("node script.js"));
+    }
+
+    #[test]
+    fn detects_unquoted_pipe() {
+        assert!(has_shell_metacharacters("dir | findstr test"));
+    }
+
+    #[test]
+    fn detects_unquoted_redirect() {
+        assert!(has_shell_metacharacters("git diff > patch"));
+        assert!(has_shell_metacharacters("echo hello >> log.txt"));
+    }
+
+    #[test]
+    fn detects_unquoted_input_redirect() {
+        assert!(has_shell_metacharacters("mysql < dump.sql"));
+    }
+
+    #[test]
+    fn detects_unquoted_and_and() {
+        assert!(has_shell_metacharacters("npm install && npm run build"));
+    }
+
+    #[test]
+    fn ignores_pipe_in_double_quotes() {
+        assert!(!has_shell_metacharacters(r#"echo "hello | world""#));
+    }
+
+    #[test]
+    fn ignores_pipe_in_single_quotes() {
+        assert!(!has_shell_metacharacters("echo 'hello | world'"));
+    }
+
+    #[test]
+    fn ignores_redirect_in_quotes() {
+        assert!(!has_shell_metacharacters(r#"cmd /c "echo hello > file.txt""#));
+    }
+
+    #[test]
+    fn ignores_and_and_in_quotes() {
+        assert!(!has_shell_metacharacters(r#"echo "install && build""#));
+    }
+
+    #[test]
+    fn detects_gt_in_single_quotes_outside_double() {
+        // ' outside double quotes: > is outside quotes
+        assert!(has_shell_metacharacters("echo 'hello' > file"));
+    }
+
+    #[test]
+    fn mixed_quote_metachar_safe() {
+        // Pipe inside single quotes inside double quotes → safe
+        assert!(!has_shell_metacharacters(r#"python -c "print('hello | world')""#));
+    }
+
+    #[test]
+    fn nested_pipe_safe_in_powershell() {
+        // The | is inside "..." so it's safe for our detector
+        assert!(!has_shell_metacharacters(r#"powershell -Command "Get-Process | Sort CPU""#));
+    }
+
+    #[test]
+    fn bare_pipe_after_shell_wrap() {
+        // cmd /c ... | findstr → | is outside quotes and after cmd args
+        assert!(has_shell_metacharacters("cmd /c dir | findstr test"));
+    }
+
+    #[test]
+    fn no_false_positive_on_single_ampersand() {
+        // Single & is not flagged (only && is)
+        assert!(!has_shell_metacharacters("echo hello & echo world"));
+    }
+
+    // --- is_shell_program ---
+
+    #[test]
+    fn windows_shells_recognized() {
+        assert!(is_shell_program("cmd"));
+        assert!(is_shell_program("cmd.exe"));
+        assert!(is_shell_program("powershell"));
+        assert!(is_shell_program("powershell.exe"));
+        assert!(is_shell_program("pwsh"));
+        assert!(is_shell_program("pwsh.exe"));
+    }
+
+    #[test]
+    fn unix_shells_recognized() {
+        assert!(is_shell_program("sh"));
+        assert!(is_shell_program("bash"));
+        assert!(is_shell_program("zsh"));
+        assert!(is_shell_program("fish"));
+        assert!(is_shell_program("dash"));
+    }
+
+    #[test]
+    fn full_path_shell() {
+        assert!(is_shell_program("/bin/bash"));
+        assert!(is_shell_program("/usr/bin/sh"));
+        assert!(is_shell_program("C:\\Windows\\System32\\cmd.exe"));
+    }
+
+    #[test]
+    fn case_insensitive() {
+        assert!(is_shell_program("CMD"));
+        assert!(is_shell_program("PowerShell"));
+        assert!(is_shell_program("Bash"));
+    }
+
+    #[test]
+    fn wsl_recognized() {
+        assert!(is_shell_program("wsl"));
+    }
+
+    #[test]
+    fn non_shell_programs() {
+        assert!(!is_shell_program("git"));
+        assert!(!is_shell_program("npm"));
+        assert!(!is_shell_program("node"));
+        assert!(!is_shell_program("python"));
+        assert!(!is_shell_program("echo"));
+        assert!(!is_shell_program("dir"));
+    }
+
+    // --- truncate_tool_result ---
+
+    #[test]
+    fn truncate_short_output_unchanged() {
+        let s = "hello world".to_string();
+        assert_eq!(truncate_tool_result(s.clone()), s);
+    }
+
+    #[test]
+    fn truncate_long_output() {
+        // 5000 lines × 20 bytes each = 100,000+ bytes
+        // This ensures both bytes AND lines exceed the cap
+        let input = (0..5000).map(|i| format!("line{:04}abcdefghijklm", i)).collect::<Vec<_>>().join("\n");
+        assert!(input.len() > 55_000, "input should be > 50KB cap");
+        assert!(input.lines().count() > 2500, "input should be > 2000 line cap");
+        let result = truncate_tool_result(input);
+        assert!(result.len() < 60_000, "result {} should be much smaller than input", result.len());
+        assert!(result.contains("truncated"), "should contain truncated marker, got first 200 chars: {}", &result[..result.len().min(200)]);
+    }
+
+    #[test]
+    fn truncate_very_long_single_line() {
+        let s = "x".repeat(60_000);
+        // 60K chars is > 50KB MAX_BYTES, should trigger truncation
+        let result = truncate_tool_result(s);
+        // After truncation: head (85% of 2000 lines = 1700 chars) + marker + tail
+        assert!(result.contains("truncated"), "single long line should be truncated, got length {}", result.len());
+    }
+
+    #[test]
+    fn truncate_preserves_head_and_tail() {
+        let lines: Vec<String> = (0..3000).map(|i| format!("line{}", i)).collect();
+        let input = lines.join("\n");
+        let result = truncate_tool_result(input);
+        assert!(result.contains("line0"));
+        assert!(result.contains("line2999"));
+    }
+
+    #[test]
+    fn truncate_exact_boundary() {
+        // Exactly at 2000 lines — no truncation
+        let lines: Vec<String> = (0..2000).map(|i| format!("L{}", i)).collect();
+        let input = lines.join("\n");
+        let result = truncate_tool_result(input);
+        assert!(result.contains("L1999"), "tail should be present: {}", result.lines().count());
+    }
+
+    // --- is_parallel_safe ---
+
+    #[test]
+    fn read_only_tools_parallel_safe() {
+        assert!(is_parallel_safe("read_file"));
+        assert!(is_parallel_safe("read_files"));
+        assert!(is_parallel_safe("list_dir"));
+        assert!(is_parallel_safe("directory_tree"));
+        assert!(is_parallel_safe("get_file_info"));
+        assert!(is_parallel_safe("search_in_dir"));
+        assert!(is_parallel_safe("search_files"));
+        assert!(is_parallel_safe("glob"));
+        assert!(is_parallel_safe("analyze_project_structure"));
+    }
+
+    #[test]
+    fn web_tools_parallel_safe() {
+        assert!(is_parallel_safe("web_search"));
+        assert!(is_parallel_safe("web_fetch"));
+    }
+
+    #[test]
+    fn command_tools_parallel_safe() {
+        assert!(is_parallel_safe("run_command"));
+        assert!(is_parallel_safe("run_background"));
+        assert!(is_parallel_safe("spawn_process"));
+    }
+
+    #[test]
+    fn write_tools_not_parallel_safe() {
+        assert!(!is_parallel_safe("write_file"));
+        assert!(!is_parallel_safe("edit_file"));
+        assert!(!is_parallel_safe("multi_edit"));
+        assert!(!is_parallel_safe("delete_file"));
+    }
+}
+
+// ==================== Shell routing integration tests ====================
+
+#[cfg(test)]
+mod shell_routing_tests {
+    use super::*;
+
+    /// Simulates what tool_run_command does for shell routing,
+    /// without actually spawning processes.
+    fn route_command(command: &str) -> &'static str {
+        if command.is_empty() {
+            return "empty";
+        }
+        let (program, _) = parse_command(command);
+        if program.is_empty() {
+            return "parse_error";
+        }
+        let needs_shell = has_shell_metacharacters(command);
+        if needs_shell && !is_shell_program(&program) {
+            return "system_shell";   // Path 1: wrap in cmd/sh
+        }
+        if is_shell_program(&program) {
+            return "direct_shell";   // Path 2: explicit shell, run as-is
+        }
+        // Path 3: try direct, fallback to shell on error
+        // We can't test runtime behavior, but we verify the routing intent
+        "direct_with_fallback"
+    }
+
+    #[test]
+    fn shell_builtin_fallback() {
+        // These would fail directly, then succeed via shell fallback
+        assert_eq!(route_command("echo hello"), "direct_with_fallback");
+        assert_eq!(route_command("dir"), "direct_with_fallback");
+        assert_eq!(route_command("type file.txt"), "direct_with_fallback");
+    }
+
+    #[test]
+    fn simple_commands_direct() {
+        assert_eq!(route_command("git status"), "direct_with_fallback");
+        assert_eq!(route_command("npm install"), "direct_with_fallback");
+        assert_eq!(route_command("python script.py"), "direct_with_fallback");
+    }
+
+    #[test]
+    fn redirect_forces_system_shell() {
+        assert_eq!(route_command("git diff > patch"), "system_shell");
+        assert_eq!(route_command("echo hello >> log.txt"), "system_shell");
+    }
+
+    #[test]
+    fn pipe_forces_system_shell() {
+        assert_eq!(route_command("dir | findstr test"), "system_shell");
+    }
+
+    #[test]
+    fn chaining_forces_system_shell() {
+        assert_eq!(route_command("npm install && npm run build"), "system_shell");
+    }
+
+    #[test]
+    fn input_redirect_forces_system_shell() {
+        assert_eq!(route_command("mysql < dump.sql"), "system_shell");
+    }
+
+    #[test]
+    fn explicit_cmd_runs_direct() {
+        assert_eq!(route_command("cmd /c dir"), "direct_shell");
+        assert_eq!(route_command("cmd /d /s /c \"echo hello\""), "direct_shell");
+    }
+
+    #[test]
+    fn explicit_powershell_runs_direct() {
+        assert_eq!(route_command("powershell -Command Get-Date"), "direct_shell");
+        assert_eq!(route_command("pwsh -c Write-Host hello"), "direct_shell");
+    }
+
+    #[test]
+    fn explicit_bash_runs_direct() {
+        assert_eq!(route_command("bash -c 'ls -la'"), "direct_shell");
+        assert_eq!(route_command("sh script.sh"), "direct_shell");
+    }
+
+    #[test]
+    fn quoted_metacharacters_direct_execution() {
+        // These have metacharacters inside quotes → not flagged → try direct
+        assert_eq!(route_command(r#"echo "hello > world""#), "direct_with_fallback");
+        assert_eq!(route_command(r#"python -c "print('a | b')""#), "direct_with_fallback");
+    }
+
+    #[test]
+    fn empty_command_returns_empty() {
+        assert_eq!(route_command(""), "empty");
+    }
+
+    #[test]
+    fn var_expansion_fallback() {
+        // %VAR% not detected as metacharacter → falls back on spawn error
+        assert_eq!(route_command("echo %PATH%"), "direct_with_fallback");
     }
 }

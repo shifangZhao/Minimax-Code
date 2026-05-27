@@ -4,8 +4,8 @@
     <input
       type="text"
       v-model="projectPath"
-      placeholder="选择项目文件夹..."
-      readonly
+      placeholder="输入路径或选择文件夹..."
+      @blur="savePath"
     />
     <button class="file-btn" @click="selectFolder" title="选择文件夹">📁</button>
   </div>
@@ -28,6 +28,16 @@ onMounted(async () => {
     console.error('Failed to load workspace:', e)
   }
 })
+
+const savePath = async () => {
+  if (projectPath.value.trim()) {
+    try {
+      await invoke('set_workspace', { workspace: projectPath.value.trim() })
+    } catch (e) {
+      console.error('Failed to save workspace:', e)
+    }
+  }
+}
 
 const selectFolder = async () => {
   const selected = await open({

@@ -34,6 +34,10 @@ fn hidden_cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
+    cmd.env("PYTHONUTF8", "1")
+       .env("PYTHONIOENCODING", "utf-8")
+       .env("LANG", "C.UTF-8")
+       .env("LC_ALL", "C.UTF-8");
     cmd
 }
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -61,7 +65,7 @@ struct AppState {
     permission_service: Arc<Mutex<PermissionService>>,
     pending_asks: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
     cancel_registry: CancelRegistry,
-    running_command_pids: Arc<Mutex<HashMap<i64, u32>>>,
+    running_command_pids: Arc<Mutex<HashMap<i64, Vec<u32>>>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -77,6 +81,7 @@ pub struct AgentSession {
     pub id: i64,
     pub group_chat_id: i64,
     pub agent_type: String,
+    pub worktree_path: Option<String>,
     pub created_at: String,
 }
 
@@ -244,14 +249,15 @@ fn create_agent_session(state: State<AppState>, group_chat_id: i64, agent_type: 
 fn get_agent_sessions(state: State<AppState>, group_chat_id: i64, agent_type: String) -> Result<Vec<AgentSession>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn.prepare(
-        "SELECT id, group_chat_id, agent_type, created_at FROM agent_session WHERE group_chat_id = ?1 AND agent_type = ?2"
+        "SELECT id, group_chat_id, agent_type, worktree_path, created_at FROM agent_session WHERE group_chat_id = ?1 AND agent_type = ?2"
     ).map_err(|e| e.to_string())?;
     let sessions = stmt.query_map(rusqlite::params![group_chat_id, agent_type], |row| {
         Ok(AgentSession {
             id: row.get(0)?,
             group_chat_id: row.get(1)?,
             agent_type: row.get(2)?,
-            created_at: row.get(3)?,
+            worktree_path: row.get(3)?,
+            created_at: row.get(4)?,
         })
     }).map_err(|e| e.to_string())?
     .collect::<Result<Vec<_>, _>>()
@@ -262,6 +268,7 @@ fn get_agent_sessions(state: State<AppState>, group_chat_id: i64, agent_type: St
 // ========== Chat Message Commands ==========
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn add_message(state: State<AppState>, session_id: i64, role: String, content: String, _tool_calls: Option<String>, _thinking: Option<String>, attachments: Option<String>, _raw_json: Option<String>) -> Result<i64, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     conn.execute(
@@ -275,7 +282,7 @@ fn add_message(state: State<AppState>, session_id: i64, role: String, content: S
 fn get_messages(state: State<AppState>, session_id: i64, offset: Option<i64>, limit: Option<i64>) -> Result<Vec<ChatMessage>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let off = offset.unwrap_or(0).max(0);
-    let lim = limit.unwrap_or(100).max(1).min(1000);
+    let lim = limit.unwrap_or(100).clamp(1, 1000);
     let sql = "SELECT id, session_id, role, content, attachments, created_at FROM (SELECT * FROM chat_message WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2 OFFSET ?3) ORDER BY id ASC";
     let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
     let mut messages: Vec<ChatMessage> = stmt.query_map(rusqlite::params![session_id, lim, off], |row| {
@@ -1364,6 +1371,7 @@ fn find_replace_in_files(dir: String, find: String, replace: String, file_filter
     Ok(results)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn find_replace_recursive(dir: &str, find: &str, replace: &str, filter_exts: &[&str], use_regex: bool, results: &mut Vec<FindReplaceResult>, depth: usize, max_depth: usize) -> Result<(), String> {
     if depth > max_depth {
         return Ok(());
@@ -1715,11 +1723,13 @@ async fn agent_chat_stream(
             }
         }
         if let Ok(mut pids) = state.running_command_pids.lock() {
-            if let Some(pid) = pids.remove(&session_id) {
-                #[cfg(windows)]
-                { let _ = std::process::Command::new("taskkill").args(["/F", "/T", "/PID", &pid.to_string()]).output(); }
-                #[cfg(not(windows))]
-                { let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).output(); }
+            if let Some(pid_list) = pids.remove(&session_id) {
+                for pid in pid_list {
+                    #[cfg(windows)]
+                    { let _ = std::process::Command::new("taskkill").args(["/F", "/T", "/PID", &pid.to_string()]).spawn(); }
+                    #[cfg(not(windows))]
+                    { let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).spawn(); }
+                }
             }
         }
         // Drain stale pending-asks for this session
@@ -1780,32 +1790,50 @@ fn open_devtools(window: tauri::WebviewWindow) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn abort_stream(state: State<'_, AppState>, session_id: i64) -> Result<(), String> {
-    // Kill any running command process for this session before signaling cancel
-    if let Ok(mut pids) = state.running_command_pids.lock() {
-        if let Some(pid) = pids.remove(&session_id) {
-            #[cfg(windows)]
-            {
-                let _ = std::process::Command::new("taskkill")
-                    .args(["/F", "/T", "/PID", &pid.to_string()])
-                    .output();
-            }
-            #[cfg(not(windows))]
-            {
-                let _ = std::process::Command::new("kill")
-                    .args(["-9", &pid.to_string()])
-                    .output();
-            }
-            eprintln!("[abort_stream] Killed running command PID {} for session {}", pid, session_id);
+async fn abort_stream(state: State<'_, AppState>, app: AppHandle, session_id: i64) -> Result<(), String> {
+    // 1. Immediate acknowledgment — frontend freezes display in <2ms
+    let _ = app.emit(&format!("agent_stream_{}", session_id), serde_json::json!({
+        "type": "abort_acknowledged"
+    }));
+
+    // 2. Kill running command processes (fire-and-forget, non-blocking)
+    let pids_to_kill: Vec<u32> = {
+        if let Ok(mut pids) = state.running_command_pids.lock() {
+            pids.remove(&session_id).unwrap_or_default()
+        } else {
+            Vec::new()
         }
+    };
+    for pid in pids_to_kill {
+        #[cfg(windows)]
+        {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/F", "/T", "/PID", &pid.to_string()])
+                .spawn(); // .spawn() returns immediately
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .spawn();
+        }
+        eprintln!("[abort_stream] Fire-and-forget kill PID {} for session {}", pid, session_id);
     }
 
-    let mut registry = state.cancel_registry.lock().map_err(|e| e.to_string())?;
-    if let Some(tx) = registry.get(&session_id) {
-        let _ = tx.send(true);
+    // 3. Signal cancel channel
+    if let Ok(mut registry) = state.cancel_registry.lock() {
+        if let Some(tx) = registry.get(&session_id) {
+            let _ = tx.send(true);
+        }
+        registry.remove(&session_id);
     }
-    registry.remove(&session_id);
-    eprintln!("[abort_stream] Cancel signaled and registry cleaned for session {}", session_id);
+
+    // 4. Cancel all pending permission dialogs
+    if let Ok(ps) = state.permission_service.lock() {
+        ps.cancel_all_pending();
+    }
+
+    eprintln!("[abort_stream] Cancel signaled for session {}", session_id);
     Ok(())
 }
 
@@ -1824,6 +1852,7 @@ async fn mcp_reload(state: State<'_, AppState>) -> Result<String, String> {
 /// Shared helper: summarize → compress → persist to DB.
 /// Used by both automatic compression (stream_chat) and manual /compact command.
 /// Returns (token_count_before, token_count_after).
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) async fn compact_messages(
     db: &Arc<Mutex<Connection>>,
     session_id: i64,
@@ -1954,12 +1983,14 @@ async fn compact_session(state: State<'_, AppState>, session_id: i64) -> Result<
 
         // Batch-load parts
         let msg_ids: Vec<i64> = msgs.iter().map(|m| m.0).collect();
+        #[allow(clippy::type_complexity)]
         let parts_map: std::collections::HashMap<i64, Vec<(String, String, Option<String>, Option<String>, Option<String>)>> = if !msg_ids.is_empty() {
             let ids_str: Vec<String> = msg_ids.iter().map(|id| id.to_string()).collect();
             let ph = ids_str.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let part_sql = format!("SELECT message_id, part_order, part_type, content, tool_use_id, tool_name, tool_input FROM message_part WHERE message_id IN ({}) ORDER BY message_id, part_order", ph);
             let mut pstmt = conn.prepare(&part_sql).map_err(|e| e.to_string())?;
             let params: Vec<&dyn rusqlite::types::ToSql> = ids_str.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+            #[allow(clippy::type_complexity)]
             let parts: Vec<(i64, i64, String, String, Option<String>, Option<String>, Option<String>)> = pstmt.query_map(params.as_slice(), |row| Ok((
                 row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?,
@@ -2437,6 +2468,117 @@ fn delete_bookmark(state: State<AppState>, bookmark_id: i64) -> Result<(), Strin
     Ok(())
 }
 
+// ========== Utility Commands ==========
+
+#[tauri::command]
+fn get_last_group_chat_id(state: State<AppState>) -> Result<i64, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    conn.query_row(
+        "SELECT COALESCE(MAX(id), 0) FROM group_chat",
+        [],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())
+}
+
+// ========== Worktree Commands ==========
+
+#[tauri::command]
+fn create_worktree(state: State<AppState>, _group_chat_id: i64, agent_session_id: i64, branch_name: String, base_dir: String) -> Result<String, String> {
+    use std::process::Command as StdCommand;
+
+    let worktree_dir = format!("../work-{}", branch_name.replace('/', "-"));
+
+    // Create worktree
+    let output = StdCommand::new("git")
+        .args(["worktree", "add", &worktree_dir, "-b", &branch_name])
+        .current_dir(&base_dir)
+        .output()
+        .map_err(|e| format!("Failed to run git worktree: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git worktree add failed: {}", stderr));
+    }
+
+    // Resolve absolute path
+    let abs_path = std::path::Path::new(&base_dir)
+        .join(&worktree_dir)
+        .canonicalize()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| format!("{}/{}", base_dir.trim_end_matches('/'), worktree_dir.trim_start_matches("../")));
+
+    // Store in DB
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE agent_session SET worktree_path = ?1 WHERE id = ?2",
+        rusqlite::params![abs_path, agent_session_id],
+    ).map_err(|e| e.to_string())?;
+
+    Ok(abs_path)
+}
+
+#[tauri::command]
+fn merge_worktree(state: State<AppState>, agent_session_id: i64, worktree_path: String, message: String, base_dir: String) -> Result<String, String> {
+    use std::process::Command as StdCommand;
+
+    // git add -A && git commit
+    let commit_output = StdCommand::new("git")
+        .args(["add", "-A"])
+        .current_dir(&worktree_path)
+        .output()
+        .map_err(|e| format!("git add failed: {}", e))?;
+
+    if !commit_output.status.success() {
+        return Err(format!("git add failed: {}", String::from_utf8_lossy(&commit_output.stderr)));
+    }
+
+    let commit_output = StdCommand::new("git")
+        .args(["commit", "-m", &message])
+        .current_dir(&worktree_path)
+        .output()
+        .map_err(|e| format!("git commit failed: {}", e))?;
+
+    if !commit_output.status.success() {
+        let stderr = String::from_utf8_lossy(&commit_output.stderr);
+        if !stderr.contains("nothing to commit") {
+            return Err(format!("git commit failed: {}", stderr));
+        }
+    }
+
+    // Get current branch name from worktree
+    let branch_output = StdCommand::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(&worktree_path)
+        .output()
+        .map_err(|e| format!("git branch failed: {}", e))?;
+    let branch = String::from_utf8_lossy(&branch_output.stdout).trim().to_string();
+
+    // Checkout main in base dir and merge
+    let _ = StdCommand::new("git")
+        .args(["checkout", "main"])
+        .current_dir(&base_dir)
+        .output();
+
+    let merge_output = StdCommand::new("git")
+        .args(["merge", &branch])
+        .current_dir(&base_dir)
+        .output()
+        .map_err(|e| format!("git merge failed: {}", e))?;
+
+    if !merge_output.status.success() {
+        return Err(format!("git merge failed: {}", String::from_utf8_lossy(&merge_output.stderr)));
+    }
+
+    // Clear worktree_path from session
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE agent_session SET worktree_path = NULL WHERE id = ?1",
+        [agent_session_id],
+    ).map_err(|e| e.to_string())?;
+
+    Ok(format!("Merged branch '{}' into main", branch))
+}
+
 pub fn run() {
     let user_dir = init_user_dir();
     let db_path = user_dir.join("minimax.db");
@@ -2452,17 +2594,13 @@ pub fn run() {
          PRAGMA foreign_keys = ON;"
     ).expect("Failed to set PRAGMAs");
 
-    // Drop old chat_history table if exists (migration from old schema)
-    conn.execute("DROP TABLE IF EXISTS chat_history", [])
-        .expect("Failed to drop old chat_history table");
-
-    // ── Base tables (idempotent: CREATE IF NOT EXISTS) ──────────────────
+    // ── Create all tables (first version, no migrations) ────────────────
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS group_chat (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
-            mode TEXT NOT NULL DEFAULT 'team',
+            mode TEXT NOT NULL DEFAULT 'ace',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )", [], ).expect("Failed to create group_chat table");
 
@@ -2471,11 +2609,11 @@ pub fn run() {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             group_chat_id INTEGER NOT NULL,
             agent_type TEXT NOT NULL,
+            worktree_path TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (group_chat_id) REFERENCES group_chat(id)
         )", [], ).expect("Failed to create agent_session table");
 
-    // v2 schema: chat_message holds display content; structured blocks go to message_part
     conn.execute(
         "CREATE TABLE IF NOT EXISTS chat_message (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2567,7 +2705,9 @@ pub fn run() {
             provider TEXT NOT NULL DEFAULT 'minimax',
             custom_api_url TEXT NOT NULL DEFAULT '',
             custom_api_key TEXT NOT NULL DEFAULT '',
-            custom_model TEXT NOT NULL DEFAULT ''
+            custom_model TEXT NOT NULL DEFAULT '',
+            context_window INTEGER NOT NULL DEFAULT 204800,
+            custom_context_window INTEGER NOT NULL DEFAULT 200000
         )", [], ).expect("Failed to create app_config table");
 
     conn.execute(
@@ -2578,76 +2718,6 @@ pub fn run() {
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(tool, pattern)
         )", [], ).expect("Failed to create permission_rules table");
-
-    // ── Schema version tracking ─────────────────────────────────────────
-
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS schema_version (
-            version INTEGER PRIMARY KEY,
-            description TEXT NOT NULL,
-            applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )", [], ).expect("Failed to create schema_version table");
-
-    let current_version: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(version), 0) FROM schema_version", [],
-        |row| row.get(0)
-    ).unwrap_or(0);
-
-    // Apply migrations in order. Each step checks its own precondition (e.g.
-    // column existence) so idempotent re-runs are safe, and the version is
-    // only recorded after success.
-    struct Migration { version: i64, desc: &'static str, sql: &'static str, cond: &'static str }
-
-    let migrations: &[Migration] = &[
-        // V1: group_chat mode column
-        Migration { version: 1, desc: "group_chat.mode",
-            cond: "SELECT COUNT(*) FROM pragma_table_info('group_chat') WHERE name='mode'",
-            sql: "ALTER TABLE group_chat ADD COLUMN mode TEXT NOT NULL DEFAULT 'team'" },
-        // V6: custom_model_config context_window
-        Migration { version: 6, desc: "custom_model_config.context_window",
-            cond: "SELECT COUNT(*) FROM pragma_table_info('custom_model_config') WHERE name='context_window'",
-            sql: "ALTER TABLE custom_model_config ADD COLUMN context_window INTEGER NOT NULL DEFAULT 200000" },
-        // V7: app_config expansion columns (batch)
-        Migration { version: 7, desc: "app_config expansions",
-            cond: "SELECT COUNT(*) FROM pragma_table_info('app_config') WHERE name='context_window'",
-            sql: "ALTER TABLE app_config ADD COLUMN context_window INTEGER NOT NULL DEFAULT 204800" },
-        // V8: file_snapshot version column
-        Migration { version: 8, desc: "file_snapshot.version",
-            cond: "SELECT COUNT(*) FROM pragma_table_info('file_snapshot') WHERE name='version'",
-            sql: "ALTER TABLE file_snapshot ADD COLUMN version INTEGER NOT NULL DEFAULT 1" },
-        // V9: permission_rules table
-        Migration { version: 9, desc: "permission_rules",
-            cond: "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='permission_rules'",
-            sql: "CREATE TABLE permission_rules (id INTEGER PRIMARY KEY AUTOINCREMENT, tool TEXT NOT NULL, pattern TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(tool, pattern))" },
-    ];
-
-    for m in migrations {
-        if m.version <= current_version { continue; }
-        // Check whether the migration is needed (column exists → skip)
-        let needed: bool = conn.query_row(m.cond, [], |row| {
-            let v: i32 = row.get(0)?;
-            Ok(v == 0)
-        }).unwrap_or(true);
-        if needed {
-            if let Err(e) = conn.execute(m.sql, []) {
-                eprintln!("[schema] v{} {} FAILED: {}", m.version, m.desc, e);
-            }
-        }
-        conn.execute("INSERT OR REPLACE INTO schema_version (version, description) VALUES (?1, ?2)",
-            rusqlite::params![m.version, m.desc]
-        ).ok();
-    }
-
-    // V7 supplemental: app_config columns added piecemeal before versioning existed
-    if current_version < 7 {
-        let _ = conn.execute("ALTER TABLE app_config ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'normal'", []);
-        let _ = conn.execute("ALTER TABLE app_config ADD COLUMN api_url TEXT NOT NULL DEFAULT 'https://api.minimaxi.com'", []);
-        let _ = conn.execute("ALTER TABLE app_config ADD COLUMN provider TEXT NOT NULL DEFAULT 'minimax'", []);
-        let _ = conn.execute("ALTER TABLE app_config ADD COLUMN custom_api_url TEXT NOT NULL DEFAULT ''", []);
-        let _ = conn.execute("ALTER TABLE app_config ADD COLUMN custom_api_key TEXT NOT NULL DEFAULT ''", []);
-        let _ = conn.execute("ALTER TABLE app_config ADD COLUMN custom_model TEXT NOT NULL DEFAULT ''", []);
-        let _ = conn.execute("ALTER TABLE app_config ADD COLUMN custom_context_window INTEGER NOT NULL DEFAULT 200000", []);
-    }
 
     // Load permission mode from DB
     let perm_mode: String = conn
@@ -2803,7 +2873,10 @@ pub fn run() {
             save_bookmark,
             list_bookmarks,
             restore_bookmark,
-            delete_bookmark
+            delete_bookmark,
+            create_worktree,
+            merge_worktree,
+            get_last_group_chat_id
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

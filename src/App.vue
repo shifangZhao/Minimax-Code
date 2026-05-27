@@ -5,7 +5,6 @@
     <div class="main-area">
       <HistorySidebar ref="historySidebarRef" :collapsed="sidebarCollapsed" @selectGroupChat="onSelectGroupChat" />
       <div class="right-panel">
-        <TabBar v-if="$route.path !== '/ace'" />
         <main class="content">
           <router-view v-slot="{ Component, route }">
             <KeepAlive>
@@ -39,7 +38,6 @@ import type { AgentInvokedPayload } from './composables/useAgentConversation'
 import TitleBar from './components/TitleBar.vue'
 import ProjectPathInput from './components/ProjectPathInput.vue'
 import HistorySidebar from './components/HistorySidebar.vue'
-import TabBar from './components/TabBar.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
 
 const showSettings = ref(false)
@@ -49,6 +47,7 @@ const historySidebarRef = ref<InstanceType<typeof HistorySidebar> | null>(null)
 let agentInvokedUnlisten: UnlistenFn | null = null
 const activeStreamListeners = new Map<number, UnlistenFn>()
 let permUnlisten: UnlistenFn | null = null
+let keydownHandler: ((e: KeyboardEvent) => void) | null = null
 
 const { permRequests } = usePermissions()
 
@@ -68,7 +67,7 @@ onMounted(async () => {
   try { await getCurrentWindow().setShadow(false) } catch {}
 
   // Block browser refresh shortcuts (Ctrl+R, F5) but keep devtools (Ctrl+Shift+I)
-  document.addEventListener('keydown', (e) => {
+  keydownHandler = (e: KeyboardEvent) => {
     // Ctrl+Shift+I → open devtools
     if (e.ctrlKey && e.shiftKey && e.key === 'I') {
       e.preventDefault()
@@ -83,7 +82,8 @@ onMounted(async () => {
     ) {
       e.preventDefault()
     }
-  })
+  }
+  document.addEventListener('keydown', keydownHandler)
 
   // Listen for permission requests
   permUnlisten = await listen<{ id: string; tool: string; file?: string; command?: string; reason: string }>('permission_asked', (event) => {
@@ -94,7 +94,6 @@ onMounted(async () => {
   try {
     const update = await check()
     if (update) {
-      console.log('[updater] Update available:', update.version)
       // TODO: show a toast/notification instead of alert
     }
   } catch (e) {
@@ -102,8 +101,7 @@ onMounted(async () => {
   }
 
   agentInvokedUnlisten = await listen<AgentInvokedPayload>('agent_invoked', async (event) => {
-    const { target_agent, session_id } = event.payload
-    console.log('[agent_invoked] target:', target_agent, 'session:', session_id)
+    const { session_id } = event.payload
 
     // If a frontend tab is already handling this session, skip global fallback
     if (activeFrontendSessions.has(session_id)) return
@@ -141,9 +139,6 @@ onMounted(async () => {
           activeStreamListeners.delete(session_id)
           break
         case 'cache_usage':
-          console.log(
-            `[cache] session=${session_id} hit=${e.cache_hit_tokens} miss=${e.cache_miss_tokens} ratio=${((e.cache_hit_ratio || 0) * 100).toFixed(2)}%`
-          )
           break
         case 'error':
           updateStreamState(session_id, { text: `Error: ${e.content || ''}`, thinking: fullThinking, done: true, toolCallCount })
@@ -162,6 +157,10 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  if (keydownHandler) {
+    document.removeEventListener('keydown', keydownHandler)
+    keydownHandler = null
+  }
   if (agentInvokedUnlisten) {
     agentInvokedUnlisten()
     agentInvokedUnlisten = null

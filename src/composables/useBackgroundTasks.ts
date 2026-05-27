@@ -22,8 +22,10 @@ interface TaskOutputEvent {
   session_id: number
   pid: number
   command: string
-  type: 'output' | 'exited'
+  type: 'started' | 'output' | 'exited'
   output_delta: string
+  out_file: string
+  start_time: number
   exit_code: number | null
 }
 
@@ -54,8 +56,8 @@ export function useBackgroundTasks() {
           id: e.task_id,
           pid: e.pid,
           command: e.command,
-          out_file: '',
-          start_time: 0,
+          out_file: e.out_file || '',
+          start_time: e.start_time || 0,
           running: e.type !== 'exited',
           exit_code: e.exit_code,
           output: e.output_delta,

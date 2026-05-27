@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 use std::process::Command;
 
 fn hidden_cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
@@ -93,7 +94,7 @@ impl SkillService {
         self.load_skills_from_dir(&project_root, "project", &mut skills);
     }
 
-    fn load_skills_from_dir(&self, root: &PathBuf, source: &str, skills: &mut HashMap<String, Skill>) {
+    fn load_skills_from_dir(&self, root: &Path, source: &str, skills: &mut HashMap<String, Skill>) {
         if !root.exists() {
             return;
         }
@@ -122,7 +123,7 @@ impl SkillService {
         }
     }
 
-    fn parse_skill(&self, path: &PathBuf, source: &str) -> Result<Skill, Box<dyn std::error::Error>> {
+    fn parse_skill(&self, path: &Path, source: &str) -> Result<Skill, Box<dyn std::error::Error>> {
         let skill_md = path.join("SKILL.md");
         let content = std::fs::read_to_string(&skill_md)?;
 
@@ -164,7 +165,7 @@ impl SkillService {
         })
     }
 
-    fn list_dir_files(&self, dir: &PathBuf) -> Vec<String> {
+    fn list_dir_files(&self, dir: &Path) -> Vec<String> {
         if !dir.exists() {
             return Vec::new();
         }
@@ -275,7 +276,7 @@ pub async fn execute_skill(&self, skill_name: &str, script_name: Option<&str>) -
         }
     }
 
-    fn run_script(&self, script_path: &PathBuf) -> Result<String, String> {
+    fn run_script(&self, script_path: &Path) -> Result<String, String> {
         let ext = script_path.extension()
             .and_then(|e| e.to_str())
             .unwrap_or("");

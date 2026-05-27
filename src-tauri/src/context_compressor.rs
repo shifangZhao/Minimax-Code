@@ -177,14 +177,14 @@ fn count_tokens_from_chars(text: &str) -> usize {
 /// its tool_result in the next message.
 fn is_tool_use_msg(msg: &Value) -> bool {
     msg["role"].as_str() == Some("assistant")
-        && msg["content"].as_array().map_or(false, |blocks| {
+        && msg["content"].as_array().is_some_and(|blocks| {
             blocks.iter().any(|b| b["type"] == "tool_use")
         })
 }
 
 fn is_tool_result_msg(msg: &Value) -> bool {
     msg["role"].as_str() == Some("user")
-        && msg["content"].as_array().map_or(false, |blocks| {
+        && msg["content"].as_array().is_some_and(|blocks| {
             !blocks.is_empty() && blocks.iter().all(|b| b["type"] == "tool_result")
         })
 }
@@ -231,7 +231,6 @@ fn safe_split_index(messages: &[Value], mut split_idx: usize) -> usize {
 pub fn compress_context_aggressive(agent_type: &str, messages: &mut Vec<Value>, level: usize, summary: String) -> bool {
     let keep_recent = match agent_type {
         "ace" => if level >= 2 { 2 } else { 4 },
-        "front" => if level >= 2 { 2 } else { 3 },
         _ => if level >= 2 { 1 } else { 2 },
     };
 
@@ -260,7 +259,6 @@ pub fn compress_context_aggressive(agent_type: &str, messages: &mut Vec<Value>, 
 pub fn compress_context(agent_type: &str, messages: &mut Vec<Value>, summary: String) {
     let keep_recent = match agent_type {
         "ace" => 10,
-        "front" => 8,
         "plan" => 4,
         "work" => 3,
         "review" => 3,

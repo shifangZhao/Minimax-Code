@@ -2222,6 +2222,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "dirs",
+ "encoding_rs",
  "futures",
  "futures-util",
  "regex",

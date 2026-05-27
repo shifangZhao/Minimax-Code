@@ -68,7 +68,6 @@
       <span class="context-label">{{ formatTokens(tokenUsage.estimated_tokens) }} / {{ formatTokens(tokenUsage.context_window) }}</span>
     </div>
     <TodoPanel :sessionId="sessionId" />
-    <BackgroundTaskPanel :sessionId="sessionId" />
     <div class="messages" ref="messagesEl" @scroll="saveScrollPos">
       <div v-if="hasMoreOlder" class="load-earlier-wrap">
         <button class="load-earlier-btn" :disabled="loadingMore" @click="loadMoreMessages()">
@@ -122,7 +121,7 @@
         </div>
         <div v-if="msg.role === 'user'" class="msg-hover-actions">
           <button class="hover-btn" title="重新生成" @click="retryMessage(i)">⟳</button>
-          <button class="hover-btn" title="回退到此" @click="rewindToMessage(msg.id, msg.content)">↩</button>
+          <button class="hover-btn" title="回退到此" @click="rewindToMessage(msg.id as number, msg.content)">↩</button>
         </div>
       </div>
       <div v-if="showLoading" class="message assistant">
@@ -179,7 +178,7 @@
     />
     <AskDialog
       v-if="pendingAsk?.questions"
-      :questions="(pendingAsk.questions as any)"
+      :questions="pendingAsk.questions"
       @submit="handleAskSubmit"
       @cancel="handleAskCancel"
     />
@@ -197,7 +196,7 @@
       @remove="removeAttachment"
     />
     <CommandPopup
-      v-if="agentType === 'front' || agentType === 'ace'"
+      v-if="agentType === 'ace'"
       :visible="showCommands"
       :query="cmdQuery"
       :commands="commands"
@@ -205,7 +204,39 @@
       @select="insertCommand"
       @close="showCommands = false"
     />
-    <div class="input-area" v-if="agentType === 'front' || agentType === 'ace'">
+    <div class="input-area" v-if="agentType === 'ace'">
+      <!-- Background tasks popup — positioned above the input area -->
+      <div class="bg-popup" v-if="showBgPanel && bgTasks.size > 0">
+        <div class="bg-popup-header">
+          <span class="bg-popup-title">后台任务 ({{ bgTasks.size }})</span>
+          <button class="bg-popup-close" @click="showBgPanel = false">✕</button>
+        </div>
+        <div class="bg-popup-list">
+          <div
+            v-for="[id, task] in sortedBgTasks"
+            :key="id"
+            class="bg-popup-item"
+            :class="{ running: task.running }"
+          >
+            <div class="bg-popup-row" @click="bgToggleCollapse(id)">
+              <span class="bg-popup-status">{{ task.running ? '🟢' : '⚫' }}</span>
+              <span class="bg-popup-cmd">{{ truncateBgCmd(task.command) }}</span>
+              <span class="bg-popup-pid">PID {{ task.pid }}</span>
+              <span class="bg-popup-time">{{ formatBgTime(task.start_time) }}</span>
+              <span class="bg-popup-arrow">{{ task.collapsed ? '▶' : '▼' }}</span>
+              <button
+                v-if="task.running"
+                class="bg-popup-kill"
+                title="终止"
+                @click.stop="bgKillTask(id)"
+              >✕</button>
+            </div>
+            <div class="bg-popup-output" v-if="!task.collapsed">
+              <pre class="bg-popup-output-text">{{ task.output || '(暂无输出)' }}</pre>
+            </div>
+          </div>
+        </div>
+      </div>
       <textarea
           ref="inputEl"
           v-model="inputText"
@@ -224,11 +255,20 @@
             <button class="toolbar-btn" @click="showCommands = !showCommands; manualCommands = showCommands" title="命令">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="17" y1="2" x2="7" y2="22"/></svg>
             </button>
+            <button
+              class="toolbar-btn bg-task-btn"
+              :class="{ active: showBgPanel }"
+              @click="showBgPanel = !showBgPanel"
+              title="后台任务"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+              <span v-if="runningBgCount > 0" class="bg-task-badge">{{ runningBgCount }}</span>
+            </button>
           </div>
           <button v-if="!loading" class="send-btn" @click="onSend" title="发送">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
           </button>
-          <button v-else class="send-btn stop-btn" @click="stopStream()" title="停止生成">
+          <button v-else class="send-btn stop-btn" :disabled="stopClicked" @click="stopStream()" title="停止生成">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
           </button>
         </div>
@@ -247,14 +287,13 @@ import { usePermissions } from '../composables/usePermissions'
 import { renderMarkdown } from '../composables/useMarkdown'
 import AskDialog from '../components/AskDialog.vue'
 import ToastBar from '../components/ToastBar.vue'
-import BookmarkPanel from '../components/BookmarkPanel.vue'
+import BookmarkPanel, { type BookmarkItem } from '../components/BookmarkPanel.vue'
 import ToolCard from '../components/ToolCard.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import AttachmentPreview from '../components/AttachmentPreview.vue'
 import CommandPopup from '../components/CommandPopup.vue'
 import PermissionCard from '../components/PermissionCard.vue'
 import TodoPanel from '../components/TodoPanel.vue'
-import BackgroundTaskPanel from '../components/BackgroundTaskPanel.vue'
 import { useBackgroundTasks } from '../composables/useBackgroundTasks'
 import { useUndoHistory } from '../composables/useUndoHistory'
 import { useBookmarks } from '../composables/useBookmarks'
@@ -299,7 +338,33 @@ const { sessions } = useGlobalStreaming()
 const { permRequests, respond: respondPerm } = usePermissions()
 const { recentEdits, lastUndone, showUndoToast, loadEdits, undoLast } = useUndoHistory()
 const { bookmarks, showBookmarkPanel, showSaveInput, bookmarkName, loadBookmarks, saveBookmark, restoreBookmark, deleteBookmark } = useBookmarks()
-const { startListener: startBgListener, stopListener: stopBgListener, refreshTasks: refreshBgTasks } = useBackgroundTasks()
+const { tasks: bgTasks, startListener: startBgListener, stopListener: stopBgListener, refreshTasks: refreshBgTasks, killTask: bgKillTask, toggleCollapse: bgToggleCollapse } = useBackgroundTasks()
+
+const showBgPanel = ref(false)
+
+const sortedBgTasks = computed(() => {
+  const arr = [...bgTasks.value.entries()]
+  arr.sort((a, b) => b[1].start_time - a[1].start_time)
+  return arr
+})
+
+const runningBgCount = computed(() => {
+  let n = 0
+  for (const [, t] of bgTasks.value) { if (t.running) n++ }
+  return n
+})
+
+function truncateBgCmd(cmd: string): string {
+  return cmd.length > 50 ? cmd.slice(0, 47) + '...' : cmd
+}
+
+function formatBgTime(ts: number): string {
+  if (!ts) return ''
+  const s = Math.floor(Date.now() / 1000) - ts
+  if (s < 60) return `${s}s`
+  if (s < 3600) return `${Math.floor(s / 60)}m`
+  return `${Math.floor(s / 3600)}h`
+}
 
 const messagesEl = ref<HTMLElement>()
 const inputEl = ref<HTMLTextAreaElement>()
@@ -307,6 +372,11 @@ const inputText = ref('')
 const showCommands = ref(false)
 const manualCommands = ref(false)  // true when user clicked / button
 const stopClicked = ref(false)
+
+// Reset stopClicked when stream ends (covers abort, error, and normal completion)
+watch(loading, (isLoading) => {
+  if (!isLoading) stopClicked.value = false
+})
 
 const commands = [
   { name: '/compact', desc: '手动压缩上下文，减少 token 占用' },
@@ -369,11 +439,6 @@ const streamKey = computed(() => `agent_stream_${sessionId.value ?? 'null'}`)
 const agentName = computed(() => {
   const names: Record<string, string> = {
     ace: 'Ace',
-    front: 'Front',
-    plan: 'Plan',
-    work: 'Work',
-    review: 'Review',
-    explore: 'Explore',
   }
   return names[props.agentType] || props.agentType
 })
@@ -526,21 +591,32 @@ function parsedAttachments(msg: { attachments?: string }): AttInfo[] | null {
 }
 
 const MAX_CACHED_IMAGES = 50
+const MAX_IMAGE_CACHE_BYTES = 50 * 1024 * 1024 // 50 MB
 const imageDataUrls = ref<Map<string, string>>(new Map())
+let imageCacheBytes = 0
 const imgLoading = new Set<string>()
+
+function evictImageCache() {
+  while (imageDataUrls.value.size > 0 && (imageDataUrls.value.size >= MAX_CACHED_IMAGES || imageCacheBytes > MAX_IMAGE_CACHE_BYTES)) {
+    const firstKey = imageDataUrls.value.keys().next().value
+    if (firstKey === undefined) break
+    const val = imageDataUrls.value.get(firstKey) || ''
+    imageCacheBytes -= val.length
+    imageDataUrls.value.delete(firstKey)
+  }
+}
 
 function getImageSrc(p: string): string {
   if (imageDataUrls.value.has(p)) return imageDataUrls.value.get(p)!
   if (!imgLoading.has(p)) {
     imgLoading.add(p)
     invoke<string>('read_file_base64', { path: p }).then(dataUrl => {
-      if (imageDataUrls.value.size >= MAX_CACHED_IMAGES) {
-        const firstKey = imageDataUrls.value.keys().next().value
-        if (firstKey !== undefined) imageDataUrls.value.delete(firstKey)
-      }
+      if (!dataUrl) return // don't cache failures
+      evictImageCache()
+      imageCacheBytes += dataUrl.length
       imageDataUrls.value.set(p, dataUrl)
     }).catch(() => {
-      imageDataUrls.value.set(p, '')
+      // don't cache failures — they'd waste a slot
     })
   }
   return ''
@@ -751,7 +827,7 @@ function autoResize(e: Event) {
 }
 
 function stopStream() {
-  if (sessionId.value === null) return
+  if (sessionId.value === null || stopClicked.value) return
   stopClicked.value = true
   const entry = sessions.value.get(streamKey.value)
   if (entry?.state?.abort) {
@@ -910,7 +986,7 @@ async function handleAskCancel() {
 }
 
 const workspace = ref('')
-const showRestoreConfirmBm = ref<any>(null)
+const showRestoreConfirmBm = ref<BookmarkItem | null>(null)
 
 async function handleRestoreBookmark() {
   const bm = showRestoreConfirmBm.value
@@ -935,6 +1011,14 @@ watch(sessionId, async (sid) => {
     try {
       workspace.value = await invoke<string>('get_workspace')
     } catch { workspace.value = '' }
+  }
+})
+
+// Refresh background tasks when session initializes (sessionId may be null at mount time)
+watch(sessionId, (sid) => {
+  if (sid) {
+    startBgListener(sid)
+    refreshBgTasks(sid)
   }
 })
 
@@ -1003,9 +1087,10 @@ watch(inputText, () => {
   })
 })
 
-onMounted(() => {
+onMounted(async () => {
   startBgListener(sessionId.value ?? undefined)
   if (sessionId.value) refreshBgTasks(sessionId.value)
+
   nextTick(() => {
     if (messagesEl.value) {
       const pos = scrollCache.get(agentScrollKey.value)
@@ -1811,6 +1896,159 @@ onDeactivated(() => {
   font-size: 12px;
   color: var(--text-secondary);
   text-align: center;
+}
+
+/* Background tasks popup */
+.bg-popup {
+  margin: 0 0 4px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  max-height: 260px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 -4px 16px rgba(0,0,0,0.25);
+}
+.bg-popup-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+.bg-popup-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.bg-popup-close {
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.bg-popup-close:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+.bg-popup-list {
+  overflow-y: auto;
+  flex: 1;
+}
+.bg-popup-item {
+  border-top: 1px solid var(--border-color);
+}
+.bg-popup-item.running {
+  border-left: 2px solid #4caf50;
+}
+.bg-popup-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.bg-popup-row:hover {
+  background: var(--bg-hover, #252540);
+}
+.bg-popup-status {
+  font-size: 8px;
+  flex-shrink: 0;
+}
+.bg-popup-cmd {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+  font-family: var(--font-mono, 'Courier New', monospace);
+  font-size: 11px;
+}
+.bg-popup-pid {
+  color: var(--text-muted, #888);
+  flex-shrink: 0;
+  font-size: 10px;
+}
+.bg-popup-time {
+  color: var(--text-muted, #888);
+  flex-shrink: 0;
+  font-size: 10px;
+  min-width: 28px;
+  text-align: right;
+}
+.bg-popup-arrow {
+  font-size: 8px;
+  color: var(--text-muted, #888);
+  flex-shrink: 0;
+}
+.bg-popup-kill {
+  background: none;
+  border: 1px solid #e53935;
+  color: #e53935;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 10px;
+  padding: 0 5px;
+  flex-shrink: 0;
+  line-height: 16px;
+}
+.bg-popup-kill:hover {
+  background: #e53935;
+  color: #fff;
+}
+.bg-popup-output {
+  padding: 0 12px 6px;
+}
+.bg-popup-output-text {
+  margin: 0;
+  padding: 6px 8px;
+  background: #0d0d0d;
+  border-radius: 4px;
+  color: #ccc;
+  font-size: 11px;
+  font-family: var(--font-mono, 'Courier New', monospace);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 160px;
+  overflow-y: auto;
+  line-height: 1.4;
+}
+
+/* Background task button badge */
+.bg-task-badge {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  min-width: 15px;
+  height: 15px;
+  border-radius: 8px;
+  background: #4caf50;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  line-height: 1;
+}
+.bg-task-btn {
+  position: relative;
+}
+.bg-task-btn.active {
+  color: var(--accent);
+  background: var(--bg-tertiary);
 }
 
 .input-area {

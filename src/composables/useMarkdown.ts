@@ -1,6 +1,19 @@
 import { marked, Renderer } from 'marked'
 import hljs from 'highlight.js'
 
+// Strip dangerous HTML from rendered markdown output.
+// Defense-in-depth against AI-generated XSS (script tags, event handlers, javascript: URIs).
+function sanitizeHtml(html: string): string {
+  return html
+    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+    .replace(/<iframe\b[^<]*(?:(?!<\/iframe>)<[^<]*)*<\/iframe>/gi, '')
+    .replace(/<object\b[^<]*(?:(?!<\/object>)<[^<]*)*<\/object>/gi, '')
+    .replace(/<embed\b[^>]*>/gi, '')
+    .replace(/\son\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/href\s*=\s*(?:"javascript:[^"]*"|'javascript:[^']*')/gi, 'href=""')
+    .replace(/src\s*=\s*(?:"javascript:[^"]*"|'javascript:[^']*')/gi, 'src=""')
+}
+
 // Custom renderer with syntax highlighting
 const renderer = new Renderer()
 
@@ -24,10 +37,10 @@ marked.use({
 export function renderMarkdown(content: string): string {
   if (!content) return ''
   try {
-    return marked.parse(content) as string
+    return sanitizeHtml(marked.parse(content) as string)
   } catch (e) {
     console.error('Markdown parse error:', e)
-    return content
+    return escapeHtml(content)
   }
 }
 
