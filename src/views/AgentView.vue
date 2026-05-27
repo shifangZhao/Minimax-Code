@@ -381,6 +381,7 @@ watch(loading, (isLoading) => {
 const commands = [
   { name: '/compact', desc: '手动压缩上下文，减少 token 占用' },
   { name: '/mcp reload', desc: '重载 MCP 服务器配置' },
+  { name: '/minimax.md', desc: '创建或编辑项目规范文件' },
 ]
 
 const cmdQuery = computed(() => {
@@ -839,7 +840,7 @@ async function onSend() {
   const text = inputText.value.trim()
 
   // Slash commands — show as system messages, not sent to API
-  if ((text === '/mcp reload' || text === '/compact') && sessionId.value) {
+  if ((text === '/mcp reload' || text === '/compact' || text === '/minimax.md') && sessionId.value) {
     inputText.value = ''
     const cmdId = Date.now()
     // Push one card: command text + loading spinner inline
@@ -865,6 +866,38 @@ async function onSend() {
         const afterK = formatTokens(result.after)
         const pct = result.before > 0 ? Math.round((freed / result.before) * 100) : 0
         resultContent = `✅ 压缩完成: ${beforeK} → ${afterK} tokens, 释放 ${freedKb}K (${pct}%)`
+      } else if (text === '/minimax.md') {
+        // Check if minimax.md exists, create if not
+        const workspace = await invoke<string>('get_workspace').catch(() => '')
+        if (!workspace) {
+          resultContent = '❌ 请先设置工作目录'
+        } else {
+          const content = await invoke<string>('read_file', { path: `${workspace}/minimax.md` }).catch(() => '')
+          if (content) {
+            resultContent = `📄 minimax.md 已存在:\n\n${content}`
+          } else {
+            const template = `# 项目名称
+
+## 技术栈
+- 框架：
+- 语言：
+- 样式：
+
+## 代码规范
+- 组件命名：PascalCase
+- 函数命名：camelCase
+
+## Git 规范
+- commit 格式：type: 描述
+- type：feat / fix / refactor / docs
+
+## 注意事项
+-
+`
+            await invoke('write_file', { path: `${workspace}/minimax.md`, content: template })
+            resultContent = '✅ 已创建 minimax.md 模板，请编辑补充项目信息'
+          }
+        }
       } else {
         const mcpResult = await invoke<string>('mcp_reload')
         resultContent = `✅ MCP 重载 — ${mcpResult}`

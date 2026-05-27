@@ -73,77 +73,88 @@ fn decode_process_output(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).to_string()
 }
 
-/// Run a command with a timeout. Graceful kill (SIGTERM equivalent), then force kill
-/// after a 2s grace period. Output is capped at 256KB to prevent OOM.
-pub(crate) fn output_with_timeout(cmd: &mut Command, timeout_secs: u64, session_id: i64, running_pids: Option<&Arc<StdMutex<HashMap<i64, Vec<u32>>>>>) -> String {
-    use std::sync::mpsc;
-    let mut child = match cmd
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
+// ── Async command execution (tokio::process) ──
+// These replace the thread-per-pipe model with tokio async I/O,
+// eliminating 3 OS threads per command invocation.
+
+/// Build a tokio::process::Command with the same env setup as hidden_cmd.
+pub(crate) fn async_hidden_cmd(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(program.as_ref());
+    #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.as_std_mut().creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd.env("PYTHONUTF8", "1")
+       .env("PYTHONIOENCODING", "utf-8")
+       .env("LANG", "C.UTF-8")
+       .env("LC_ALL", "C.UTF-8");
+    cmd
+}
+
+/// Async version of output_with_timeout using tokio::process.
+/// No OS threads spawned — uses tokio async I/O for pipe reads.
+pub(crate) async fn async_output_with_timeout(
+    program: &str,
+    args: &[String],
+    cwd: Option<&str>,
+    timeout_secs: u64,
+    session_id: i64,
+    running_pids: Option<Arc<StdMutex<HashMap<i64, Vec<u32>>>>>,
+) -> String {
+    let mut cmd = async_hidden_cmd(program);
+    cmd.args(args)
+       .stdout(std::process::Stdio::piped())
+       .stderr(std::process::Stdio::piped());
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return format!("Error spawning command: {}", e),
     };
-    let pid = child.id();
 
-    // Register PID so abort_stream can kill this process
-    if let Some(map) = running_pids {
+    let pid = child.id().unwrap_or(0);
+
+    // Register PID for abort support
+    if let (Some(pid), Some(ref map)) = (child.id(), &running_pids) {
         if let Ok(mut m) = map.lock() {
             m.entry(session_id).or_default().push(pid);
         }
     }
 
-    // Take stdout/stderr handles before moving child into the wait thread.
-    // This way we can read output in parallel with waiting for process exit,
-    // and DON'T need pipes to close — just the process to exit.
+    // Take stdout/stderr before waiting
     let child_stdout = child.stdout.take();
     let child_stderr = child.stderr.take();
 
-    // Reader threads: read all output into memory
-    let (out_tx, out_rx) = mpsc::channel();
-    if let Some(stdout) = child_stdout {
-        std::thread::spawn(move || {
-            use std::io::Read;
-            let mut reader = std::io::BufReader::new(stdout);
+    // Spawn async readers
+    let out_handle = tokio::spawn(async move {
+        if let Some(mut stdout) = child_stdout {
             let mut buf = Vec::new();
-            let _ = reader.read_to_end(&mut buf);
-            let _ = out_tx.send(buf);
-        });
-    } else {
-        let _ = out_tx.send(Vec::new());
-    }
-
-    let (err_tx, err_rx) = mpsc::channel();
-    if let Some(stderr) = child_stderr {
-        std::thread::spawn(move || {
-            use std::io::Read;
-            let mut reader = std::io::BufReader::new(stderr);
+            use tokio::io::AsyncReadExt;
+            let _ = stdout.read_to_end(&mut buf).await;
+            buf
+        } else {
+            Vec::new()
+        }
+    });
+    let err_handle = tokio::spawn(async move {
+        if let Some(mut stderr) = child_stderr {
             let mut buf = Vec::new();
-            let _ = reader.read_to_end(&mut buf);
-            let _ = err_tx.send(buf);
-        });
-    } else {
-        let _ = err_tx.send(Vec::new());
-    }
-
-    // Wait thread: just wait for process exit (NOT pipe closure)
-    let (wait_tx, wait_rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let result = child.wait(); // <— wait() not wait_with_output()
-        let code = result.ok().and_then(|s| s.code());
-        let _ = wait_tx.send(code);
+            use tokio::io::AsyncReadExt;
+            let _ = stderr.read_to_end(&mut buf).await;
+            buf
+        } else {
+            Vec::new()
+        }
     });
 
-    // Helper: kill process tree and force-close pipes so reader threads finish.
-    // On Windows, child processes can inherit pipe handles and keep them open
-    // even after the main process exits, causing read_to_end() to block forever.
-    let force_kill_tree = |pid: u32| {
+    // Wait with timeout
+    let force_kill = |pid: u32| {
         #[cfg(windows)]
-        {
-            // /T = tree kill, /F = force. Closes all inherited pipe handles.
-            let _ = hidden_cmd("taskkill").args(["/F", "/T", "/PID", &pid.to_string()]).output();
-        }
+        { let _ = hidden_cmd("taskkill").args(["/F", "/T", "/PID", &pid.to_string()]).output(); }
         #[cfg(not(windows))]
         {
             let _ = hidden_cmd("kill").args(["-15", &pid.to_string()]).output();
@@ -152,27 +163,20 @@ pub(crate) fn output_with_timeout(cmd: &mut Command, timeout_secs: u64, session_
         }
     };
 
-    let result = match wait_rx.recv_timeout(std::time::Duration::from_secs(timeout_secs)) {
-        Ok(exit_code) => {
-            // Collect output. On Windows, child processes can inherit pipe
-            // handles and keep them open after the parent exits, causing
-            // read_to_end() to block forever. After a short grace period,
-            // kill the entire process tree to force all pipe handles closed.
-            let reader_grace = std::time::Duration::from_secs(3);
-            let stdout_bytes = match out_rx.recv_timeout(reader_grace) {
-                Ok(b) => b,
-                Err(_) => {
-                    force_kill_tree(pid);
-                    out_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap_or_default()
-                }
-            };
-            let stderr_bytes = match err_rx.recv_timeout(reader_grace) {
-                Ok(b) => b,
-                Err(_) => {
-                    force_kill_tree(pid);
-                    err_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap_or_default()
-                }
-            };
+    let result = match tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs),
+        child.wait(),
+    ).await {
+        Ok(Ok(status)) => {
+            // Collect output — readers should finish shortly after process exits
+            let stdout_bytes = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                out_handle,
+            ).await.unwrap_or(Ok(Vec::new())).unwrap_or_default();
+            let stderr_bytes = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                err_handle,
+            ).await.unwrap_or(Ok(Vec::new())).unwrap_or_default();
 
             const MAX_BYTES: usize = 256 * 1024;
             let stdout = if stdout_bytes.len() > MAX_BYTES {
@@ -183,7 +187,7 @@ pub(crate) fn output_with_timeout(cmd: &mut Command, timeout_secs: u64, session_
                 decode_process_output(&stdout_bytes)
             };
             let stderr_str = decode_process_output(&stderr_bytes);
-            let exit = exit_code.unwrap_or(-1);
+            let exit = status.code().unwrap_or(-1);
             if stdout.is_empty() && !stderr_str.is_empty() {
                 format!("Exit: {}\n{}", exit, stderr_str)
             } else if !stderr_str.is_empty() {
@@ -192,13 +196,19 @@ pub(crate) fn output_with_timeout(cmd: &mut Command, timeout_secs: u64, session_
                 format!("Exit: {}\n{}", exit, stdout)
             }
         }
+        Ok(Err(e)) => format!("Error waiting for process: {}", e),
         Err(_) => {
-            // Process didn't exit in time — kill it
-            force_kill_tree(pid);
-            let stdout_partial = out_rx.recv_timeout(std::time::Duration::from_secs(3))
-                .unwrap_or_default();
-            let stderr_partial = err_rx.recv_timeout(std::time::Duration::from_secs(3))
-                .unwrap_or_default();
+            // Timeout — kill process tree
+            force_kill(pid);
+            let _ = child.kill().await;
+            let stdout_partial = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                out_handle,
+            ).await.unwrap_or(Ok(Vec::new())).unwrap_or_default();
+            let stderr_partial = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                err_handle,
+            ).await.unwrap_or(Ok(Vec::new())).unwrap_or_default();
             let partial_out = decode_process_output(&stdout_partial);
             let partial_err = decode_process_output(&stderr_partial);
             format!("Command timed out after {}s (killed)\n{}",
@@ -212,7 +222,7 @@ pub(crate) fn output_with_timeout(cmd: &mut Command, timeout_secs: u64, session_
     };
 
     // Deregister PID
-    if let Some(map) = running_pids {
+    if let (Some(pid), Some(ref map)) = (child.id(), &running_pids) {
         if let Ok(mut m) = map.lock() {
             if let Some(v) = m.get_mut(&session_id) {
                 v.retain(|&p| p != pid);
@@ -222,6 +232,23 @@ pub(crate) fn output_with_timeout(cmd: &mut Command, timeout_secs: u64, session_
     }
 
     result
+}
+
+/// Async shell execution using tokio::process.
+pub(crate) async fn async_execute_via_shell(
+    command: &str,
+    cwd: Option<&str>,
+    timeout_secs: u64,
+    session_id: i64,
+    running_pids: Option<Arc<StdMutex<HashMap<i64, Vec<u32>>>>>,
+) -> String {
+    let shell = if cfg!(windows) { "cmd" } else { "sh" };
+    let args: Vec<String> = if cfg!(windows) {
+        vec!["/d".into(), "/s".into(), "/c".into(), command.to_string()]
+    } else {
+        vec!["-c".into(), command.to_string()]
+    };
+    async_output_with_timeout(shell, &args, cwd, timeout_secs, session_id, running_pids).await
 }
 
 use crate::context_compressor::{compress_context_aggressive, estimate_request_tokens, estimate_tokens, summarize_with_model};
@@ -309,6 +336,7 @@ fn save_api_message(db: &Arc<StdMutex<Connection>>, session_id: i64, message: &s
     };
 
     if let Ok(conn) = db.lock() {
+        let _ = conn.execute_batch("BEGIN IMMEDIATE");
         let _ = conn.execute(
             "INSERT INTO chat_message (session_id, role, content) VALUES (?1, ?2, ?3)",
             rusqlite::params![session_id, role, display_text],
@@ -320,6 +348,7 @@ fn save_api_message(db: &Arc<StdMutex<Connection>>, session_id: i64, message: &s
                 rusqlite::params![msg_id, session_id, order, ptype, pcontent, tuid, tname, tinput],
             );
         }
+        let _ = conn.execute_batch("COMMIT");
     }
 }
 
@@ -457,8 +486,9 @@ fn save_file_snapshot(db: &Arc<StdMutex<Connection>>, session_id: i64, file_path
 
         let original = match std::fs::read(file_path) {
             Ok(bytes) => {
-                match String::from_utf8(bytes.clone()) {
-                    Ok(s) if is_printable_text(&s) => Some(s),
+                // Avoid cloning: check UTF-8 validity via str::from_utf8 first
+                match std::str::from_utf8(&bytes) {
+                    Ok(s) if is_printable_text(s) => Some(s.to_string()),
                     _ => Some(format!("hex:{}", hex_encode(&bytes))),
                 }
             }
@@ -471,6 +501,42 @@ fn save_file_snapshot(db: &Arc<StdMutex<Connection>>, session_id: i64, file_path
     }
 }
 
+/// Async wrapper — runs the sync snapshot on a blocking thread.
+async fn save_file_snapshot_async(db: Arc<StdMutex<Connection>>, session_id: i64, file_path: String) {
+    tokio::task::spawn_blocking(move || {
+        save_file_snapshot(&db, session_id, &file_path);
+    }).await.ok();
+}
+
+/// Batch snapshot multiple files on a single blocking thread with transaction.
+/// Wrapping in a transaction avoids per-INSERT fsync — 10-50x faster for many files.
+async fn save_file_snapshots_batch(db: Arc<StdMutex<Connection>>, session_id: i64, file_paths: Vec<String>) {
+    tokio::task::spawn_blocking(move || {
+        if let Ok(conn) = db.lock() {
+            let _ = conn.execute_batch("BEGIN IMMEDIATE");
+            for path in &file_paths {
+                let next_version: i64 = conn.query_row(
+                    "SELECT COALESCE(MAX(version), 0) + 1 FROM file_snapshot WHERE session_id = ?1 AND file_path = ?2",
+                    rusqlite::params![session_id, path],
+                    |row| row.get(0),
+                ).unwrap_or(1);
+                let original = match std::fs::read(path) {
+                    Ok(bytes) => match std::str::from_utf8(&bytes) {
+                        Ok(s) if is_printable_text(s) => Some(s.to_string()),
+                        _ => Some(format!("hex:{}", hex_encode(&bytes))),
+                    },
+                    Err(_) => None,
+                };
+                let _ = conn.execute(
+                    "INSERT INTO file_snapshot (session_id, file_path, original_content, version) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![session_id, path, original, next_version],
+                );
+            }
+            let _ = conn.execute_batch("COMMIT");
+        }
+    }).await.ok();
+}
+
 fn is_printable_text(s: &str) -> bool {
     for ch in s.chars() {
         if ch.is_control() && ch != '\n' && ch != '\r' && ch != '\t' {
@@ -481,7 +547,12 @@ fn is_printable_text(s: &str) -> bool {
 }
 
 pub(crate) fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    use std::fmt::Write;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        let _ = write!(s, "{:02x}", b);
+    }
+    s
 }
 
 pub(crate) fn hex_decode(hex: &str) -> Vec<u8> {
@@ -518,19 +589,47 @@ fn env_usize(key: &str, default: usize) -> usize {
 
 /// Snapshot all text files in a workspace before a destructive command.
 /// Limits: MAX_SNAPSHOT_FILES (env, default 200), MAX_SNAPSHOT_BYTES (env, default 10MB).
-fn snapshot_workspace_files(db: &Arc<StdMutex<Connection>>, session_id: i64, cwd: &str) {
-    let mut files: Vec<String> = Vec::new();
-    collect_dir_files(std::path::Path::new(cwd), &mut files);
-    let mut total: usize = 0;
-    let max_files = env_usize("MAX_SNAPSHOT_FILES", 200);
-    let max_bytes = env_usize("MAX_SNAPSHOT_BYTES", 10_000_000);
-    for f in files.iter().take(max_files) {
-        if let Ok(meta) = std::fs::metadata(f) {
-            total += meta.len() as usize;
-            if total > max_bytes { break; }
+/// Runs on a blocking thread with transaction for performance.
+async fn snapshot_workspace_files(db: Arc<StdMutex<Connection>>, session_id: i64, cwd: String) {
+    tokio::task::spawn_blocking(move || {
+        let mut files: Vec<String> = Vec::new();
+        collect_dir_files(std::path::Path::new(&cwd), &mut files);
+        let max_files = env_usize("MAX_SNAPSHOT_FILES", 200);
+        let max_bytes = env_usize("MAX_SNAPSHOT_BYTES", 10_000_000);
+        let mut total: usize = 0;
+        let mut selected: Vec<String> = Vec::new();
+        for f in &files {
+            if selected.len() >= max_files { break; }
+            if let Ok(meta) = std::fs::metadata(f) {
+                total += meta.len() as usize;
+                if total > max_bytes { break; }
+            }
+            selected.push(f.clone());
         }
-        save_file_snapshot(db, session_id, f);
-    }
+        if selected.is_empty() { return; }
+        if let Ok(conn) = db.lock() {
+            let _ = conn.execute_batch("BEGIN IMMEDIATE");
+            for path in &selected {
+                let next_version: i64 = conn.query_row(
+                    "SELECT COALESCE(MAX(version), 0) + 1 FROM file_snapshot WHERE session_id = ?1 AND file_path = ?2",
+                    rusqlite::params![session_id, path],
+                    |row| row.get(0),
+                ).unwrap_or(1);
+                let original = match std::fs::read(path) {
+                    Ok(bytes) => match std::str::from_utf8(&bytes) {
+                        Ok(s) if is_printable_text(s) => Some(s.to_string()),
+                        _ => Some(format!("hex:{}", hex_encode(&bytes))),
+                    },
+                    Err(_) => None,
+                };
+                let _ = conn.execute(
+                    "INSERT INTO file_snapshot (session_id, file_path, original_content, version) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![session_id, path, original, next_version],
+                );
+            }
+            let _ = conn.execute_batch("COMMIT");
+        }
+    }).await.ok();
 }
 
 /// Write snapshot content to a file path, decoding hex if needed.
@@ -667,6 +766,15 @@ impl AgentService {
         let mut system_text = base_system.to_string();
         if let Some(ws) = &workspace {
             system_text.push_str(&format!("\n\n# 工作目录\n{}", ws));
+
+            // Load project-level minimax.md if exists
+            let minimax_md_path = std::path::Path::new(ws).join("minimax.md");
+            if let Ok(content) = std::fs::read_to_string(&minimax_md_path) {
+                if !content.trim().is_empty() {
+                    system_text.push_str(&format!("\n\n# 项目规范 (minimax.md)\n{}", content));
+                    eprintln!("[stream_chat] Loaded minimax.md from {}", minimax_md_path.display());
+                }
+            }
         }
         system_text.push_str(&format!("\n\n当前运行模型: {}", self.model));
 
@@ -1342,10 +1450,17 @@ async fn process_sse_stream(
 
         match item {
             Some(Ok(bytes)) => {
-                if let Ok(text) = String::from_utf8(bytes.to_vec()) {
-                    for line in text.lines() {
-                        if let Some(data) = line.strip_prefix("data: ") {
-                            if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                // Parse SSE directly from bytes — avoid intermediate String allocation
+                let text = match std::str::from_utf8(&bytes) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let valid = e.valid_up_to();
+                        unsafe { std::str::from_utf8_unchecked(&bytes[..valid]) }
+                    }
+                };
+                for line in text.lines() {
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
                                 let prev_text_len = assistant_text.len();
                                 let prev_think_len = assistant_thinking.len();
 
@@ -1406,7 +1521,6 @@ async fn process_sse_stream(
                             }
                         }
                     }
-                }
             }
             Some(Err(e)) => {
                 if !pending_text.is_empty() || !pending_thinking.is_empty() {
@@ -1445,6 +1559,11 @@ async fn process_sse_stream(
             "[cache] turn stats: hit={}, miss={}, ratio={:.2}%",
             cache_hit_tokens, cache_miss_tokens, ratio * 100.0
         );
+    }
+
+    // Flush the last tool's input (deferred from handle_sse_event)
+    if let (Some(id), Some(name)) = (current_tool_id.take(), current_tool_name.take()) {
+        tool_inputs.insert(id, (name, std::mem::take(&mut current_tool_input)));
     }
 
     // Build tool_uses list from collected tool_inputs.
@@ -1645,6 +1764,10 @@ fn handle_sse_event(
             let block_type = block["type"].as_str().unwrap_or("");
             match block_type {
                 "tool_use" => {
+                    // Move previous tool's input into map (one clone per tool, not per delta)
+                    if let (Some(id), Some(name)) = (current_tool_id.take(), current_tool_name.take()) {
+                        tool_inputs.insert(id, (name, std::mem::take(current_tool_input)));
+                    }
                     *current_tool_id = block["id"].as_str().map(|s| s.to_string());
                     *current_tool_name = block["name"].as_str().map(|s| s.to_string());
                     current_tool_input.clear();
@@ -1679,11 +1802,10 @@ fn handle_sse_event(
             }
 
             // Tool input delta (MiniMax uses partial_json field)
+            // Only append — move to tool_inputs deferred to next block_start or stream end
             if let Some(input) = delta["partial_json"].as_str() {
-                if let Some(ref tool_id) = *current_tool_id {
+                if current_tool_id.is_some() {
                     current_tool_input.push_str(input);
-                    let tool_name = current_tool_name.clone().unwrap_or_default();
-                    tool_inputs.insert(tool_id.clone(), (tool_name, current_tool_input.clone()));
                 }
             }
             None
@@ -1911,70 +2033,67 @@ async fn execute_tool(
         _ => None,
     };
 
-    // Save file snapshots before modification for undo support
+    // Save file snapshots before modification for undo support (async to avoid blocking runtime)
     match tool_name {
         "write_file" | "edit_file" | "delete_file" => {
             if let Some(p) = params["path"].as_str() {
-                save_file_snapshot(&db, session_id, &normalize_file_path(p));
+                save_file_snapshot_async(db.clone(), session_id, normalize_file_path(p)).await;
             }
         }
         "write_files" | "modify_files" => {
             if let Some(files) = params["files"].as_array() {
-                for f in files.iter().filter_map(|f| f.as_object()) {
-                    if let Some(p) = f.get("path").and_then(|p| p.as_str()) {
-                        save_file_snapshot(&db, session_id, &normalize_file_path(p));
-                    }
-                }
+                let paths: Vec<String> = files.iter()
+                    .filter_map(|f| f.as_object())
+                    .filter_map(|f| f.get("path").and_then(|p| p.as_str()))
+                    .map(|p| normalize_file_path(p))
+                    .collect();
+                save_file_snapshots_batch(db.clone(), session_id, paths).await;
             }
         }
         "move_file" => {
+            let mut paths = Vec::new();
             if let Some(src) = params["source"].as_str() {
-                save_file_snapshot(&db, session_id, &normalize_file_path(src));
+                paths.push(normalize_file_path(src));
             }
             if let Some(dst) = params["destination"].as_str() {
-                save_file_snapshot(&db, session_id, &normalize_file_path(dst));
+                paths.push(normalize_file_path(dst));
             }
+            save_file_snapshots_batch(db.clone(), session_id, paths).await;
         }
         "copy_file" => {
             if let Some(dst) = params["destination"].as_str() {
-                save_file_snapshot(&db, session_id, &normalize_file_path(dst));
+                save_file_snapshot_async(db.clone(), session_id, normalize_file_path(dst)).await;
             }
         }
         "multi_edit" | "edit_lines" => {
             if let Some(p) = params["path"].as_str() {
-                save_file_snapshot(&db, session_id, &normalize_file_path(p));
+                save_file_snapshot_async(db.clone(), session_id, normalize_file_path(p)).await;
             }
         }
         "create_dir" => {
-            // Snapshot the directory itself (NULL = didn't exist, undo will delete it)
             if let Some(p) = params["path"].as_str() {
-                save_file_snapshot(&db, session_id, &normalize_file_path(p));
+                save_file_snapshot_async(db.clone(), session_id, normalize_file_path(p)).await;
             }
         }
         "remove_path" => {
             if let Some(p) = params["path"].as_str() {
                 let np = normalize_file_path(p);
                 let path = std::path::Path::new(&np);
+                let mut paths_to_snapshot: Vec<String> = Vec::new();
                 if path.is_dir() {
-                    // Snapshot all files in the directory tree before deletion
                     if std::fs::read_dir(path).is_ok() {
-                        let mut files: Vec<String> = Vec::new();
-                        collect_dir_files(path, &mut files);
-                        for f in &files {
-                            save_file_snapshot(&db, session_id, f);
-                        }
+                        collect_dir_files(path, &mut paths_to_snapshot);
                     }
                 }
-                // Snapshot the path itself (file or dir)
-                save_file_snapshot(&db, session_id, &np);
+                paths_to_snapshot.push(np);
+                save_file_snapshots_batch(db.clone(), session_id, paths_to_snapshot).await;
             }
         }
         "run_command" | "run_background" => {
-            // Snapshot workspace files before command execution
-            if let Some(ref cwd) = params["cwd"].as_str().map(|s| s.to_string())
+            if let Some(cwd) = params["cwd"].as_str().map(|s| s.to_string())
                 .or_else(|| params["path"].as_str().map(|s| s.to_string()))
             {
-                snapshot_workspace_files(&db, session_id, cwd);
+                snapshot_workspace_files(db.clone(), session_id, cwd).await;
             }
         }
         _ => {}

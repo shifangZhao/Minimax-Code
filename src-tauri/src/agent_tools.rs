@@ -13,7 +13,7 @@ use tokio::sync::RwLock;
 use crate::lsp_types::format_diagnostics;
 use crate::{DEFAULT_API_URL, SEARCH_TIMEOUT_SECS, VLM_TIMEOUT_SECS};
 
-use crate::agent_service::{PendingAsks, hidden_cmd, output_with_timeout};
+use crate::agent_service::{PendingAsks, hidden_cmd, async_output_with_timeout, async_execute_via_shell};
 use crate::lsp_manager::LspManager;
 use crate::mcp_service::McpService;
 use crate::skill_service::SkillService;
@@ -150,28 +150,6 @@ fn is_shell_program(program: &str) -> bool {
     matches!(stem, "cmd" | "powershell" | "pwsh" | "sh" | "bash" | "zsh" | "fish" | "wsl" | "dash")
 }
 
-/// Execute a command through the system default shell.
-/// Windows: `cmd /d /s /c` — /d skips autorun, /s handles quote stripping.
-/// Unix: `sh -c`.
-fn execute_via_shell(
-    command: &str,
-    cwd: Option<&str>,
-    timeout_secs: u64,
-    session_id: i64,
-    running_pids: Option<&Arc<StdMutex<HashMap<i64, Vec<u32>>>>>,
-) -> String {
-    let mut cmd = hidden_cmd(if cfg!(windows) { "cmd" } else { "sh" });
-    if cfg!(windows) {
-        cmd.args(["/d", "/s", "/c", command]);
-    } else {
-        cmd.args(["-c", command]);
-    }
-    if let Some(dir) = cwd {
-        cmd.current_dir(dir);
-    }
-    output_with_timeout(&mut cmd, timeout_secs, session_id, running_pids)
-}
-
 // ========== Tool Implementations (Flat) ==========
 
 pub(crate) async fn tool_list_dir(params: &serde_json::Value) -> String {
@@ -280,9 +258,19 @@ pub(crate) async fn tool_read_file(params: &serde_json::Value) -> String {
         if is_binary_file(&path) {
             return format!("Binary file: {} ({} KB). Use a hex editor or specialized tool.", path, meta.len() / 1024);
         }
-        // Large file: outline mode
+        // Large file: outline mode — read once, count lines + preview from memory
         if meta.len() > MAX_SIZE && offset == 0 && limit == 0 {
-            let line_count = count_lines(&path);
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(e) => return format!("Error reading {}: {}", path, e),
+            };
+            let line_count = content.lines().count();
+            let preview: String = content.lines()
+                .take(FILE_OUTLINE_PREVIEW_LINES)
+                .enumerate()
+                .map(|(i, l)| format!("{:>6}| {}", i + 1, l))
+                .collect::<Vec<_>>()
+                .join("\n");
             return format!(
                 "文件过大: {} MB, {} 行，超过 {} MB 限制，内容已截断。\n\
                  使用 offset/limit 参数分段读取其余部分。\n\
@@ -293,7 +281,7 @@ pub(crate) async fn tool_read_file(params: &serde_json::Value) -> String {
                 MAX_SIZE / 1024 / 1024,
                 FILE_OUTLINE_PREVIEW_LINES,
                 line_count,
-                read_line_range(&path, 1, FILE_OUTLINE_PREVIEW_LINES)
+                preview
             );
         }
         // Read with offset/limit
@@ -501,11 +489,16 @@ fn search_recursive_regex(
                 if ext.to_lowercase() != file_type.to_lowercase() { continue; }
             }
             if entry.metadata().map(|m| m.len() > 2_097_152).unwrap_or(false) { continue; }
-            if let Ok(content) = std::fs::read_to_string(&file_path) {
-                for (i, line) in content.lines().enumerate() {
-                    if re.is_match(line) {
-                        results.push((file_path.to_string_lossy().to_string(), (i + 1) as i32, line.trim().to_string()));
-                        if results.len() >= limit { return; }
+            // Use BufReader to read line-by-line — avoids loading entire file into memory
+            if let Ok(file) = std::fs::File::open(&file_path) {
+                use std::io::{BufRead, BufReader};
+                let reader = BufReader::new(file);
+                for (i, line) in reader.lines().enumerate() {
+                    if let Ok(line) = line {
+                        if re.is_match(&line) {
+                            results.push((file_path.to_string_lossy().to_string(), (i + 1) as i32, line.trim().to_string()));
+                            if results.len() >= limit { return; }
+                        }
                     }
                 }
             }
@@ -540,11 +533,16 @@ fn search_recursive_filtered(
                 if ext.to_lowercase() != file_type.to_lowercase() { continue; }
             }
             if entry.metadata().map(|m| m.len() > 2_097_152).unwrap_or(false) { continue; }
-            if let Ok(content) = std::fs::read_to_string(&file_path) {
-                for (i, line) in content.lines().enumerate() {
-                    if line.to_lowercase().contains(pattern) {
-                        results.push((file_path.to_string_lossy().to_string(), (i + 1) as i32, line.trim().to_string()));
-                        if results.len() >= limit { return; }
+            // Use BufReader to read line-by-line — avoids loading entire file into memory
+            if let Ok(file) = std::fs::File::open(&file_path) {
+                use std::io::{BufRead, BufReader};
+                let reader = BufReader::new(file);
+                for (i, line) in reader.lines().enumerate() {
+                    if let Ok(line) = line {
+                        if line.to_lowercase().contains(pattern) {
+                            results.push((file_path.to_string_lossy().to_string(), (i + 1) as i32, line.trim().to_string()));
+                            if results.len() >= limit { return; }
+                        }
                     }
                 }
             }
@@ -594,65 +592,52 @@ pub(crate) async fn tool_run_command(params: &serde_json::Value, session_id: i64
     if command.is_empty() {
         return "Error: command is required".to_string();
     }
-    tokio::task::spawn_blocking(move || {
-        // --- Shell routing strategy ---
-        //
-        // 1. Parse the command. If it contains unquoted shell metacharacters
-        //    (|, >, <, &&) AND the program is NOT already a shell, wrap in
-        //    the system shell. Direct execution would pass metacharacters as
-        //    arguments, silently producing wrong output.
-        // 2. If the program IS a known shell (cmd, powershell, sh, ...),
-        //    execute directly — the LLM explicitly chose how to run it.
-        //    Pipes/redirects inside its quoted arguments are the shell's job.
-        // 3. Simple command → try direct first, fall back to system shell on
-        //    spawn error (handles shell builtins like `echo`, `dir`).
 
-        let (program, args) = parse_command(&command);
-        if program.is_empty() {
-            return "Error: could not parse command".to_string();
-        }
+    // --- Shell routing strategy ---
+    //
+    // 1. Parse the command. If it contains unquoted shell metacharacters
+    //    (|, >, <, &&) AND the program is NOT already a shell, wrap in
+    //    the system shell. Direct execution would pass metacharacters as
+    //    arguments, silently producing wrong output.
+    // 2. If the program IS a known shell (cmd, powershell, sh, ...),
+    //    execute directly — the LLM explicitly chose how to run it.
+    //    Pipes/redirects inside its quoted arguments are the shell's job.
+    // 3. Simple command → try direct first, fall back to system shell on
+    //    spawn error (handles shell builtins like `echo`, `dir`).
 
-        let needs_shell = has_shell_metacharacters(&command);
+    let (program, args) = parse_command(&command);
+    if program.is_empty() {
+        return "Error: could not parse command".to_string();
+    }
 
-        if needs_shell && !is_shell_program(&program) {
-            // Path 1: has pipes/redirects but not already wrapped in shell
-            return execute_via_shell(
-                &command, cwd.as_deref(), timeout_secs, session_id, running_pids.as_ref(),
-            );
-        }
+    let needs_shell = has_shell_metacharacters(&command);
 
-        if is_shell_program(&program) {
-            // Path 2: LLM explicitly chose a shell — execute directly
-            let mut cmd = hidden_cmd(&program);
-            cmd.args(&args);
-            if let Some(ref dir) = cwd {
-                cmd.current_dir(dir);
-            }
-            return output_with_timeout(
-                &mut cmd, timeout_secs, session_id, running_pids.as_ref(),
-            );
-        }
+    if needs_shell && !is_shell_program(&program) {
+        // Path 1: has pipes/redirects but not already wrapped in shell
+        return async_execute_via_shell(
+            &command, cwd.as_deref(), timeout_secs, session_id, running_pids,
+        ).await;
+    }
 
-        // Path 3: simple command — try direct, fall back to shell on error
-        let mut cmd = hidden_cmd(&program);
-        cmd.args(&args);
-        if let Some(ref dir) = cwd {
-            cmd.current_dir(dir);
-        }
-        let result = output_with_timeout(
-            &mut cmd, timeout_secs, session_id, running_pids.as_ref(),
-        );
-        if !result.starts_with("Error spawning command:")
-            && !result.starts_with("Error waiting")
-        {
-            return result;
-        }
+    if is_shell_program(&program) {
+        // Path 2: LLM explicitly chose a shell — execute directly
+        return async_output_with_timeout(
+            &program, &args, cwd.as_deref(), timeout_secs, session_id, running_pids,
+        ).await;
+    }
 
-        // Fallback to system shell
-        execute_via_shell(&command, cwd.as_deref(), timeout_secs, session_id, running_pids.as_ref())
-    })
-    .await
-    .unwrap_or_else(|_| "Task cancelled".to_string())
+    // Path 3: simple command — try direct, fall back to shell on error
+    let result = async_output_with_timeout(
+        &program, &args, cwd.as_deref(), timeout_secs, session_id, running_pids.clone(),
+    ).await;
+    if !result.starts_with("Error spawning command:")
+        && !result.starts_with("Error waiting")
+    {
+        return result;
+    }
+
+    // Fallback to system shell
+    async_execute_via_shell(&command, cwd.as_deref(), timeout_secs, session_id, running_pids).await
 }
 
 pub(crate) async fn tool_write_file(params: &serde_json::Value) -> String {

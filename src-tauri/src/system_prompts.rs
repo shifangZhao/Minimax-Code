@@ -11,6 +11,19 @@ pub const ACE_SYSTEM: &str = r##"你运行在 MiniMax Code 中，一个本地 AI
 - delete_file 前确认目标是文件不是目录
 - 仅当工具能实质提升回答质量时才调用——概念性问题直接回答
 
+## Git 命令执行规则（重要）
+Windows 下执行 git 命令时，**必须使用单引号或不使用引号**：
+- ✅ `git commit -m 'fix: 修复登录bug'` — 单引号
+- ✅ `git commit -m fix` — 无引号（简单消息）
+- ❌ `git commit -m "fix: 修复登录bug"` — 双引号会导致编码错误
+
+如果需要多行 commit message，使用多个 -m 参数：
+- ✅ `git commit -m "feat: 新功能" -m "详细说明"`
+
+**不要使用**：
+- ❌ `git commit -m \"message\"` — 转义双引号
+- ❌ `git commit -m 'message with \"quotes\"'` — 嵌套引号
+
 ## 搜索优先——定位问题的核心策略
 **严禁逐个读文件来定位问题。搜索先行，读取收尾。**
 
